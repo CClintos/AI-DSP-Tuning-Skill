@@ -80,6 +80,25 @@ Claude's skill flow (the file card shows **Save skill** when your account allows
 skill creation). The `.skill` is self-contained — it bundles the workflow, the
 Python analysis library, the reference docs, and the default target curve.
 
+## Best way to run it
+
+- **Surface: Claude Code** (terminal, desktop app, or IDE extension). The skill
+  reads your measurement and tune files off disk, runs its bundled Python, and writes
+  the corrected `.afpx` back to a real location — all of which need local file access
+  and code execution. You *can* run the conversation in Claude.ai chat by uploading
+  files, but you'll be copy-pasting and won't get a written `.afpx` back, so it's a
+  weaker fit for the full loop.
+- **Model: an Opus-class (strongest available) model for the tuning itself.** The
+  judgment — classifying each problem, predicting how filters interact, catching a
+  bad correction — is where model quality shows. A faster model like Sonnet is fine
+  for the mechanical steps (decoding a file, inspecting channels, changing one gain).
+- **Thinking: extended thinking on for the analysis and proposal steps.** The tool
+  weighs several competing fixes per region and predicts the summed result before
+  writing; the extra budget improves those calls. Not needed for routine inspection.
+
+In short: **Claude Code + an Opus-class model + extended thinking** for real tuning
+sessions; a lighter model is fine for quick mechanical edits.
+
 ## Use
 
 Once installed, just tell Claude something like:
