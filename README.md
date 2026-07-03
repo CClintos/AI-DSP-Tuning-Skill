@@ -60,6 +60,72 @@ final word is always "load it, measure again, and listen." But compared to
 one-curve auto-EQ, it makes far better decisions about *what deserves a filter at
 all* — which is where most of the audible difference actually comes from.
 
+## The tuning toolkit, in plain terms
+
+A down-to-earth tour of what the tool actually reaches for, and when. None of these
+are magic bullets — each has a job it's good at and a cost when misused, and the
+skill tries to respect both.
+
+**Parametric EQ — the workhorse.** A bell-shaped boost or cut at a chosen frequency
+and width. Used mostly for *cuts*: taming a peak or a driver resonance. Cuts are
+cheap and safe; boosts eat headroom and can push the DSP toward clipping, so the
+tool prefers turning things down over up, and it models how neighbouring bands
+overlap so a stack of filters doesn't quietly overshoot.
+
+**Shelf filters — broad tone shaping.** A shelf lifts or drops *everything* above or
+below a hinge frequency — a tone control done properly. A low shelf adds broad
+bottom-end weight (a bigger, warmer bass without touching your crossover); a high
+shelf handles the top octaves — most usefully a gentle high-shelf *cut* to take the
+edge off a bright, hard-surfaced cabin. The honest limit: a shelf is for a broad
+tilt, not a specific bump. If a problem starts and ends within a region, that's a
+job for a bell — and the tool actually checks, numerically, whether a shelf can
+reproduce the shape before it uses one.
+
+**All-pass filters — the phase tool most people skip.** This is the interesting one.
+An all-pass changes *nothing* about loudness — it makes nothing louder or quieter.
+What it changes is *timing* (phase) around a chosen frequency. Why would you want
+that? Because when two speakers play the same note — a midbass and a sub through a
+crossover, or your left and right doors — they can arrive slightly out of step and
+partly *cancel*, leaving a dip that no amount of EQ can fill (boost both and they
+still cancel). An all-pass rotates one speaker's timing so they add together instead
+of fighting, filling a null that would otherwise be permanent. The honest costs: it
+adds a little group delay, and a one-sided all-pass can nudge the stereo image. So
+the tool uses it sparingly — only when the measurements actually show two speakers
+cancelling (not just any dip), keeps it as gentle as possible, and tells you to
+confirm the centre image by ear with a mono vocal afterward.
+
+**Delay & polarity — timing first.** Before reaching for an all-pass, the tool
+checks the simpler timing fixes: flipping a speaker's polarity, or nudging its delay
+by a fraction of a millisecond. These have no tonal side effects and often solve a
+crossover problem outright, so they come first. It recommends them rather than
+silently rewriting your time alignment.
+
+### How it actually decides
+
+**It listens like an ear, not a ruler.** Measurements are smoothed the way hearing
+works — broadly down low (where the ear blends things together), more finely up high
+— so it doesn't burn filters "fixing" wrinkles nobody can hear. A peak is treated as
+more objectionable than an equal dip (it is), and the presence region where the ear
+is most sensitive is weighted accordingly.
+
+**It respects the whole car, not one mic spot.** With left/right and multi-position
+measurements it can tell a stable problem from one that only exists at a single
+point, and it keeps left/right corrections matched for a solid centre image unless
+the data proves the two sides genuinely differ.
+
+**It anchors level sensibly.** Rather than chasing an absolute loudness number, it
+matches the *shape* of your target and lets overall level float — so dropping in a
+different target curve just changes the voicing, not the whole tune.
+
+**It stays inside the lines.** Every gain respects the DSP's real limits, your
+crossovers and delays are left exactly as you set them unless you ask, and every
+file it writes is decoded back and checked so you know only the intended changes
+landed.
+
+The through-line: a filter is something you should have to *justify*, not spray at a
+graph. That restraint — plus using the *right kind* of filter for each problem — is
+where the audible improvement really comes from.
+
 ## What you need
 
 - A **Helix / Audiotec Fischer DSP** and its `.afpx` tune file (from DSP PC-Tool).
