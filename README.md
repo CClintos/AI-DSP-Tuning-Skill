@@ -99,6 +99,25 @@ Python analysis library, the reference docs, and the default target curve.
 In short: **Claude Code + an Opus-class model + extended thinking** for real tuning
 sessions; a lighter model is fine for quick mechanical edits.
 
+## Exporting your measurements from REW
+
+Text export is preferred over `.mdat` — the frequency axis is explicit rather than
+reconstructed, and phase comes along with it (which the phase/crossover analysis
+needs). Getting all your measurements out as text is one step:
+
+1. Take your measurements in REW and give them clear names as you go (e.g. `Front L
+   High`, `Front R High`, `Front L Low`, `Front R Low`, `Sub`, `System Sum`,
+   `Tweeters Together`, `Mid Bass Together`) — the names carry over into the exported
+   filenames, and the skill uses them to work out what each trace is.
+2. **File → Export → Export All.** This exports every measurement in your list to
+   text files in one go, using each measurement's name as the filename — no need to
+   select and export them one at a time.
+3. Point Claude at the resulting folder along with your `.afpx` and target curve.
+
+(If your REW build doesn't show "Export All", `File → Export → Export measurement as
+text` does the same thing one measurement at a time — select a measurement, export,
+repeat.)
+
 ## Use
 
 Once installed, just tell Claude something like:
