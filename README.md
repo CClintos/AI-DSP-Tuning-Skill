@@ -112,7 +112,8 @@ needs). Getting all your measurements out as text is one step:
 2. **File → Export → Export All.** This exports every measurement in your list to
    text files in one go, using each measurement's name as the filename — no need to
    select and export them one at a time.
-3. Point Claude at the resulting folder along with your `.afpx` and target curve.
+3. Upload the exported measurement files to Claude along with your `.afpx` and
+   target curve.
 
 (If your REW build doesn't show "Export All", `File → Export → Export measurement as
 text` does the same thing one measurement at a time — select a measurement, export,
