@@ -9,56 +9,32 @@ curve. It decodes both formats, works out what's actually wrong (and — just as
 importantly — what *shouldn't* be touched), writes a corrected `.afpx` within the
 DSP's hardware limits, and verifies every change.
 
-## Why this can do better than trace-matching auto-EQ
+## What it does
 
-Most auto-EQ (including REW's own, and DSP "target match" tools) does one thing:
-look at a single magnitude curve and add filters to flatten it toward the target.
-That's useful, but it's blind to *why* the curve looks the way it does — so it
-happily boosts things that can't be boosted and flattens one microphone position
-at the expense of the rest of the car. This skill is built around the opposite
-idea: **understand the problem before touching it, and change as little as
-possible.** Concretely, it does things trace-matching can't:
+**Reads your files.** Decodes REW measurements (`.mdat` or text export) and Helix
+`.afpx` tunes, auto-detects which channel is which driver from the crossovers, and
+loads any target curve you point it at.
 
-- **Classifies every problem before correcting it.** A dip in the response can be
-  a driver resonance (EQ it), a level imbalance between left and right (change gain,
-  not EQ), a phase cancellation where two speakers fight at a crossover (fix timing,
-  not EQ), or a room/reflection null (leave it alone — boosting wastes headroom and
-  fixes nothing). Auto-EQ treats all four the same and gets three of them wrong.
-- **Detects destructive summation with an interference audit.** Given left, right,
-  and combined measurements, it compares the real combined result against the
-  power-sum of the two sides. If the combination sits *below* that floor, the
-  speakers are cancelling — a phase problem an EQ boost can only paper over. It flags
-  these instead of fighting them.
-- **Knows which dips are even fixable.** Using minimum-phase / excess-group-delay
-  analysis, it separates dips that EQ can genuinely correct from dips that will just
-  move or reappear when you shift the mic an inch. Narrow high-frequency dips almost
-  never survive real listening — it won't chase them.
-- **Fixes crossovers with the right tool, in the right order.** For driver
-  integration it tries polarity, then delay, then an all-pass filter (phase-only)
-  *before* resorting to EQ — the order a good manual tuner uses, because EQ can't fix
-  a timing problem.
-- **Handles phase and imaging deliberately.** All-pass filters are used only when a
-  summation null actually justifies them, with awareness of the group-delay and
-  stereo-image cost — and it verifies centre image with a mono-vocal check rather
-  than trusting the graph.
-- **Models filter interaction and headroom.** It predicts the *combined* result of
-  all filters (bands within an octave overlap and add — naively setting each gain to
-  the deviation overshoots), and tracks how much boost stacks up so it can warn
-  before you clip the DSP.
-- **Scores perceptually, and prizes restraint.** It weights errors by audibility
-  (the ear cares more about a peak than an equal dip, and more about the presence
-  region than deep bass), and optimizes the *whole* measured system rather than
-  flattering one trace. In head-to-head tests, tunes that pushed bigger, more
-  aggressive corrections consistently *lost* to fewer, broader, better-placed ones.
-- **Refuses to guess, and verifies everything.** It never fabricates `.afpx` bytes,
-  never exceeds the DSP's hardware limits, never touches your crossovers or delays
-  unless you ask, and decodes every file it writes back to confirm only the intended
-  changes landed.
+**Analyses the measurement.** Compares your response to the target using ear-based
+(perceptual) smoothing, and sorts each issue into a type — tonal, left/right level
+imbalance, phase cancellation, room/reflection null, or unreliable data — so each one
+gets the right kind of fix instead of a blanket EQ pass. An interference audit spots
+where two speakers are cancelling, and a minimum-phase check flags dips that EQ can't
+usefully correct.
 
-None of this is magic, and it isn't a replacement for a re-measurement: the honest
-final word is always "load it, measure again, and listen." But compared to
-one-curve auto-EQ, it makes far better decisions about *what deserves a filter at
-all* — which is where most of the audible difference actually comes from.
+**Corrects with the right tool.** Uses the full Helix filter set — parametric EQ,
+low/high shelves, and all-pass (phase) filters — plus delay and polarity guidance for
+crossover integration, in the order a good manual tuner works: timing first, EQ last.
+Left/right corrections stay matched for a stable centre image, and filter interaction
+and headroom are modelled so a stack of bands doesn't overshoot or clip the DSP.
+
+**Writes safely and verifies.** Stays inside the DSP's hardware limits, leaves your
+crossovers and delays untouched unless you ask, and decodes every file it writes back
+to confirm only the intended changes landed.
+
+**Keeps you honest.** Predictions from a single measurement aren't the final word —
+it hands back a re-measure and listening checklist, because the loaded, re-measured
+result is the real test.
 
 ## The tuning toolkit, in plain terms
 
