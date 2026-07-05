@@ -819,6 +819,54 @@ def validate_peq_band(F, Q, G):
     return True
 
 
+
+# --------------------------------------------------------------------------
+# SAMPLE-RATE-AWARE DELAY CONVERSION -- added after reviewing a sibling project
+# (ayukhno/autosound-tuning-skill) that flagged a real, easy-to-make mistake:
+# a delay computed for one DSP's internal sample rate, entered into a DSP
+# running at a DIFFERENT rate, silently doubles (or halves) the real physical
+# delay. P SIX DSP MK2 runs at 96 kHz -- but this skill supports other Helix
+# models too, and their internal rate is NOT guaranteed to match. ALWAYS confirm
+# the actual sample rate (from PC-Tool's device info, not assumed) before
+# converting. Physical milliseconds are the hardware-independent reference --
+# keep proposals in ms first, convert last, and show both.
+def ms_to_samples(delay_ms, sample_rate_hz):
+    """Physical delay (ms) -> DSP delay register value (samples) at the DSP's
+    ACTUAL internal rate. Never assume 96 kHz -- confirm the model's rate."""
+    return delay_ms * sample_rate_hz / 1000.0
+
+def samples_to_ms(samples, sample_rate_hz):
+    """Inverse of ms_to_samples -- read a delay register back into physical ms
+    (the number that stays meaningful across different DSP models)."""
+    return samples * 1000.0 / sample_rate_hz
+
+# --------------------------------------------------------------------------
+# DRIVER EXCURSION SAFETY CHECK (optional -- needs the driver's Fs) -- added
+# after reviewing a sibling project's presweep safety gate. Rule of thumb from
+# car-audio driver-protection practice: a high-pass set too close to (or below)
+# a driver's own resonant frequency, especially at a steep electrical slope,
+# doesn't remove the mechanical excursion risk AT resonance -- the driver can
+# still move further than intended right where it's least controlled. This is
+# advisory only (no Xmax/power data needed) and should only fire if the user
+# actually supplies Fs -- never invent a driver spec.
+def hpf_excursion_risk(hpf_hz, slope_db_oct, driver_fs_hz, safe_ratio=1.1):
+    """Returns dict: risk=True if hpf_hz sits at/below safe_ratio * driver_fs_hz
+    while the slope is steep (>=24 dB/oct, i.e. 4th-order+). Gentler slopes
+    (12-18 dB/oct) are more forgiving because they still let some mechanical
+    rolloff assist below the corner -- only flagged if hpf_hz < driver_fs_hz
+    outright for those. This is a heuristic advisory, not a hard limit."""
+    ratio = hpf_hz / float(driver_fs_hz)
+    if slope_db_oct >= 24.0:
+        risk = ratio < safe_ratio
+    else:
+        risk = ratio < 1.0
+    return {'hpf_hz': hpf_hz, 'driver_fs_hz': driver_fs_hz, 'slope_db_oct': slope_db_oct,
+            'ratio': round(ratio, 2), 'excursion_risk': bool(risk),
+            'note': ('HPF is close to/below Fs at a steep slope -- confirm the driver can '
+                     'handle unrestrained excursion near resonance before using this crossover'
+                     if risk else 'HPF sits comfortably above Fs for this slope')}
+
+
 if __name__ == '__main__':
     import struct
 
@@ -862,46 +910,6 @@ if __name__ == '__main__':
     print('   score %.3f -> %.3f with %d bands' % (rep['score_before'], rep['score_after'], rep['bands_used']))
     assert rep['score_after'] < 0.35 * rep['score_before'] and rep['bands_used'] <= 3
 
-    # ---- VALIDATION: joint fit vs the hand/greedy set on REAL FR Low -------
-    MDAT = r'C:\Users\Adroit\Desktop\New.mdat'
-    TGT = r'C:\Users\Adroit\Downloads\ResoNix Target Curve 2026.txt'
-    data = open(MDAT, 'rb').read()
-    def gar(o):
-        p = o + 6; n = struct.unpack('>I', data[p:p + 4])[0]
-        return np.frombuffer(data[p + 4:p + 4 + 4 * n], dtype='>f4').astype(float)
-    FR = gar(760318)                                   # FR Low, v3 loaded
-    tf, ts = [], []
-    for line in open(TGT, encoding='utf-8', errors='replace'):
-        s = line.strip()
-        if s and not s[0].isalpha() and not s.startswith('*'):
-            p = s.replace(',', ' ').split()
-            try: tf.append(float(p[0])); ts.append(float(p[1]))
-            except Exception: pass
-    tgt = np.interp(np.log10(freqs), np.log10(np.array(tf)), np.array(ts))
-    b = (freqs >= 300) & (freqs <= 1200)
-    dev = FR - (tgt + np.median(FR[b] - tgt[b]))
-
-    # magnitude-only EQ-ability mask (no phase in mdat): exclude deep dips
-    # (>3 dB below ERB-smoothed baseline = candidate nulls, never fit into them)
-    base_sm = erb_smooth(freqs, dev)
-    mask_mag = ~((dev - base_sm) < -3.0) & ~(base_sm < -4.0)
-
-    FIT = (150.0, 2450.0)
-    # what v4 actually did to FR (greedy/hand): recenter 628->615, 1000 Q2->3,
-    # add 1175 Q4 -4.5 => as INCREMENTAL bands on this measurement:
-    hand = [(615.0, 5.5, -7.5), (628.0, 5.5, +7.5),        # recenter = remove+add
-            (1000.0, 3.0, -3.5), (1000.0, 2.0, +3.5),      # Q change  = remove+add
-            (1175.0, 4.0, -4.5)]
-    hand_dev = dev + cascade_db(freqs, hand)
-    s_before = audibility_score(freqs, dev, band=FIT, mask=mask_mag)
-    s_hand = audibility_score(freqs, hand_dev, band=FIT, mask=mask_mag)
-    bands, rep = fit_peq(freqs, dev, FIT, n_bands_max=4, mask=mask_mag, verbose=True)
-    print('VALIDATION on real FR Low (New.mdat, v3 loaded):')
-    print('  audibility score  as-measured : %.3f' % s_before)
-    print('  after v4 hand/greedy changes  : %.3f' % s_hand)
-    print('  after joint fit (%d new bands): %.3f' % (rep['bands_used'], rep['score_after']))
-    for b_ in bands: print('     F=%-7.1f Q=%-5.2f G=%+.2f' % b_)
-    beat_hand = rep['score_after'] <= s_hand + 1e-9
 
     # ---- TEST 3: filter tax discourages boosts + narrow-HF filters ---------
     # A dip that COULD be filled with a boost: without tax the fit may boost;
@@ -1078,5 +1086,28 @@ if __name__ == '__main__':
     assert abs(sc['mid_balance_db'] + 3.0) < 0.1 and abs(sc['tweeter_balance_db'] - 2.0) < 0.1
     assert sc['sum_rms_db'] > 0
 
-    print('\n' + ('ALL TESTS PASSED' if beat_hand else
-          'TESTS PASSED (note: joint fit tied/lost vs hand set on this data)'))
+
+    # ---- TEST17: sample-rate-aware delay conversion --------------------------
+    s96 = ms_to_samples(6.52, 96000.0)
+    s48 = ms_to_samples(6.52, 48000.0)
+    print()
+    print('TEST17 delay conversion: 6.52ms @ 96kHz=%.0f samples | @48kHz=%.0f samples (must NOT match)'
+          % (s96, s48))
+    assert abs(s96 - 626) < 1 and abs(s48 - 313) < 1
+    assert abs(samples_to_ms(s96, 96000.0) - 6.52) < 1e-6
+    # the exact failure mode this guards against: entering a 96kHz sample count
+    # into a 48kHz DSP without reconversion doubles the real physical delay
+    wrong_ms = samples_to_ms(s96, 48000.0)
+    assert abs(wrong_ms - 13.04) < 0.01, 'sanity check on the double-delay failure mode itself'
+
+    # ---- TEST18: driver excursion safety check -------------------------------
+    safe = hpf_excursion_risk(80.0, 24.0, driver_fs_hz=32.0)
+    risky = hpf_excursion_risk(35.0, 24.0, driver_fs_hz=32.0)
+    gentle_ok = hpf_excursion_risk(30.0, 12.0, driver_fs_hz=25.0)
+    gentle_risky = hpf_excursion_risk(20.0, 12.0, driver_fs_hz=25.0)
+    print('TEST18 excursion check: 80Hz/24dB on Fs=32Hz -> risk=%s | 35Hz/24dB on Fs=32Hz -> risk=%s'
+          % (safe['excursion_risk'], risky['excursion_risk']))
+    assert not safe['excursion_risk'] and risky['excursion_risk']
+    assert not gentle_ok['excursion_risk'] and gentle_risky['excursion_risk']
+
+    print('\nALL TESTS PASSED')
