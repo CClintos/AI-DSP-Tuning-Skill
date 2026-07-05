@@ -31,15 +31,37 @@ Four per-band EQ modes: **Parametric**, **FineEQ**, **Allpass**, **Shelf**.
 ## Crossovers
 
 Butterworth / Bessel / Tschebyscheff / Linkwitz / Self-Define characteristics,
-slopes up to −42 dB/oct (64-bit / 96 kHz units). **Leave crossovers alone unless the
-user explicitly asks to change them** — a crossover change needs live re-measurement
-to validate and is outside the safe auto-write path.
+slopes up to −42 dB/oct (64-bit DSP units — internal sample rate varies by model,
+see Delay & polarity below). **Leave crossovers alone unless the user explicitly
+asks to change them** — a crossover change needs live re-measurement to validate
+and is outside the safe auto-write path.
 
 ## Delay & polarity
 
-Per-channel delay in samples at 96 kHz (delay_ms = samples / 96) and polarity
-(`PM=1` normal / `PM=4` inverted). Delay writes are lower-risk than all-passes but
-should still be **user-initiated**, not auto-written, and verified by re-measure.
+Per-channel delay in samples and polarity (`PM=1` normal / `PM=4` inverted). Delay
+writes are lower-risk than all-passes but should still be **user-initiated**, not
+auto-written, and verified by re-measure.
+
+**Sample rate is model-specific — never assume it.** The P SIX DSP MK2 runs at
+96 kHz internally, so `delay_ms = samples / 96`. A different Helix model may run at
+a different internal rate. Converting a delay computed for one rate into samples at
+the wrong rate silently doubles (or halves) the real physical delay and wrecks
+alignment — the error won't be obvious from the numbers alone. **Confirm the actual
+internal sample rate for the specific unit (from PC-Tool, not assumed) before doing
+any delay math**, and use `tunelib.ms_to_samples` / `samples_to_ms` with that
+confirmed rate rather than hardcoding 96 kHz. Keep proposals anchored in physical
+milliseconds first — that's the number that stays meaningful across models — and
+convert to samples last.
+
+## Driver excursion safety (optional — only with driver specs)
+
+If the user provides a driver's resonant frequency (Fs), check any high-pass corner
+against it with `tunelib.hpf_excursion_risk`: an HPF set at or below roughly 1.1×
+Fs, especially at a steep slope (≥24 dB/oct), doesn't meaningfully restrain
+mechanical excursion right at resonance — the electrical slope cuts drive but the
+suspension is still least controlled there. This is advisory only (no Xmax/thermal
+data needed) and should **never fire from an invented or assumed Fs** — only when
+the user actually supplies one.
 
 ## Other model notes
 

@@ -39,9 +39,11 @@ Run these with the user's files; they are the deterministic layer.
 - **`tunelib.py`** — the verified analysis + DSP core (import it). Biquad/shelf/
   all-pass math, `interference_audit`, `polarity_delay_search`, `optimize_allpass`,
   `prediction_confidence`, `tune_scorecard`, `headroom_report`, `compression_check`,
-  perceptual scoring, min-phase/excess-group-delay classifier, and the verified
-  filter writers (`allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str`). Run
-  `python tunelib.py` to self-test (prints ALL TESTS PASSED).
+  `hpf_excursion_risk` (optional driver-safety check), `ms_to_samples`/`samples_to_ms`
+  (sample-rate-aware delay conversion — never hardcode a rate), perceptual scoring,
+  min-phase/excess-group-delay classifier, and the verified filter writers
+  (`allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str`). Run `python tunelib.py`
+  to self-test (prints ALL TESTS PASSED).
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
@@ -149,3 +151,13 @@ Give the user a short, specific re-measure + listening checklist.
 6. **Restraint is a feature.** Fewer, broader filters that improve the whole-system
    score beat a pile of narrow fixes that flatter one trace. When unsure, do less.
 7. **Verify every write** and be honest about what is predicted vs measured.
+8. **Re-decode the current `.afpx` fresh before proposing edits — don't rely on
+   memory of an earlier read.** In a long session the user may have changed
+   something in PC-Tool between turns; conversation memory can go stale in a way
+   the file on disk never does.
+9. **Never assume the DSP's internal sample rate.** It's model-specific; confirm it
+   before any delay math (`ms_to_samples`/`samples_to_ms`), and keep proposals in
+   physical milliseconds first, converting to samples last.
+10. **State every proposed change directly in the response** — frequency, gain, Q,
+    and (for delays) both milliseconds and samples — not just "I wrote the file, go
+    check it." The user should be able to act on your message alone.
