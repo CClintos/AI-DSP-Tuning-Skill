@@ -45,6 +45,13 @@ output channel, ~30 filter slots each.
 | `20` | **2nd-order all-pass** (`G=0`, Q meaningful) | any slot |
 
 Notes that have burned people:
+- On `T=15`/`T=16` crossover filters, **`G` encodes the SLOPE in dB/oct, not
+  gain** — VERIFIED 2026-07-07 by controlled diff (`F="6000.00" G="-12"` matched
+  a real screenshot's "-12 dB/Oct"). **`G="0"` means the crossover is NOT
+  engaged**, even though `F=` still holds a stored frequency value — a reader
+  must check `G!=0` before trusting the frequency for anything (role inference
+  included). `afpx.py`'s `channel_summary()` does this now; it previously
+  trusted any stored frequency regardless of whether the slope was actually on.
 - Shelf and all-pass do **not** share a code. (An earlier guess that `T=20` was a
   shelf was wrong — it is the 2nd-order all-pass.)
 - **Switching band 1 or band 30 into shelf mode consumes whatever filter was in
@@ -60,17 +67,20 @@ Notes that have burned people:
 DSP's internal sample rate (model-specific — see `helix_hardware.md`, don't assume
 96 kHz). **Preserve this tag unless the user asks to change timing.**
 
-**Polarity attribute mapping is UNVERIFIED — do not trust it.** It was previously
-claimed that `PM="1"` = normal / `PM="4"` = inverted polarity. A real-world
-counterexample has since surfaced: a sub channel with `PM="4"` that PC-Tool
-displayed as **Normal**, while `P="0"` was present on every channel checked
-regardless of the `PM` value. The likely (not yet confirmed) read is that `P` is
-the real polarity flag and `PM` encodes something else — possibly a delay-entry
-display-unit mode. **Before trusting either attribute for a polarity read or
-write, do a controlled export-diff**: toggle polarity for one channel in PC-Tool,
-export, and diff against the unchanged file to see exactly which attribute (or
-combination) actually flips. Until that's done, `afpx.channels()` reports the raw
-`PM`/`P` values rather than an interpreted normal/inverted label.
+**Polarity is `CINV` on the `<OC>` tag — VERIFIED 2026-07-07 by controlled diff**
+(on a `.pct6` file, same `<OC>` schema as `.afpx`): flipping polarity for one
+channel in PC-Tool changed exactly one thing, `CINV="1"` → `CINV="0"`, and nothing
+else meaningful. `CINV="1"` = inverted, `CINV="0"` = normal.
+
+This closes out a long-standing false lead: it was previously claimed that the
+delay tag's `PM` (`PM="1"` normal / `PM="4"` inverted) controlled polarity — that
+was never confirmed, and the same controlled diff proved it wrong: `PM` and `P`
+on the delay tag **stayed completely identical** across a real, confirmed polarity
+flip. Whatever `PM`/`P` encode (a real-world case showed `PM="4"` displayed as
+*Normal* — plausibly some delay-entry display-unit mode, still not confirmed),
+it isn't polarity. `afpx.channels()` now reports `polarity` from `CINV` (trust
+this) and keeps the delay tag's `PM`/`P` only as raw, uninterpreted context under
+`polarity_delay_tag_raw`.
 
 ## Round-trip gotcha (important for verification)
 

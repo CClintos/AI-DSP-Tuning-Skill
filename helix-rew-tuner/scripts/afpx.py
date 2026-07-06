@@ -57,8 +57,16 @@ def channel_summary(block):
     active = [a for a in fils if a.get('T') != '1']
     hp = next((a for a in fils if a.get('T') == '16'), None)
     lp = next((a for a in fils if a.get('T') == '15'), None)
-    hp_f = float(hp['F']) if hp else None
-    lp_f = float(lp['F']) if lp else None
+    # On T=15/T=16 crossover filters, `G` encodes the SLOPE (dB/oct), not gain --
+    # VERIFIED 2026-07-07 by controlled diff: F="1000.00" G="0" matched a real
+    # screenshot showing that LP's Slope as OFF, while F="6000.00" G="-12" matched
+    # "-12 dB/Oct" on the HP of the same channel. G=="0" means the crossover is
+    # NOT actually engaged -- its frequency must be ignored for role inference,
+    # even though the frequency value is still present in the file.
+    hp_engaged = hp is not None and float(hp.get('G', 0)) != 0
+    lp_engaged = lp is not None and float(lp.get('G', 0)) != 0
+    hp_f = float(hp['F']) if hp_engaged else None
+    lp_f = float(lp['F']) if lp_engaged else None
     role = infer_role(hp_f, lp_f)
     peqs = [(float(a['F']), float(a['Q']), float(a['G']))
             for a in fils if a.get('T') == '17' and float(a.get('G', 0)) != 0]
@@ -68,6 +76,13 @@ def channel_summary(block):
                for a in fils if a.get('T') in ('3', '4') and float(a.get('G', 0)) != 0]
     free_mid = sum(1 for a in fils if a.get('T') == '1' and a.get('dF') not in ('25', '32', '20000'))
     oc = attrs(re.match(r'<OC\b[^>]*>', block).group(0))
+    # Polarity: CINV on the <OC> tag -- VERIFIED 2026-07-07 by controlled diff
+    # (flipping polarity in PC-Tool flipped CINV 1->0 and changed nothing else
+    # meaningful; the delay tag's PM/P attributes did NOT move). Trust CINV, not
+    # PM -- see afpx_format.md for the full account of why PM was a false lead.
+    polarity = None
+    if 'CINV' in oc:
+        polarity = 'inverted' if oc.get('CINV') == '1' else 'normal'
     return {
         'hp_hz': hp_f, 'lp_hz': lp_f, 'inferred_role': role,
         'active_filter_count': len(active),
@@ -75,6 +90,7 @@ def channel_summary(block):
         'free_middle_slots': free_mid,
         'low_shelf_slot_free': any(a.get('T') == '1' and a.get('dF') == '25' for a in fils),
         'high_shelf_slot_free': any(a.get('T') == '1' and a.get('dF') == '20000' for a in fils),
+        'polarity': polarity, 'cinv_raw': oc.get('CINV'),
         'delay_samples': oc.get('__delay__'),  # filled in by channels()
     }
 
@@ -109,13 +125,11 @@ def channels(xml):
         s = channel_summary(b)
         if i < len(delays):
             s['delay_samples'] = delays[i].get('T')
-            # Polarity attribute mapping is UNVERIFIED -- a real-world case showed
-            # PM="4" on a channel PC-Tool displayed as Normal, with P="0" present
-            # regardless of PM. Report the raw attributes rather than asserting an
-            # interpretation until a controlled export-diff confirms which attribute
-            # (if either) actually encodes polarity. See references/afpx_format.md.
-            s['polarity_raw'] = {'PM': delays[i].get('PM'), 'P': delays[i].get('P')}
-            s['polarity'] = 'UNVERIFIED -- see polarity_raw and afpx_format.md'
+            # Polarity comes from CINV on <OC> (set in channel_summary) -- VERIFIED
+            # 2026-07-07, see afpx_format.md. The delay tag's PM/P attributes are
+            # kept here only as raw context; they do NOT reliably encode polarity
+            # (confirmed: PM/P stayed identical across a real polarity flip).
+            s['polarity_delay_tag_raw'] = {'PM': delays[i].get('PM'), 'P': delays[i].get('P')}
         s['index'] = i
         out.append(s)
     # pair guess: consecutive equal-role channels are likely L/R
