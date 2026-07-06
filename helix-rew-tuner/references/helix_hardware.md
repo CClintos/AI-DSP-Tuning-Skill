@@ -38,9 +38,14 @@ and is outside the safe auto-write path.
 
 ## Delay & polarity
 
-Per-channel delay in samples and polarity (`PM=1` normal / `PM=4` inverted). Delay
-writes are lower-risk than all-passes but should still be **user-initiated**, not
-auto-written, and verified by re-measure.
+Per-channel delay in samples. Delay writes are lower-risk than all-passes but
+should still be **user-initiated**, not auto-written, and verified by re-measure.
+
+**Polarity attribute mapping is UNVERIFIED.** See `afpx_format.md` for the full
+account — a real counterexample (a sub channel with `PM="4"` that PC-Tool showed
+as Normal, with `P="0"` present regardless) contradicts the earlier `PM=1/4`
+claim. Don't assert normal/inverted from either attribute until a controlled
+export-diff confirms which one (if either) actually encodes it.
 
 **Sample rate is model-specific — never assume it.** The P SIX DSP MK2 runs at
 96 kHz internally, so `delay_ms = samples / 96`. A different Helix model may run at
@@ -62,6 +67,48 @@ mechanical excursion right at resonance — the electrical slope cuts drive but 
 suspension is still least controlled there. This is advisory only (no Xmax/thermal
 data needed) and should **never fire from an invented or assumed Fs** — only when
 the user actually supplies one.
+
+## Measurement setup gotchas (found during real tuning sessions)
+
+**Digital Input Activation race condition.** If the DSP's input activation is set
+to "Automatic via Signal Detection," the first chirp of an acoustic-timing-reference
+measurement can get eaten mid-switchover — the input hasn't finished waking up yet
+— producing nonsensical multi-second "delay" results that have nothing to do with
+the actual acoustic path. **Fix: set input activation to Manual for the tuning
+session**, or pre-warm the input with REW's "Check Levels" for a few seconds before
+hitting Start, so the switchover has already happened before the reference chirp
+plays.
+
+**Rear-fill matrix routing.** Some installs route rear channels as a stereo-
+difference matrix (e.g. Rear L = 0.5×FL − 0.5×FR) instead of a discrete feed. This
+has real consequences the crossover-based channel-role inference can't see:
+(a) it can't be exercised with mono or dual-mono test content — the difference
+signal is literally zero, so a mono sweep/track will show nothing on that channel
+even if it's working correctly; (b) it should be **excluded from front-stage tonal-
+balance decisions**, since by design it only ever carries the stereo difference,
+not a driver's own direct response. **Ask about rear-channel routing during
+intake** — it's a routing question, separate from (and not detectable from) the
+crossover-based role inference in `afpx.py`.
+
+**Acoustic timing reference vs. XLR/hardware loopback — is it worth buying
+loopback hardware?** A hardware loopback only changes *how* the timing reference is
+established (electrical correlation instead of acoustic correlation via chirp) —
+it changes nothing about the physics being measured, and it does **not** fix
+clipping (gain-staging is a separate, orthogonal problem). Its real value is
+workflow reliability across many repeated sessions (no chirp-detection failures to
+troubleshoot), not incremental tuning accuracy over a clean acoustic-reference
+measurement. Useful framing if a user asks whether dedicated measurement hardware
+is worth buying: it buys convenience and reliability, not more accurate tuning
+data.
+
+**Digital vs. analog signal chain for measurement.** With acoustic timing
+reference active, REW's per-sweep correlation absorbs any fixed bulk-latency
+difference between playback paths — so a "lower latency" analog+ASIO signal chain
+buys no real accuracy advantage over a digital one for tuning purposes. What
+actually matters: **measure through the same signal chain used for real
+listening**, and avoid switching the DSP's input source between measurement and
+listening (this also ties directly into the Digital Input Activation race
+condition above — switching the source can retrigger that same switchover delay).
 
 ## Other model notes
 

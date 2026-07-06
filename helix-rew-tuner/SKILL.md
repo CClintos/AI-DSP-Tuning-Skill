@@ -40,10 +40,14 @@ Run these with the user's files; they are the deterministic layer.
   all-pass math, `interference_audit`, `polarity_delay_search`, `optimize_allpass`,
   `prediction_confidence`, `tune_scorecard`, `headroom_report`, `compression_check`,
   `hpf_excursion_risk` (optional driver-safety check), `ms_to_samples`/`samples_to_ms`
-  (sample-rate-aware delay conversion — never hardcode a rate), perceptual scoring,
-  min-phase/excess-group-delay classifier, and the verified filter writers
-  (`allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str`). Run `python tunelib.py`
-  to self-test (prints ALL TESTS PASSED).
+  (sample-rate-aware delay conversion — never hardcode a rate), `calibrate_solo_levels`
+  (recover true relative level between mismatched-test-level solos before magnitude
+  analysis), `phase_linearity_residual` (quantify single-position phase reliability),
+  `complex_vector_average` (spatial averaging that preserves phase), `inert_band_check`
+  / `reaches_target_after_boost` (sanity checks before trusting a proposed EQ band),
+  perceptual scoring, min-phase/excess-group-delay classifier, and the verified filter
+  writers (`allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str`). Run
+  `python tunelib.py` to self-test (prints ALL TESTS PASSED).
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
@@ -85,6 +89,12 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
 - **Measurement method**: fixed-position sweep (phase-valid → usable for timing/APF)
   vs moving-mic/RTA average (magnitude-only → tonal balance only, NOT phase). This
   distinction gates which corrections are allowed (see methodology).
+- **Rear-channel routing** (if rear channels exist): ask whether they're a discrete
+  feed or a **stereo-difference matrix** (e.g. Rear L = 0.5×FL − 0.5×FR). This isn't
+  detectable from crossovers, so it's a separate question from the channel map
+  above — and it matters: a matrixed rear reads as silent on mono test content (the
+  difference is zero by design) and should be **excluded from front-stage tonal-
+  balance decisions**, since it never carries a driver's own direct response.
 
 ### 2. Validate the data before trusting it
 

@@ -56,9 +56,21 @@ Notes that have burned people:
 
 ## Delay / polarity
 
-`<T T="samples" PM="1|4" .../>` per channel at the DSP's internal rate (P SIX:
-96 kHz, so delay_ms = samples / 96). `PM="1"` normal, `PM="4"` inverted polarity.
-Preserve these unless the user asks to change timing.
+`<T T="samples" PM="..." P="..." .../>` per channel, with delay in samples at the
+DSP's internal sample rate (model-specific — see `helix_hardware.md`, don't assume
+96 kHz). **Preserve this tag unless the user asks to change timing.**
+
+**Polarity attribute mapping is UNVERIFIED — do not trust it.** It was previously
+claimed that `PM="1"` = normal / `PM="4"` = inverted polarity. A real-world
+counterexample has since surfaced: a sub channel with `PM="4"` that PC-Tool
+displayed as **Normal**, while `P="0"` was present on every channel checked
+regardless of the `PM` value. The likely (not yet confirmed) read is that `P` is
+the real polarity flag and `PM` encodes something else — possibly a delay-entry
+display-unit mode. **Before trusting either attribute for a polarity read or
+write, do a controlled export-diff**: toggle polarity for one channel in PC-Tool,
+export, and diff against the unchanged file to see exactly which attribute (or
+combination) actually flips. Until that's done, `afpx.channels()` reports the raw
+`PM`/`P` values rather than an interpreted normal/inverted label.
 
 ## Round-trip gotcha (important for verification)
 
