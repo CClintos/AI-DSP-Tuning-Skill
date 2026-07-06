@@ -56,13 +56,21 @@ def channel_summary(block):
     fils = [attrs(f) for f in filters(block)]
     active = [a for a in fils if a.get('T') != '1']
     hp = next((a for a in fils if a.get('T') == '16'), None)
-    lp = next((a for a in fils if a.get('T') == '15'), None)
-    # On T=15/T=16 crossover filters, `G` encodes the SLOPE (dB/oct), not gain --
-    # VERIFIED 2026-07-07 by controlled diff: F="1000.00" G="0" matched a real
-    # screenshot showing that LP's Slope as OFF, while F="6000.00" G="-12" matched
-    # "-12 dB/Oct" on the HP of the same channel. G=="0" means the crossover is
-    # NOT actually engaged -- its frequency must be ignored for role inference,
-    # even though the frequency value is still present in the file.
+    # Lowpass isn't always T=15 -- VERIFIED 2026-07-07: a Butterworth-characteristic
+    # lowpass on a real file was encoded as T=9, not T=15 (T=15 has so far only been
+    # seen on Linkwitz-characteristic filters). The crossover type code family
+    # appears to vary by characteristic (Linkwitz/Butterworth/Bessel/etc.), not
+    # just by LP-vs-HP -- treat T=15/T=9 as the LP codes confirmed so far, not
+    # necessarily the complete set. If a channel's role won't classify and it has
+    # an unrecognized T code with a plausible crossover-like F/G/Q shape, that's
+    # worth investigating rather than assuming it's just an unused/PEQ slot.
+    lp = next((a for a in fils if a.get('T') in ('15', '9')), None)
+    # On crossover filters, `G` encodes the SLOPE (dB/oct), not gain -- VERIFIED
+    # 2026-07-07 by controlled diff: F="1000.00" G="0" matched a real screenshot
+    # showing that LP's Slope as OFF, while F="6000.00" G="-12" matched "-12 dB/Oct"
+    # on the HP of the same channel. G=="0" means the crossover is NOT actually
+    # engaged -- its frequency must be ignored for role inference, even though the
+    # frequency value is still present in the file.
     hp_engaged = hp is not None and float(hp.get('G', 0)) != 0
     lp_engaged = lp is not None and float(lp.get('G', 0)) != 0
     hp_f = float(hp['F']) if hp_engaged else None

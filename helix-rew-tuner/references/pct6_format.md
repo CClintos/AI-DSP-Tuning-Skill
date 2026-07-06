@@ -78,9 +78,33 @@ tried before.
 - **Polarity and crossover-slope encoding are shared with `.afpx` and are now
   confirmed** — see `afpx_format.md`: `CINV` on `<OC>` is the real polarity
   flag (not the delay tag's `PM`/`P`, which was a false lead), and `G` on a
-  `T=15`/`T=16` crossover filter is the slope in dB/oct, where `G="0"` means
-  the crossover isn't actually engaged even if a frequency is still stored.
-  Both were confirmed by controlled diff on a real `.pct6` file.
+  crossover filter is the slope in dB/oct, where `G="0"` means the crossover
+  isn't actually engaged even if a frequency is still stored. Both were
+  confirmed by controlled diff on a real `.pct6` file.
+- **Lowpass isn't always `T="15"`.** VERIFIED 2026-07-07: a Butterworth-
+  characteristic lowpass was encoded as **`T="9"`**, not `T="15"` (`T="15"` has
+  so far only been seen on Linkwitz-characteristic filters). The crossover
+  type-code family likely varies **by characteristic** (Linkwitz, Butterworth,
+  Bessel, Tschebyscheff, Self-Define), not just by LP-vs-HP direction — only
+  `T=15` and `T=9` are confirmed as LP so far, and no Butterworth/Bessel/etc.
+  HP code has been observed yet. `afpx.py` now checks both `T=15` and `T=9`
+  for lowpass; treat this as an evolving map, not a complete one. If a
+  channel's role won't classify and it has an unrecognized `T` code shaped
+  like a crossover filter (F/G/Q present, G acting like a slope), that's worth
+  investigating rather than assuming it's an unused slot.
+- **Per-channel output level ("Channel Gain & Output Level" in PC-Tool) is
+  NOT in the `<OC>` block at all** — it lives in separate `<Vol L="..."/>`
+  tags elsewhere in the file, one linear-gain multiplier per channel
+  (`dB = 20*log10(L)`). VERIFIED 2026-07-07 by controlled diff (two channels
+  set to −3.50 dB and −4.50 dB in PC-Tool decoded to `L` values that convert
+  back to exactly −3.50 and −4.50). On the one file checked (22 total
+  channels, 10 active), the **last 10 `Vol` tags matched the 10 active output
+  channels in order** (confirmed against 4 independent screenshot values with
+  zero error) — but the **first 8 entries' meaning is not yet understood**
+  (possibly the 12 input channels, only partially represented, or something
+  else) and the "skip the first N" offset may not generalize to a
+  differently-configured unit. Don't assume this indexing holds without
+  re-confirming it on any other file.
 - **There's a real routing matrix** (`<Route><R G0=".." ... G143=".." /></Route>`,
   a 12×12 grid for a 12-input unit) separate from the per-channel blocks —
   structure confirmed (mostly zero, non-zero entries cleanly share an index),
