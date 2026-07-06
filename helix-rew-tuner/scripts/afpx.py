@@ -109,7 +109,13 @@ def channels(xml):
         s = channel_summary(b)
         if i < len(delays):
             s['delay_samples'] = delays[i].get('T')
-            s['polarity'] = 'inverted' if delays[i].get('PM') == '4' else 'normal'
+            # Polarity attribute mapping is UNVERIFIED -- a real-world case showed
+            # PM="4" on a channel PC-Tool displayed as Normal, with P="0" present
+            # regardless of PM. Report the raw attributes rather than asserting an
+            # interpretation until a controlled export-diff confirms which attribute
+            # (if either) actually encodes polarity. See references/afpx_format.md.
+            s['polarity_raw'] = {'PM': delays[i].get('PM'), 'P': delays[i].get('P')}
+            s['polarity'] = 'UNVERIFIED -- see polarity_raw and afpx_format.md'
         s['index'] = i
         out.append(s)
     # pair guess: consecutive equal-role channels are likely L/R

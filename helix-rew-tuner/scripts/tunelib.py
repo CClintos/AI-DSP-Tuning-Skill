@@ -697,12 +697,13 @@ def compression_check(low_db, high_db, level_delta_db, warn_db=0.75):
 
 
 # --------------------------------------------------------------------------
-# 3f) SHELF SIMULATION -- added 2026-07-03. RBJ low/high shelf (Q form), matching
-# the Helix shelf parameterization (Q 0.1-2 IS the slope control; hinge freq in
-# 1 Hz steps; band 1 = low-shelf-capable, band 30 = high-shelf-capable).
-# SIMULATION ONLY: the active-shelf XML encoding (T=20 with G!=0) is still NOT
-# export-diff-verified -- design the shelf here, set it manually in PC-Tool,
-# then send the export back to verify the encoding before any Python shelf write.
+# 3f) SHELF SIMULATION -- RBJ low/high shelf (Q form), matching the Helix shelf
+# parameterization (Q 0.1-2 IS the slope control; hinge freq in 1 Hz steps;
+# band 1 = low-shelf-capable, band 30 = high-shelf-capable). The active-shelf
+# XML encoding is T=3 (low) / T=4 (high) with G!=0 -- export-diff-VERIFIED (see
+# shelf_fil_str below and afpx_format.md). T=20 is the 2nd-order ALL-PASS, not
+# a shelf -- an earlier, now-corrected note here said otherwise; don't trust
+# any surviving reference to "T=20 shelf" elsewhere as anything but stale.
 def low_shelf_db(freqs, f0, Q, gain_db, fs=FS):
     A = 10 ** (gain_db / 40.0)
     w0 = 2 * np.pi * f0 / fs
@@ -865,6 +866,109 @@ def hpf_excursion_risk(hpf_hz, slope_db_oct, driver_fs_hz, safe_ratio=1.1):
             'note': ('HPF is close to/below Fs at a steep slope -- confirm the driver can '
                      'handle unrestrained excursion near resonance before using this crossover'
                      if risk else 'HPF sits comfortably above Fs for this slope')}
+
+
+
+# --------------------------------------------------------------------------
+# SOLO-LEVEL CALIBRATION -- added after a real-session finding: solos are often
+# necessarily captured at different test levels (e.g. a sub measured much
+# quieter than the mids under an aggressive bass shelf, to avoid clipping).
+# Phase is level-independent, so this never hurts timing work (polarity_delay_
+# search, optimize_allpass) -- but any MAGNITUDE-based joint check
+# (interference_audit, prediction_confidence, tune_scorecard) needs the real
+# relative level recovered first, or it will "detect" a fake cancellation/gap
+# that's actually just a test-level mismatch.
+def calibrate_solo_levels(freqs, solo_db, together_db, band):
+    """Fit a scalar dB offset to solo_db so that its incoherent contribution best
+    explains together_db over `band` (least-squares on a log scale). Returns the
+    fitted offset (add to solo_db) and the residual rms (post-calibration --
+    use THIS as the real confidence number, not the raw pre-fit deviation)."""
+    sel = (freqs >= band[0]) & (freqs <= band[1])
+    if not np.any(sel):
+        raise ValueError('band does not overlap axis')
+    diff = together_db[sel] - solo_db[sel]
+    offset = float(np.median(diff))
+    resid = together_db[sel] - (solo_db[sel] + offset)
+    return {'level_offset_db': round(offset, 2),
+            'residual_rms_db': round(float(np.sqrt(np.mean(resid ** 2))), 2)}
+
+# --------------------------------------------------------------------------
+# PHASE RELIABILITY SCORE -- a single fixed-position sweep can have excellent
+# magnitude data but garbage phase above a few hundred Hz, because reflections
+# dominate the fine structure while the ear (and REW's own averaging) still
+# reports something. Quantify it instead of guessing: real driver phase is
+# close to a straight line vs frequency over its own passband (it's dominated
+# by acoustic path delay); reflections add high-frequency wiggle on top.
+def phase_linearity_residual(freqs, phase_deg, band):
+    """RMS residual (degrees) of unwrapped phase vs frequency after removing the
+    best-fit straight line (i.e. removing pure delay) over `band`. Rule of thumb
+    from real sessions: <=~100 deg = trustworthy for timing decisions; >~300-450
+    deg = reflection-dominated, do not use for polarity/delay/APF work."""
+    sel = (freqs >= band[0]) & (freqs <= band[1])
+    if np.sum(sel) < 3:
+        raise ValueError('band does not overlap enough of the axis')
+    ph = np.unwrap(np.deg2rad(phase_deg[sel]))
+    ph = np.rad2deg(ph)
+    f = freqs[sel]
+    slope, intercept = np.polyfit(f, ph, 1)
+    resid = ph - (slope * f + intercept)
+    rms = float(np.sqrt(np.mean(resid ** 2)))
+    return {'rms_residual_deg': round(rms, 1),
+            'trustworthy_for_timing': bool(rms <= 100.0),
+            'grade': ('trustworthy' if rms <= 100.0 else
+                     'marginal' if rms <= 300.0 else 'reflection-dominated (do not use)')}
+
+# --------------------------------------------------------------------------
+# COMPLEX (VECTOR) AVERAGING ACROSS MIC POSITIONS -- a sweep only takes a few
+# seconds, so don't move the mic mid-sweep. Instead take several (3-7) discrete
+# sweeps at slightly different fixed positions spanning head-width, then vector-
+# average the COMPLEX spectra (not magnitude-only). This cancels position-
+# specific comb-filtering (which differs per position) while preserving the
+# real driver phase (which is common to all of them) -- a magnitude-only
+# average would keep the comb-filtering artifacts baked into the average level.
+def complex_vector_average(complex_traces):
+    """complex_traces: list of complex ndarrays on the SAME frequency grid (one
+    per mic position). Returns the vector-averaged complex response -- take
+    20*log10(abs(.)) for magnitude, angle(.) for phase."""
+    if len(complex_traces) < 2:
+        raise ValueError('need >=2 position traces to average')
+    stack = np.stack(complex_traces, axis=0)
+    return np.mean(stack, axis=0)
+
+# --------------------------------------------------------------------------
+# "INERT BAND" CHECK -- before trusting a proposed (or externally-supplied) EQ
+# band, confirm the target driver actually has enough LEVEL at that frequency
+# to matter in the sum. A cut/boost on a driver that's already >~6 dB below
+# whichever driver dominates the summed response at that frequency is
+# essentially cosmetic -- it changes that driver's own curve but barely moves
+# the audible result, because the dominant driver's contribution swamps it.
+def inert_band_check(target_driver_db, dominant_db, threshold_db=6.0):
+    """Returns dict: inert=True if target_driver_db sits threshold_db or more
+    below dominant_db at the frequency in question -- the band is cosmetic,
+    not corrective, and shouldn't be trusted as a real fix for that frequency."""
+    gap = dominant_db - target_driver_db
+    return {'gap_db': round(float(gap), 2), 'inert': bool(gap >= threshold_db),
+            'note': ('target driver is buried -- this band barely affects the sum'
+                     if gap >= threshold_db else 'target driver has enough level to matter here')}
+
+# --------------------------------------------------------------------------
+# "DOES IT ACTUALLY REACH TARGET" CHECK -- pair with interference_audit. If a
+# large proposed boost STILL leaves the trace far short of the deficit at that
+# frequency, the boost isn't the fix -- the problem is phase/destructive
+# interference eating the signal, and no amount of gain on one driver alone
+# recovers it (a coherent partner is still cancelling it). Confirms wasted
+# headroom vs a real correctable magnitude shortfall.
+def reaches_target_after_boost(current_db, target_db, proposed_boost_db, max_boost_db=6.0):
+    """Simulates applying proposed_boost_db (capped at hardware max_boost_db) and
+    checks whether the result actually reaches target_db. still_short_db > 0
+    with a boost already at/near the hardware ceiling is the signature of a
+    phase problem masquerading as a magnitude one -- don't keep boosting."""
+    applied = min(float(proposed_boost_db), float(max_boost_db))
+    after = current_db + applied
+    short = target_db - after
+    return {'boost_applied_db': round(applied, 2), 'result_db': round(after, 2),
+            'still_short_db': round(float(short), 2),
+            'likely_phase_problem': bool(short > 1.5 and applied >= max_boost_db - 0.25)}
 
 
 if __name__ == '__main__':
@@ -1109,5 +1213,53 @@ if __name__ == '__main__':
           % (safe['excursion_risk'], risky['excursion_risk']))
     assert not safe['excursion_risk'] and risky['excursion_risk']
     assert not gentle_ok['excursion_risk'] and gentle_risky['excursion_risk']
+
+
+    # ---- TEST19: solo-level calibration ---------------------------------------
+    A19 = np.full_like(freqs, 70.0)              # solo captured 8dB quieter than
+    together19 = np.full_like(freqs, 70.0) + 8.0  # its true contribution to "together"
+    cal = calibrate_solo_levels(freqs, A19, together19, (200, 2000))
+    print()
+    print('TEST19 solo-level calibration: offset=%.1fdB (expect +8) residual=%.2f'
+          % (cal['level_offset_db'], cal['residual_rms_db']))
+    assert abs(cal['level_offset_db'] - 8.0) < 0.1 and cal['residual_rms_db'] < 0.1
+
+    # ---- TEST20: phase reliability score ---------------------------------------
+    f20 = freqs[(freqs >= 300) & (freqs <= 3000)]
+    clean_phase = -0.02 * f20                                    # pure delay, dead straight
+    noisy_phase = clean_phase + 200.0 * np.sin(f20 / 60.0)         # reflection wiggle
+    ph_clean_full = np.interp(freqs, f20, clean_phase)
+    ph_noisy_full = np.interp(freqs, f20, noisy_phase)
+    r_clean = phase_linearity_residual(freqs, ph_clean_full, (300, 3000))
+    r_noisy = phase_linearity_residual(freqs, ph_noisy_full, (300, 3000))
+    print('TEST20 phase reliability: clean=%.1fdeg (%s) | noisy=%.1fdeg (%s)'
+          % (r_clean['rms_residual_deg'], r_clean['grade'],
+             r_noisy['rms_residual_deg'], r_noisy['grade']))
+    assert r_clean['trustworthy_for_timing'] and not r_noisy['trustworthy_for_timing']
+
+    # ---- TEST21: complex vector averaging --------------------------------------
+    base = np.ones_like(freqs, dtype=complex)
+    comb1 = base * (1 + 0.3 * np.exp(1j * freqs / 200.0))   # position-specific comb
+    comb2 = base * (1 + 0.3 * np.exp(1j * (freqs / 200.0 + 2.1)))
+    comb3 = base * (1 + 0.3 * np.exp(1j * (freqs / 200.0 + 4.2)))
+    avg = complex_vector_average([comb1, comb2, comb3])
+    print('TEST21 vector avg: mean |avg-base| = %.3f (expect << 0.3, combing cancels)'
+          % np.mean(np.abs(avg - base)))
+    assert np.mean(np.abs(avg - base)) < 0.15
+
+    # ---- TEST22: inert band check ----------------------------------------------
+    buried = inert_band_check(target_driver_db=60.0, dominant_db=75.0)
+    audible = inert_band_check(target_driver_db=72.0, dominant_db=75.0)
+    print('TEST22 inert band: buried(15dB down)=%s | audible(3dB down)=%s'
+          % (buried['inert'], audible['inert']))
+    assert buried['inert'] and not audible['inert']
+
+    # ---- TEST23: reaches-target-after-boost ------------------------------------
+    r_ok = reaches_target_after_boost(current_db=70.0, target_db=74.0, proposed_boost_db=4.0)
+    r_phase = reaches_target_after_boost(current_db=60.0, target_db=74.0, proposed_boost_db=6.0)
+    print('TEST23 reaches target: ok-case short=%.1f (flag=%s) | phase-case short=%.1f (flag=%s)'
+          % (r_ok['still_short_db'], r_ok['likely_phase_problem'],
+             r_phase['still_short_db'], r_phase['likely_phase_problem']))
+    assert not r_ok['likely_phase_problem'] and r_phase['likely_phase_problem']
 
     print('\nALL TESTS PASSED')

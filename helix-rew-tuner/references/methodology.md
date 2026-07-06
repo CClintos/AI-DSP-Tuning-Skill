@@ -4,6 +4,38 @@ This is the judgment layer. The scripts give you numbers; this tells you what th
 mean and which action type each problem calls for. The overarching bias: **classify
 before correcting, and prefer doing less.**
 
+## Sweep capture setup (before you have data to analyze)
+
+Bad capture produces confidently-wrong analysis no amount of downstream care can
+fix. A few things to get right before trusting a measurement:
+
+- **Frequency range per driver**: sweep roughly one octave below the driver's low
+  crossover corner to one–two octaves above its high corner — not REW's full
+  10 Hz–24 kHz default. A full-range sweep on a bandpassed midrange wastes
+  resolution outside its passband and can make out-of-band noise look like signal.
+- **Test level, not DSP gain, is the lever for clipping.** If a driver clips or
+  audibly resonates during a sweep but is clean on pink noise or music, that's
+  expected, not a fault — a sustained sweep tone holds energy at each frequency far
+  longer than any transient content ever does, exciting mechanical resonances music
+  never triggers. **Fix it by lowering REW's sweep level (dBFS)**, never by
+  touching live DSP gain "just for the measurement" — a gain change there is a real
+  tune edit, not a measurement setting, and it's easy to forget to revert.
+- **Mismatched levels across solos are expected and fine — but must be corrected
+  before joint magnitude analysis.** Solos are often necessarily captured at
+  different test levels (e.g. a sub measured much quieter than the mids under an
+  aggressive bass shelf, to keep the sweep clean). Phase is level-independent, so
+  this never hurts polarity/delay/all-pass work. But `interference_audit`,
+  `prediction_confidence`, and `tune_scorecard` are magnitude-based and will
+  "detect" a fake gap or cancellation that's actually just a level mismatch between
+  captures. Run `tunelib.calibrate_solo_levels` first to fit the real relative
+  level, and treat its post-calibration residual — not the raw pre-fit deviation —
+  as the actual confidence number.
+- **Trust REW's own reported timing method before trusting the data.** REW's
+  export header states which arrival-detection method was used for that
+  measurement — "IR start time" (robust) vs. "estimated IR delay" (fragile). Treat
+  the latter, and anything carrying a correlation warning, as **unusable for
+  delay/time-alignment decisions** until it's re-measured cleanly.
+
 ## Deviation analysis
 
 1. Interpolate the target onto the measurement grid, then **anchor the level** —
@@ -41,12 +73,56 @@ For each region, decide the **type** before proposing a fix:
 problem, not an EQ problem. This is how you tell a genuine cancellation from a
 driver dip. Requires both solos + the measured pair.
 
+### Two checks to run before trusting any proposed EQ band
+
+**Is the band even audible, or is it cosmetic?** Before trusting a proposed (or
+externally-supplied) EQ band, confirm the target driver actually has enough level
+at that frequency to matter in the sum. `tunelib.inert_band_check(target_driver_db,
+dominant_db)` flags a band as **inert** when the target driver sits ~6 dB or more
+below whichever driver dominates the summed response there — a cut or boost on a
+buried driver changes that driver's own curve but barely moves the audible result,
+because the dominant driver's contribution swamps it.
+
+**Does the boost actually reach target, or is the gap being papered over?** If a
+large proposed boost still leaves the trace far short of the deficit at that
+frequency, the boost isn't the fix — the shortfall is phase/destructive
+interference eating the signal, and no amount of gain on one driver alone recovers
+it (a coherent partner is still cancelling it there). `tunelib.
+reaches_target_after_boost(current_db, target_db, proposed_boost_db)` simulates the
+boost (capped at the hardware ceiling) and flags `likely_phase_problem` when the
+result still falls short with the boost already maxed out. Run this alongside
+`interference_audit` before accepting a claimed improvement — a boost that can't
+reach target is wasted headroom, not a real fix.
+
 ### Minimum-phase / EQ-ability
 
 Flat excess group delay ⇒ minimum-phase region ⇒ EQ works. Sharp excess-GD
 excursions ⇒ non-minimum-phase ⇒ EQ won't generalize. `tunelib.excess_gd_mask`
 flags regions to leave alone. Narrow high-frequency dips are almost never worth
 correcting — they don't survive small mic movement.
+
+### Quantify single-position phase reliability before trusting it
+
+A single fixed-position sweep can have excellent magnitude and still have garbage
+phase above a few hundred Hz — reflections dominate the fine structure of the
+phase curve long before they visibly wreck the magnitude curve. Don't guess; check.
+Real driver phase is close to a straight line vs. frequency over its own passband
+(dominated by acoustic path delay); reflections add wiggle on top of that line.
+`tunelib.phase_linearity_residual(freqs, phase_deg, band)` fits that line and
+returns the RMS residual in degrees — a concrete reliability score. From real
+sessions: **≤~100° = trustworthy** for polarity/delay/APF decisions (seen on clean
+midbass data); **~300–450°+ = reflection-dominated garbage** (seen on single-
+position tweeter data) — don't use it for timing, no matter how clean the
+magnitude trace looks.
+
+**The fix, if reliability is poor: spatial averaging, done correctly.** A sweep
+only takes a few seconds — don't move the mic mid-sweep. Instead take several
+(3–7) discrete sweeps at slightly different fixed positions spanning head-width,
+then average the **complex** spectra with `tunelib.complex_vector_average`, not a
+magnitude-only average. Vector averaging cancels position-specific comb-filtering
+(which differs per position) while preserving the real driver phase (which is
+common to all of them); a magnitude-only average would just bake the comb-
+filtering artifacts into the averaged level instead of cancelling them.
 
 ## The crossover action-ladder (cheapest, safest first)
 
@@ -118,3 +194,12 @@ Predictions from magnitude (RTA/MMM) data don't capture phase outcomes. Always e
 by telling the user which claims are *predicted* vs *measured*, and give a specific
 re-measure + listening checklist — the loaded-and-re-measured result is the only
 real proof.
+
+**Extend the same skepticism to a candidate you didn't produce yourself.** This
+applies "re-decode fresh, don't trust memory" (see SKILL.md's non-negotiables) to
+external candidates too: when another AI, an optimizer, or an earlier session hands
+you a candidate `.afpx` with a self-reported score, check what measurement files
+and baseline tune it actually used to compute that score — file dates catch a stale
+comparison fast. A score computed against data that's since changed is meaningless
+even if it's internally consistent and the math checks out. **Always reproduce the
+claimed score yourself against the current session's data** before accepting it.
