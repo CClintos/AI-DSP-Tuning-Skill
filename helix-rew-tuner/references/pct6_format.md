@@ -3,8 +3,8 @@
 > **BETA — much less proven than `.afpx`.** Personal/interoperability use on
 > hardware you (or someone you're directly helping) own — not a general-purpose
 > cracking tool, and not something to build a public service or wide
-> redistribution on top of. Verified against real files on **PC-Tool 6.01.08
-> only**. If you're on a different PC-Tool 6 version, verify decode actually
+> redistribution on top of. Verified against real files on **PC-Tool 6.01.08 and
+> 6.03.04**. If you're on a different PC-Tool 6 version, verify decode actually
 > produces plausible `<ATF ...>` XML before trusting it — don't assume the key
 > below still applies.
 
@@ -56,6 +56,15 @@ tried before.
 - **More channels** (up to 22 seen) — `afpx.py`'s channel functions already
   handle an arbitrary count, no changes needed, but channel-role inference
   from crossovers matters even more here (more channels to keep straight).
+- **`<OC>` block order does NOT necessarily match the Output A/B/C... tab
+  order shown in PC-Tool.** VERIFIED 2026-07-07 on a real 22-channel file: the
+  first 12 `<OC>` blocks (index 0–11) were unused, and **Output A** (confirmed
+  via a matching delay value cross-checked against a screenshot) was actually
+  **`<OC>` index 12**, not index 0. Don't assume file order == UI order on a
+  `.pct6` with unused/reserved channels — anchor at least one channel against
+  a real screenshot value (a distinctive delay in ms, converted to samples, is
+  a good anchor) before trusting the rest, then extend via the existing
+  consecutive-same-role L/R pairing logic in `afpx.channels()`.
 - **Decoded XML is not always strictly well-formed** — one attribute (`AV=`)
   has been seen containing raw binary that would break a real XML parser.
   This is fine for `afpx.py`'s regex-based parsing (it never used
@@ -66,6 +75,17 @@ tried before.
   treat it as a working hypothesis to confirm with a controlled test (set a
   known filter in PC-Tool 6, save, decode, check the `T=` value matches
   expectation) before writing anything back for real.
+- **Polarity and crossover-slope encoding are shared with `.afpx` and are now
+  confirmed** — see `afpx_format.md`: `CINV` on `<OC>` is the real polarity
+  flag (not the delay tag's `PM`/`P`, which was a false lead), and `G` on a
+  `T=15`/`T=16` crossover filter is the slope in dB/oct, where `G="0"` means
+  the crossover isn't actually engaged even if a frequency is still stored.
+  Both were confirmed by controlled diff on a real `.pct6` file.
+- **There's a real routing matrix** (`<Route><R G0=".." ... G143=".." /></Route>`,
+  a 12×12 grid for a 12-input unit) separate from the per-channel blocks —
+  structure confirmed (mostly zero, non-zero entries cleanly share an index),
+  but exact input/output semantics are **not yet confirmed** — that needs a
+  controlled diff on the Signal Management (IO) tab, not done yet.
 
 ## Don't commit real `.pct6` sample files to this repo
 
