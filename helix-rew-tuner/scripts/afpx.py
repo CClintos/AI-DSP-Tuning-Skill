@@ -78,7 +78,11 @@ def channel_summary(block):
     role = infer_role(hp_f, lp_f)
     peqs = [(float(a['F']), float(a['Q']), float(a['G']))
             for a in fils if a.get('T') == '17' and float(a.get('G', 0)) != 0]
-    apfs = [(TYPE[a['T']], float(a['F']), float(a.get('Q', 0)))
+    # Q on a T=19 (1st-order all-pass) is not real data -- VERIFIED 2026-07-07:
+    # PC-Tool shows "Q: N/A for 1st order" even when the file stores a nonzero
+    # Q (likely left over from when the band was a 2nd-order all-pass). Report
+    # None rather than a number that looks meaningful but isn't.
+    apfs = [(TYPE[a['T']], float(a['F']), None if a['T'] == '19' else float(a.get('Q', 0)))
             for a in fils if a.get('T') in ('19', '20')]
     shelves = [(TYPE[a['T']], float(a['F']), float(a['Q']), float(a['G']))
                for a in fils if a.get('T') in ('3', '4') and float(a.get('G', 0)) != 0]

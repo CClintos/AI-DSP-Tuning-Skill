@@ -41,10 +41,17 @@ output channel, ~30 filter slots each.
 | `15` / `16` | LP / HP crossover — **do not touch** unless asked | fixed |
 | `3` | **Low shelf** (active when `G≠0`) | band 1 / `dF="25"` only |
 | `4` | **High shelf** (active when `G≠0`) | band 30 / `dF="20000"` only |
-| `19` | **1st-order all-pass** (`G=0`, no Q → written `Q="1"`) | any slot incl. middle |
+| `19` | **1st-order all-pass** (`G=0`, no real Q — PC-Tool shows "N/A for 1st order") | any slot incl. middle |
 | `20` | **2nd-order all-pass** (`G=0`, Q meaningful) | any slot |
 
 Notes that have burned people:
+- **`Q` on a `T=19` (1st-order all-pass) can hold a stale, non-functional
+  value.** VERIFIED 2026-07-07 by cross-checking decoded XML against a real
+  screenshot: a `T=19` band showed `Q="4"` in the file, but PC-Tool displayed
+  **"Q: N/A for 1st order"** — the number is very likely left over from when
+  that same band was previously a 2nd-order all-pass (where Q is meaningful),
+  and PC-Tool doesn't clear it when you switch orders. **Never treat `Q` on a
+  `T=19` filter as real data** — the type code alone tells you Q doesn't apply.
 - On `T=15`/`T=16` crossover filters, **`G` encodes the SLOPE in dB/oct, not
   gain** — VERIFIED 2026-07-07 by controlled diff (`F="6000.00" G="-12"` matched
   a real screenshot's "-12 dB/Oct"). **`G="0"` means the crossover is NOT
