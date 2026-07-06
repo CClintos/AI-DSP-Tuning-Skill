@@ -68,6 +68,7 @@ The full Helix filter set, each used for what it's good at:
 ## What you need
 
 - A **Helix / Audiotec Fischer DSP** and its `.afpx` tune file (from DSP PC-Tool).
+  Newer `.pct6` files (DSP PC-Tool 6) have basic beta support — see below.
 - **REW** ([Room EQ Wizard](https://www.roomeqwizard.com/)) measurements — a text
   export (`Freq  SPL  Phase`) is preferred; `.mdat` also works (with axis validation).
 - A **target curve** (`frequency  level` text file). One is bundled as a default;
@@ -145,8 +146,10 @@ helix-rew-tuner/
 │   ├── tunelib.py                    verified DSP + acoustic-analysis core (self-tests)
 │   ├── afpx.py                       decode / inspect / channel-detect / write-lint
 │   └── measure.py                    load REW exports & .mdat, validate axis, targets
+│   └── pct6.py                        BETA, personal-use-only .pct6 decode/encode
 ├── references/
 │   ├── afpx_format.md                the .afpx binary + filter-code spec
+│   ├── pct6_format.md                the .pct6 container format + BETA caveats
 │   ├── methodology.md                how to decide what to fix (the doctrine)
 │   └── helix_hardware.md             filter modes, limits, model caveats
 └── assets/
@@ -171,6 +174,26 @@ Other Helix models are very likely identical but are not independently verified 
 a different model, do one controlled round-trip (write a known change, load in
 PC-Tool, re-export, diff) before trusting writes. Reading/inspecting is safe on any
 model.
+
+## Beta: `.pct6` support (DSP PC-Tool 6 / Helix DSP PRO)
+
+DSP PC-Tool 6 introduced a newer `.pct6` save format (adds the CONDUCTOR
+configuration, more output channels). Basic decode/encode support exists in
+`scripts/pct6.py`, but it's held to a **much lower confidence bar** than
+`.afpx` — **personal/interoperability use only, not a general-purpose
+cracking tool:**
+
+- **No-password saves only.** Password-protected `.pct6` files use a different,
+  unidentified scheme and aren't supported — the decoder raises a clear error
+  rather than returning garbage if it doesn't see valid tune XML come out.
+- **Verified against real files on PC-Tool 6.01.08 only.** The container key is
+  version-fragile — Audiotec Fischer could change it in a future release
+  without notice. Always check that a decode actually produces plausible
+  `<ATF ...>` XML before trusting it on a PC-Tool version you haven't tried.
+- Read [`references/pct6_format.md`](helix-rew-tuner/references/pct6_format.md)
+  in full before touching a real `.pct6` file — it covers the container format,
+  provenance, and what's different from `.afpx` (more channels, less-verified
+  filter-type mapping, non-strictly-well-formed XML).
 
 ## License
 

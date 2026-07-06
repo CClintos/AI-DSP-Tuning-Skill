@@ -10,9 +10,11 @@ description: >-
   measurement look wrong", or "edit my .afpx". It decodes REW measurements and
   Helix `.afpx` files, computes deviation from the target, classifies each problem
   (EQ vs level vs phase vs modal-null vs measurement error), writes corrected
-  `.afpx` files within hardware limits, and verifies every write. Trigger it even
-  if the user doesn't name the format explicitly but clearly has DSP measurements
-  they want acted on.
+  `.afpx` files within hardware limits, and verifies every write. Also includes
+  BETA, personal-use-only support for the newer `.pct6` format (DSP PC-Tool 6 /
+  Helix DSP PRO and similar) — no-password saves only, far less proven than
+  `.afpx`. Trigger it even if the user doesn't name the format explicitly but
+  clearly has DSP measurements they want acted on.
 ---
 
 # Helix / REW measurement-driven auto-tuner
@@ -52,14 +54,24 @@ Run these with the user's files; they are the deterministic layer.
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
   resample onto a common grid, load target curves.
+- **`pct6.py`** — **BETA, personal-use only** — decode/encode `.pct6` (DSP
+  PC-Tool 6, no-password saves only). Decodes to the same XML shape as
+  `.afpx`, so pass the result straight into `afpx.py`'s functions (`channels`,
+  `roundtrip_lint`, etc.) rather than treating it as a separate parser. **Read
+  `references/pct6_format.md` before using this on a real file** — the
+  container key is version-fragile and unverified beyond PC-Tool 6.01.08.
 
 For anything not covered by a script, write short Python that imports these —
-never hand-guess `.afpx` bytes or filter codes.
+never hand-guess `.afpx`/`.pct6` bytes or filter codes.
 
 ## Reference files (read as needed)
 
 - **`references/afpx_format.md`** — the exact `.afpx` binary + filter-code spec.
   Read before any write. (Verified on P SIX DSP MK2; see model caveat.)
+- **`references/pct6_format.md`** — the `.pct6` container format, BETA caveats,
+  and the version-fragility/no-password limitations. **Read this in full
+  before touching a `.pct6` file** — it's held to a much lower confidence bar
+  than `.afpx`.
 - **`references/methodology.md`** — how to decide what to fix: deviation analysis,
   the interference audit, the crossover action-ladder, shelf and all-pass
   cookbooks, imaging, and the restraint rules. Read before proposing edits.
@@ -71,6 +83,12 @@ never hand-guess `.afpx` bytes or filter codes.
 
 Nothing here is hardcoded. Before analyzing, confirm with the user:
 
+- **File format**: if given a `.pct6` instead of `.afpx`, read
+  `references/pct6_format.md` first, then decode with `pct6.decode()` and
+  **verify it actually produced `<ATF ...>` XML** before doing anything else —
+  don't proceed on faith. If it raises (password-protected, or the key doesn't
+  match this PC-Tool version), say so plainly and don't guess further; this
+  path is beta and unverified beyond one PC-Tool 6 version.
 - **DSP model** and how many channels (read from the `.afpx` — `afpx.py` lists them).
 - **Channel map**: run `python afpx.py inspect <file>` to auto-detect roles from
   crossovers, then **show the user and have them confirm/correct** which channel is
