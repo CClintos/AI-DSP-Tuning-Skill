@@ -49,11 +49,15 @@ Run these with the user's files; they are the deterministic layer.
   / `reaches_target_after_boost` (sanity checks before trusting a proposed EQ band),
   `fit_peq`'s `null_boost_penalty` (actively penalizes a candidate band spilling
   boost into a masked null, not just excluding the null from the fit error),
-  `gating_frequency_limit`/`min_gate_for_frequency` (the low-frequency cost of
-  time-domain gating a measurement — HolmImpulse-verified formula),
-  perceptual scoring, min-phase/excess-group-delay classifier, and the verified filter
-  writers (`allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str`). Run
-  `python tunelib.py` to self-test (prints ALL TESTS PASSED).
+  `gating_frequency_limit`/`min_gate_for_frequency`/`gating_warning` (the
+  low-frequency cost of time-domain gating a measurement — HolmImpulse-
+  verified formula), `crossover_confidence` (bundles prediction_confidence +
+  interference_audit + phase_linearity_residual into one band-limited check
+  for a SPECIFIC crossover region — always pass the crossover band, never
+  the whole trace), perceptual scoring, min-phase/excess-group-delay
+  classifier, and the verified filter writers (`allpass_fil_str`,
+  `allpass1_fil_str`, `shelf_fil_str`). Run `python tunelib.py` to self-test
+  (prints ALL TESTS PASSED).
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
@@ -157,6 +161,24 @@ so the math is identical each time.
   dips. Keep L/R corrections matched unless solos prove the sides genuinely differ.
 - Run `headroom_report`; if a boost stack risks clipping, recommend an output trim.
 - Present the plan (what, where, why, predicted before→after) before writing.
+- **State confidence per claim, not just "objective improved."** A single
+  aggregate score hides exactly the judgment calls that matter — whether a
+  region is a real, EQ-able problem or something you correctly declined to
+  touch. Structure the proposal so each claim carries its own confidence and
+  the reasoning behind it, e.g.:
+
+  ```
+  - Tonal shape (200 Hz-6 kHz): high confidence — clean solo data, prediction_confidence "high"
+  - L/R balance (700 Hz-5 kHz): medium confidence — one-position data only, not spatially averaged
+  - 70-95 Hz dip: low confidence — gated measurement, below this gate's ~110 Hz trust floor (gating_warning)
+  - 450 Hz dip: left alone — interference_audit flags destructive cancellation, not EQ-able
+  - 3.5 kHz L/R asymmetry: rejected — solo traces don't justify a one-sided cut (inert_band_check)
+  ```
+
+  This isn't cosmetic — it's the same discipline the restraint doctrine
+  already runs on (classify before correcting, know when NOT to touch
+  something), just made visible in the final report instead of staying
+  implicit in the process.
 
 ### 5. Write — verified, conservative
 

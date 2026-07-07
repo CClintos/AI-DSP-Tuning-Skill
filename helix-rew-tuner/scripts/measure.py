@@ -3,7 +3,11 @@
 # TWO input paths, in order of robustness:
 #   1) REW TEXT EXPORT (recommended): "Freq  SPL  Phase" columns. Axis is explicit
 #      and unambiguous, phase is available for real crossover/APF work. Export from
-#      REW with: File > Export > Export measurement as text.
+#      REW with: File > Export > Export measurement as text. An optional 4th
+#      column (coherence, 0..1) is read if present -- REW's normal sweep export
+#      doesn't provide one (that needs a dual-channel reference-vs-measured
+#      capture a deconvolved sweep isn't), so this is forward-compatibility for
+#      a different capture chain, not something to expect from a typical file.
 #   2) REW .mdat (convenience, MUST be validated): the binary carries float32 SPL
 #      arrays but the frequency axis is reconstructed by assumption (log-spaced,
 #      anchored at the top). ALWAYS validate the reconstructed axis against a known
@@ -19,9 +23,21 @@ import numpy as np
 
 
 def load_text_export(path):
-    """REW text export -> (freqs, spl_db, phase_deg or None). Whitespace or comma
-    separated; skips headers/comment lines. This is the robust, axis-explicit path."""
-    f, s, p = [], [], []
+    """REW text export -> (freqs, spl_db, phase_deg or None, coherence or None).
+    Whitespace or comma separated; skips headers/comment lines. This is the
+    robust, axis-explicit path.
+
+    Standard REW sweep exports are freq/SPL/phase (3 columns) -- coherence is
+    NOT a column REW's sweep-based text export provides (coherence needs a
+    genuine dual-channel reference-vs-measured capture, which a deconvolved
+    sweep isn't). This loader optionally reads a 4th numeric column as
+    coherence (0..1) if present, for forward-compatibility with a different
+    capture chain that does provide it -- it's simply None if the file only
+    has 3 columns, which is the normal case. When coherence IS available,
+    it's a natural `conf` weight for prediction_confidence/fit_peq -- the
+    Smaart-style trust signal this project's usual REW-only pipeline can't
+    otherwise compute (see methodology.md)."""
+    f, s, p, coh = [], [], [], []
     for line in open(path, encoding='utf-8', errors='replace'):
         line = line.strip()
         if not line or line[0].isalpha() or line[0] in '*#/':
@@ -31,12 +47,13 @@ def load_text_export(path):
             f.append(float(parts[0]))
             s.append(float(parts[1]))
             p.append(float(parts[2]) if len(parts) > 2 else np.nan)
+            coh.append(float(parts[3]) if len(parts) > 3 else np.nan)
         except (ValueError, IndexError):
             continue
     if len(f) < 8:
         raise ValueError('found <8 usable data rows in %s -- is this a REW text export?' % path)
-    f, s, p = np.array(f), np.array(s), np.array(p)
-    return f, s, (p if np.isfinite(p).any() else None)
+    f, s, p, coh = np.array(f), np.array(s), np.array(p), np.array(coh)
+    return f, s, (p if np.isfinite(p).any() else None), (coh if np.isfinite(coh).any() else None)
 
 
 def resample_log(freqs_src, y_src, freqs_dst):
@@ -125,9 +142,10 @@ def _main():
         print('usage: python measure.py {textcols|mdat} <file>'); sys.exit(1)
     cmd, path = sys.argv[1], sys.argv[2]
     if cmd == 'textcols':
-        f, s, p = load_text_export(path)
-        print('%d points, %.1f-%.0f Hz, SPL %.1f..%.1f dB, phase: %s'
-              % (len(f), f[0], f[-1], s.min(), s.max(), 'yes' if p is not None else 'no'))
+        f, s, p, coh = load_text_export(path)
+        print('%d points, %.1f-%.0f Hz, SPL %.1f..%.1f dB, phase: %s, coherence: %s'
+              % (len(f), f[0], f[-1], s.min(), s.max(),
+                 'yes' if p is not None else 'no', 'yes' if coh is not None else 'no'))
     elif cmd == 'mdat':
         arrs = mdat_spl_arrays(path)
         spl = [(j, n, a) for j, n, a in arrs if 0 < a.max() < 130 and a.min() > -60]

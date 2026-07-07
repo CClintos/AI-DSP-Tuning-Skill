@@ -307,6 +307,34 @@ def interference_audit(freqs, solo_a_db, solo_b_db, together_db, flag_db=2.0,
     return psum, csum, interference_db, (flag_basis < -flag_db)
 
 # --------------------------------------------------------------------------
+# CROSSOVER-SPECIFIC CONFIDENCE -- bundles existing band-aware checks into one
+# report for a SPECIFIC crossover region (e.g. sub/midbass 50-120Hz, mid/
+# tweeter 1.8-4.5kHz) instead of inspecting a whole trace. No new math -- this
+# composes prediction_confidence, interference_audit, and
+# phase_linearity_residual, which were all already band-parameterized, so the
+# same result was always obtainable by hand. This just makes it one call
+# instead of three, so a crossover check is consistent every time it's run.
+def crossover_confidence(freqs, solo_a, solo_b, together_db, band):
+    """solo_a/solo_b: COMPLEX solo responses (magnitude+phase) for the two
+    drivers either side of this crossover. together_db: measured together
+    SPL. band: the crossover region only, e.g. (50.0, 120.0) -- do not pass
+    the whole trace, that defeats the point."""
+    pconf = prediction_confidence(freqs, solo_a, solo_b, together_db, band)
+    sel = (freqs >= band[0]) & (freqs <= band[1])
+    a_db = 20 * np.log10(np.abs(solo_a) + 1e-12)
+    b_db = 20 * np.log10(np.abs(solo_b) + 1e-12)
+    _, _, _, flagged = interference_audit(freqs, a_db, b_db, together_db)
+    cancelling = bool(np.any(flagged[sel]))
+    ph_a = phase_linearity_residual(freqs, np.rad2deg(np.angle(solo_a)), band)
+    ph_b = phase_linearity_residual(freqs, np.rad2deg(np.angle(solo_b)), band)
+    both_phase_ok = ph_a['trustworthy_for_timing'] and ph_b['trustworthy_for_timing']
+    usable = pconf['usable_for_phase_decisions'] and both_phase_ok
+    return {'band': band, 'prediction_confidence': pconf,
+            'destructive_interference_in_band': cancelling,
+            'phase_reliability_a': ph_a, 'phase_reliability_b': ph_b,
+            'usable_for_crossover_decisions': usable}
+
+# --------------------------------------------------------------------------
 # SPECIAL-FILTER XML WRITERS -- encodings VERIFIED by controlled export-diffs.
 # COMPLETE T-code map (as of 2026-07-03 "Test .afpx" diff, which CORRECTED the
 # earlier "T=20 = shelf" inference):
@@ -939,6 +967,16 @@ def min_gate_for_frequency(freq_hz):
     return 1000.0 / freq_hz
 
 
+def gating_warning(gate_ms):
+    """A ready-to-say sentence for a gated measurement's low-frequency limit --
+    pair with the actual remedy (spatially-averaged / ungated capture via
+    complex_vector_average), not just the caveat."""
+    f_min = gating_frequency_limit(gate_ms)
+    return ('Do not trust this gated response below ~%.0f Hz (gate length %.1f ms). '
+            'Low-frequency work should use an ungated or spatially-averaged '
+            'measurement instead.' % (f_min, gate_ms))
+
+
 def phase_linearity_residual(freqs, phase_deg, band):
     """RMS residual (degrees) of unwrapped phase vs frequency after removing the
     best-fit straight line (i.e. removing pure delay) over `band`. Rule of thumb
@@ -1337,5 +1375,23 @@ if __name__ == '__main__':
     assert abs(min_gate_for_frequency(f_min25) - gate_ms25) < 1e-9, 'inverse function mismatch'
     # sanity: a shorter gate (closer reflection) raises the trustworthy floor
     assert gating_frequency_limit(1.0) > gating_frequency_limit(3.0)
+
+
+    # ---- TEST26: crossover_confidence bundles the band-limited checks correctly
+    A26 = np.ones_like(freqs, dtype=complex) * 10 ** (75 / 20)
+    B26_healthy = np.exp(-1j * 2 * np.pi * freqs * 0.0003) * 10 ** (75 / 20)
+    together_healthy = 20 * np.log10(np.abs(A26 + B26_healthy) + 1e-12)
+    r_healthy = crossover_confidence(freqs, A26, B26_healthy, together_healthy, (50.0, 120.0))
+
+    B26_bad = -A26   # antiphase everywhere -> real cancellation in-band
+    together_bad = 20 * np.log10(np.abs(A26 + B26_bad) + 1e-12)
+    r_bad = crossover_confidence(freqs, A26, B26_bad, together_bad, (50.0, 120.0))
+
+    print()
+    print('TEST26 crossover_confidence: healthy usable=%s cancelling=%s | bad usable=%s cancelling=%s'
+          % (r_healthy['usable_for_crossover_decisions'], r_healthy['destructive_interference_in_band'],
+             r_bad['usable_for_crossover_decisions'], r_bad['destructive_interference_in_band']))
+    assert r_healthy['usable_for_crossover_decisions'] and not r_healthy['destructive_interference_in_band']
+    assert r_bad['destructive_interference_in_band']
 
     print('\nALL TESTS PASSED')
