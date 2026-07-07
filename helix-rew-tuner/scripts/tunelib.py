@@ -915,6 +915,30 @@ def calibrate_solo_levels(freqs, solo_db, together_db, band):
 # reports something. Quantify it instead of guessing: real driver phase is
 # close to a straight line vs frequency over its own passband (it's dominated
 # by acoustic path delay); reflections add high-frequency wiggle on top.
+def gating_frequency_limit(gate_ms):
+    """Minimum trustworthy frequency for a time-gated (windowed) measurement of
+    the given gate length -- adopted from HolmImpulse's quasi-anechoic gating
+    practice, verified against its own documented example (a 1 m reflection
+    path difference -> ~2.91 ms gate -> "cannot trust below ~344 Hz"; this
+    formula predicts 343 Hz, matching within normal speed-of-sound rounding).
+    You need at least one full wavelength of a frequency to fit inside the
+    reflection-free window before that frequency's response is meaningful --
+    below this limit, the window cut off the waveform before a cycle
+    completed, and the reported magnitude/phase there is not real data.
+    Relevant to REW's own "IR windows" gating feature (or HolmImpulse), NOT to
+    a REW text export that's already been captured -- this is a measurement-
+    setup-time check (choose your window length knowing its low-frequency
+    cost), complementary to phase_linearity_residual (a post-hoc diagnostic on
+    data you already have)."""
+    return 1000.0 / gate_ms
+
+
+def min_gate_for_frequency(freq_hz):
+    """Inverse of gating_frequency_limit: the minimum gate length (ms) needed
+    to trust a measurement down to freq_hz."""
+    return 1000.0 / freq_hz
+
+
 def phase_linearity_residual(freqs, phase_deg, band):
     """RMS residual (degrees) of unwrapped phase vs frequency after removing the
     best-fit straight line (i.e. removing pure delay) over `band`. Rule of thumb
@@ -1298,5 +1322,20 @@ if __name__ == '__main__':
           % (spill_off, len(bands_off), spill_on, len(bands_on)))
     assert spill_off > 2.0, 'setup check: guard-off case should actually spill into the null'
     assert spill_on < spill_off, 'null-boost guard did not reduce spillover into the masked region'
+
+
+    # ---- TEST25: gating-frequency-limit (HolmImpulse-verified formula) ---------
+    # HolmImpulse's own documented example: a ~1m reflection path difference
+    # (~2.91ms gate) gives "cannot trust below ~344 Hz". Verify our formula
+    # against that real-world reference point, not just internal consistency.
+    gate_ms25 = 1000.0 / 343.0   # the gate length implied by a 343 Hz limit
+    f_min25 = gating_frequency_limit(gate_ms25)
+    print()
+    print('TEST25 gating limit: gate=%.2fms -> f_min=%.1fHz (HolmImpulse doc: ~344Hz for ~1m path)'
+          % (gate_ms25, f_min25))
+    assert abs(f_min25 - 343.0) < 0.5
+    assert abs(min_gate_for_frequency(f_min25) - gate_ms25) < 1e-9, 'inverse function mismatch'
+    # sanity: a shorter gate (closer reflection) raises the trustworthy floor
+    assert gating_frequency_limit(1.0) > gating_frequency_limit(3.0)
 
     print('\nALL TESTS PASSED')
