@@ -87,14 +87,31 @@ tried before.
   handle an arbitrary count, no changes needed, but channel-role inference
   from crossovers matters even more here (more channels to keep straight).
 - **`<OC>` block order does NOT necessarily match the Output A/B/C... tab
-  order shown in PC-Tool.** VERIFIED 2026-07-07 on a real 22-channel file: the
-  first 12 `<OC>` blocks (index 0–11) were unused, and **Output A** (confirmed
-  via a matching delay value cross-checked against a screenshot) was actually
-  **`<OC>` index 12**, not index 0. Don't assume file order == UI order on a
-  `.pct6` with unused/reserved channels — anchor at least one channel against
-  a real screenshot value (a distinctive delay in ms, converted to samples, is
-  a good anchor) before trusting the rest, then extend via the existing
-  consecutive-same-role L/R pairing logic in `afpx.channels()`.
+  order shown in PC-Tool.** VERIFIED 2026-07-07 on a real 22-channel file:
+  **Output A** (confirmed via a matching delay value cross-checked against a
+  screenshot) was `<OC>` index 12, not index 0. Don't assume file order == UI
+  order — anchor at least one channel against a real screenshot value (a
+  distinctive delay in ms, converted to samples, is a good anchor) before
+  trusting the rest, then extend via the existing consecutive-same-role L/R
+  pairing logic in `afpx.channels()`.
+- **CORRECTION: the first 12 `<OC>` blocks are NOT "unused" — they're a
+  separate "Virtual" channel layer, distinct from the "Outputs" tab.**
+  VERIFIED 2026-07-07: PC-Tool 6 has a **"Virtual"** tab showing its own
+  signal-flow diagram (`Input → Virtual channel → one or more physical
+  Outputs`, e.g. one Virtual "Front L Full" channel feeding the physical
+  High/Mid/Low Output channels for that side) with its own EQ, gain, and
+  phase/delay controls. These Virtual channels live in `<OC>` indices 0–11 —
+  they only *looked* unused in earlier files because that tune hadn't put any
+  processing on them yet. Editing a Virtual channel's Fine EQ showed up as a
+  real, non-zero `T=17` filter in one of these blocks. **Don't write off a
+  low-index/no-crossover `<OC>` block as reserved/dead** — check whether it
+  has real filter content before assuming that.
+- **Editing one side of a stereo pair in PC-Tool can mirror to its partner
+  automatically.** Observed: setting a low-shelf on one Front Low channel
+  produced the identical filter on the paired channel too, even though only
+  one side was touched in the UI. Worth keeping in mind when diffing — a
+  change appearing on two channels doesn't necessarily mean both were
+  deliberately edited.
 - **Decoded XML is not always strictly well-formed** — one attribute (`AV=`)
   has been seen containing raw binary that would break a real XML parser.
   This is fine for `afpx.py`'s regex-based parsing (it never used
@@ -140,6 +157,28 @@ tried before.
   structure confirmed (mostly zero, non-zero entries cleanly share an index),
   but exact input/output semantics are **not yet confirmed** — that needs a
   controlled diff on the Signal Management (IO) tab, not done yet.
+- **`FilBy` is a per-filter-section "Bypass" flag, independent of the slope
+  stored in `G`** — see `afpx_format.md`, confirmed by controlled diff:
+  toggling one filter section's header Bypass button flipped `FilBy` on both
+  its HP and LP with everything else (including `G`) unchanged.
+- **`MT` on `<OC>` is likely Mute, with inverted-from-naive logic** —
+  `MT="1"` = **not** muted (the default seen on nearly every channel across
+  every file this session), `MT="0"` = muted. Evidence: the one channel where
+  `MT` changed at all (`1→0`) was exactly the channel a user reported muting,
+  with nothing else different. Fairly confident, but only one clean data
+  point — a second isolated mute test (start from `MT="1"`, mute, confirm it
+  flips to `"0"` and back) would close this out completely.
+- **The "Phase" (degrees) field next to delay-in-ms is still unexplained as
+  a separate attribute.** A Virtual channel's delay tag changed
+  `T="0"→"197"` samples (2.05 ms, matching a screenshot) when a user reported
+  changing "phase to 95°" — but no distinct degrees-encoding attribute
+  appeared anywhere in the diff. Working hypothesis, **not confirmed**: the
+  on-screen "degrees" readout might just be a computed alternate *display* of
+  the same single delay value (the way "Distance Mode" on the Time Alignment
+  tab is cm for the same ms value), not a separately stored parameter. To
+  test: on a channel at 0 ms, change only the degrees field to two different
+  known values, save both, and check whether the resulting delay values
+  convert back through a single consistent reference frequency.
 
 ## Don't commit real `.pct6` sample files to this repo
 

@@ -71,8 +71,16 @@ def channel_summary(block):
     # on the HP of the same channel. G=="0" means the crossover is NOT actually
     # engaged -- its frequency must be ignored for role inference, even though the
     # frequency value is still present in the file.
-    hp_engaged = hp is not None and float(hp.get('G', 0)) != 0
-    lp_engaged = lp is not None and float(lp.get('G', 0)) != 0
+    #
+    # G!=0 is NOT sufficient to call a crossover "engaged", though -- VERIFIED
+    # 2026-07-07 by a second controlled diff: toggling a filter section's own
+    # "Bypass" button (in its header, separate from the Slope dropdown) flipped
+    # FilBy 0->1 on BOTH the HP and LP of the same channel with G, F, and every
+    # other value completely unchanged. So FilBy="1" means that filter section
+    # is bypassed via its own header button, independent of what slope is
+    # stored in G. A filter can hold a real slope value and still be bypassed.
+    hp_engaged = hp is not None and float(hp.get('G', 0)) != 0 and hp.get('FilBy') != '1'
+    lp_engaged = lp is not None and float(lp.get('G', 0)) != 0 and lp.get('FilBy') != '1'
     hp_f = float(hp['F']) if hp_engaged else None
     lp_f = float(lp['F']) if lp_engaged else None
     role = infer_role(hp_f, lp_f)
