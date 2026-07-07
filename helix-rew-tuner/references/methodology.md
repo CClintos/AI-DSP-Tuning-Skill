@@ -187,6 +187,13 @@ reveal L/R imbalance, so per-side work needs solo measurements.
   beat many narrow fixes that flatter one trace. Empirically, "aggressive" tunes
   that push bigger moves tend to *lose* on robust, whole-system scoring.
 - Every edit needs a reason tied to the data. If you can't say why, don't write it.
+- **A masked null needs an active guard, not just exclusion.** `fit_peq`'s
+  `mask` parameter excludes null/non-min-phase/low-confidence bins from the
+  fit error — but that's passive: a band aimed at a legitimate nearby feature
+  can still spill real boost into a masked bin as a side effect, since nothing
+  was watching that region. `null_boost_penalty` (on by default) actively
+  penalizes any positive gain the candidate cascade produces inside masked-out
+  bins, closing that loophole instead of just declining to reward it.
 
 ## Verification & honesty
 
