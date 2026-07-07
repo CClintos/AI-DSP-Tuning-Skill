@@ -140,7 +140,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             g_lim=(-15.0, 3.0), q_lim=(0.5, 8.0), min_gain=1.0,
             improve_pct=6.0, boost_penalty=0.5, hf_q_penalty=0.4,
             hf_q_knee=4.0, transition_hz=1000.0, selection_tax_weight=0.25,
-            verbose=False):
+            null_boost_penalty=0.8, verbose=False):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -164,6 +164,13 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
       - selection_tax_weight adds a smaller version of the filter tax to the
         parsimony gate. The full tax still shapes fitting, but the gate should
         not reject a clearly useful cut just because it has moderate Q;
+      - NULL-BOOST GUARD: mask=False bins are excluded from the fit error, but
+        that alone is passive -- a band aimed at a nearby legitimate feature
+        can still spill real gain into a masked null as a side effect, and
+        the fitter would never notice. The selection gate now actively
+        penalizes any positive (boost) contribution the candidate cascade
+        makes inside masked-out bins (null_boost_penalty x mean boost there),
+        closing that loophole instead of just declining to reward it;
       - bands with fitted |G| < min_gain dB are dropped at the end.
 
     Returns (bands, report) - bands as [(F, Q, G), ...] rounded to hardware
@@ -204,12 +211,21 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     def selection_score_of(params):
         """Score used by the parsimony gate.
         Raw audibility score decides whether the curve improved; the tax decides
-        whether a boost / narrow-HF filter earned the right to exist."""
+        whether a boost / narrow-HF filter earned the right to exist; the
+        null-boost guard decides whether it's quietly spilling gain into a
+        masked-out region (a null/non-min-phase/low-confidence bin) it was
+        never supposed to touch."""
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
         p = penalties(bands)
         tax = float(np.sqrt(np.mean(p ** 2))) if len(p) else 0.0
-        return score_of(params) + selection_tax_weight * tax
+        null_cost = 0.0
+        if mask is not None and null_boost_penalty > 0:
+            excluded = ~mask
+            if np.any(excluded):
+                spill = cascade_db(freqs, bands)[excluded]
+                null_cost = null_boost_penalty * float(np.mean(np.maximum(spill, 0.0)))
+        return score_of(params) + selection_tax_weight * tax + null_cost
 
     base_score = audibility_score(freqs, dev_db, band=fit_band, mask=mask, conf=conf)
     params = np.array([])
@@ -1261,5 +1277,26 @@ if __name__ == '__main__':
           % (r_ok['still_short_db'], r_ok['likely_phase_problem'],
              r_phase['still_short_db'], r_phase['likely_phase_problem']))
     assert not r_ok['likely_phase_problem'] and r_phase['likely_phase_problem']
+
+
+    # ---- TEST24: null-boost guard on fit_peq ------------------------------------
+    A24 = -peaking_db(freqs, 500.0, 1.2, 6.0)        # dip wanting a broad correction
+    mask24 = ~((freqs >= 600.0) & (freqs <= 900.0))   # adjacent masked null
+
+    def null_spill(bands):
+        casc = cascade_db(freqs, bands)
+        region = (freqs >= 600.0) & (freqs <= 900.0)
+        return float(np.max(casc[region])) if len(bands) else 0.0
+
+    bands_off, _ = fit_peq(freqs, A24, (200, 2000), n_bands_max=3, mask=mask24,
+                          null_boost_penalty=0.0)
+    bands_on, _ = fit_peq(freqs, A24, (200, 2000), n_bands_max=3, mask=mask24,
+                         null_boost_penalty=3.0)
+    spill_off, spill_on = null_spill(bands_off), null_spill(bands_on)
+    print()
+    print('TEST24 null-boost guard: spill OFF=%.2fdB (%d bands) | spill ON=%.2fdB (%d bands)'
+          % (spill_off, len(bands_off), spill_on, len(bands_on)))
+    assert spill_off > 2.0, 'setup check: guard-off case should actually spill into the null'
+    assert spill_on < spill_off, 'null-boost guard did not reduce spillover into the masked region'
 
     print('\nALL TESTS PASSED')

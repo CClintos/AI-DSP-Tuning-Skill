@@ -47,6 +47,8 @@ Run these with the user's files; they are the deterministic layer.
   analysis), `phase_linearity_residual` (quantify single-position phase reliability),
   `complex_vector_average` (spatial averaging that preserves phase), `inert_band_check`
   / `reaches_target_after_boost` (sanity checks before trusting a proposed EQ band),
+  `fit_peq`'s `null_boost_penalty` (actively penalizes a candidate band spilling
+  boost into a masked null, not just excluding the null from the fit error),
   perceptual scoring, min-phase/excess-group-delay classifier, and the verified filter
   writers (`allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str`). Run
   `python tunelib.py` to self-test (prints ALL TESTS PASSED).
