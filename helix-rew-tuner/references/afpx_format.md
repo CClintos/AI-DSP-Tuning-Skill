@@ -59,6 +59,18 @@ Notes that have burned people:
   must check `G!=0` before trusting the frequency for anything (role inference
   included). `afpx.py`'s `channel_summary()` does this now; it previously
   trusted any stored frequency regardless of whether the slope was actually on.
+- **`G!=0` alone is not enough to call a crossover "engaged" — also check
+  `FilBy`.** VERIFIED 2026-07-07 by a second controlled diff: toggling a
+  filter section's own **"Bypass"** button (in its header, separate from the
+  Slope dropdown) flipped `FilBy="0"→"1"` on both the HP and LP of the same
+  channel with `G`, `F`, and every other value completely unchanged. So
+  **`FilBy="1"` means that filter section is bypassed via its header button,
+  independent of whatever slope is stored in `G`.** A filter can hold a real,
+  non-zero slope and still be bypassed — `afpx.py` now requires both `G!=0`
+  *and* `FilBy!="1"` before treating a crossover as actually engaged. This
+  also resolves an earlier-unexplained inconsistency (a channel's HP and LP
+  showing different `FilBy` while both looked "active" by `G` alone) — they
+  likely just had different bypass states that weren't being checked.
 - Shelf and all-pass do **not** share a code. (An earlier guess that `T=20` was a
   shelf was wrong — it is the 2nd-order all-pass.)
 - **Switching band 1 or band 30 into shelf mode consumes whatever filter was in
