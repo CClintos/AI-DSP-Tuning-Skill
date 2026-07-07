@@ -2,7 +2,7 @@
 # newer Helix/Match/BRAX models). Read the caveats below before using this.
 #
 # STATUS: much less battle-tested than afpx.py. Verified against real files on
-# PC-Tool 6.01.08 only, NO-PASSWORD saves only. Intended for personal/
+# PC-Tool 6.01.08 and 6.03.04, NO-PASSWORD saves only. Intended for personal/
 # interoperability use on hardware you (or someone you're helping) actually
 # own -- not a general-purpose cracking tool, and not guaranteed to keep
 # working on a future PC-Tool version.
@@ -23,21 +23,43 @@
 # Container: XOR(whole_file, repeating_key=b"ATFV6") -> Qt qCompress format
 # (4-byte big-endian uncompressed-length header + standard zlib stream).
 #
-# The inner XML is the SAME <ATF ...><OC ...><Fil .../></OC>...</ATF> schema
-# as .afpx (see afpx_format.md) -- once decoded, reuse afpx.py's functions
-# directly (channel_blocks, filters, attrs, channels, roundtrip_lint, etc.)
-# rather than re-implementing parsing here. .pct6 can have more output
-# channels than .afpx (up to 22 seen vs. 8) -- afpx.py's channel functions
-# already handle an arbitrary channel count, no changes needed.
+# The inner content is XML-ish -- SAME <ATF ...><OC ...><Fil .../></OC>...
+# </ATF> schema as .afpx (see afpx_format.md) -- but it is NOT reliably valid
+# UTF-8 text. Real files carry attributes (e.g. AV=) with raw binary content.
+# DO NOT decode with `errors='replace'` if the result will ever be re-encoded
+# and written back -- 'replace' is lossy by design (it substitutes invalid
+# byte sequences with U+FFFD), and re-encoding that substitution produces
+# DIFFERENT bytes than the original, silently corrupting whatever untouched
+# data happened to sit in that field. This has NOT been reproduced as an
+# actual corruption on the two real files tested so far (their binary-looking
+# attributes happened to already be valid UTF-8) -- that is luck, not a
+# guarantee, and the failure mode is real for any file/version/attribute this
+# project hasn't seen yet. Use decode()/encode() (latin-1 round-trip, below)
+# for anything that will be edited and written back; use decode_bytes() only
+# for read-only inspection where you don't need string operations.
 #
-# Note: the decoded XML is not always strictly well-formed (one attribute has
-# been seen containing raw binary) -- this is fine for afpx.py's regex-based
-# parsing (it never used a strict XML parser), but don't try to load it with
-# xml.etree or similar.
+# Once decoded, reuse afpx.py's functions directly (channel_blocks, filters,
+# attrs, channels, roundtrip_lint, etc.) rather than re-implementing parsing
+# here -- they're regex-based (never used a strict XML parser), and the
+# latin-1 text view below is safe to feed them: every byte maps to exactly
+# one character 1:1, so the ASCII structural parts (tags, attribute names,
+# quotes) parse identically either way, and any binary-ish attribute content
+# just rides along unchanged instead of being silently substituted. Do NOT
+# parse this text with xml.etree or another strict XML parser -- the same
+# non-strict content that survives regex parsing will not survive that.
+#
+# .pct6 can have more output channels than .afpx (up to 22 seen) -- afpx.py's
+# channel functions already handle an arbitrary channel count, no changes
+# needed. Note: channel-index-to-Output-letter mappings (e.g. "decoded ch12 =
+# Output A" on one real tune) are TUNE-SPECIFIC findings from a controlled
+# diff against that one file's own screenshots -- they are not a universal
+# .pct6 rule and must never be hardcoded here. If a project wants to record a
+# confirmed mapping for a specific tune/install, keep it in a separate,
+# optional config (e.g. a small JSON file) outside this module, not in code.
 #
 # CLI:
-#   python pct6.py decode <file.pct6>              # writes file.decoded.xml
-#   python pct6.py encode <file.xml> <out.pct6>
+#   python pct6.py decode <file.pct6>              # writes file.decoded.xml (raw bytes)
+#   python pct6.py encode <file.xml> <out.pct6>     # reads file.xml as raw bytes
 #   python pct6.py selftest                        # synthetic round-trip check
 import sys
 import zlib
@@ -50,10 +72,13 @@ def _xor_repeat(data, key):
     return bytes(b ^ key[i % len(key)] for i, b in enumerate(data))
 
 
-def decode(path):
-    """.pct6 (no-password) -> XML string. Raises ValueError if the file
-    doesn't decode to plausible tune XML (password-protected, or the format
-    has changed on a newer PC-Tool version)."""
+def decode_bytes(path):
+    """.pct6 (no-password) -> raw inner XML-ish bytes, after XOR + zlib/
+    qCompress unwrap. No text decoding at all -- use this for read-only
+    inspection, or as the byte-exact input to encode_bytes() for a verified
+    round-trip. Raises ValueError if the result doesn't look like tune XML
+    (password-protected, or the key/container has changed on this PC-Tool
+    version)."""
     raw = Path(path).read_bytes()
     unxored = _xor_repeat(raw, XOR_KEY)
     if len(unxored) < 4:
@@ -63,34 +88,64 @@ def decode(path):
     if declared != len(xml_bytes):
         print('warning: declared length %d != decoded length %d -- verify this decode carefully'
               % (declared, len(xml_bytes)), file=sys.stderr)
-    xml = xml_bytes.decode('utf-8', 'replace')
-    if not xml.lstrip().startswith('<ATF'):
+    if not xml_bytes.lstrip().startswith(b'<ATF'):
         raise ValueError('decoded content does not look like tune XML -- this file may be '
                          'password-protected, or the key/container has changed on this '
                          'PC-Tool version. Do not trust this output.')
-    return xml
+    return xml_bytes
+
+
+def encode_bytes(xml_bytes, path):
+    """Raw inner XML-ish bytes -> .pct6 (no-password format only). Pairs
+    exactly with decode_bytes() for a byte-exact round-trip."""
+    packed = len(xml_bytes).to_bytes(4, 'big') + zlib.compress(xml_bytes, 9)
+    Path(path).write_bytes(_xor_repeat(packed, XOR_KEY))
+
+
+def decode(path):
+    """.pct6 (no-password) -> a byte-preserving TEXT view (latin-1), safe to
+    hand to afpx.py's regex-based functions. latin-1 maps every byte 0-255 to
+    exactly one character 1:1 -- no decode errors are possible and no bytes
+    are lost, unlike `errors='replace'`. Encode this same string back with
+    encode() (also latin-1) to recover the exact original bytes."""
+    return decode_bytes(path).decode('latin-1')
 
 
 def encode(xml, path):
-    """XML string -> .pct6 (no-password format only)."""
-    payload = xml.encode('utf-8')
-    packed = len(payload).to_bytes(4, 'big') + zlib.compress(payload, 9)
-    Path(path).write_bytes(_xor_repeat(packed, XOR_KEY))
+    """Byte-preserving TEXT (latin-1) -> .pct6. Must be the same latin-1
+    round-trip as decode() -- do not re-encode a utf-8-decoded string here,
+    that reintroduces the exact corruption this pair of functions avoids."""
+    encode_bytes(xml.encode('latin-1'), path)
 
 
 def _selftest():
     """Synthetic round-trip check -- no real .pct6 sample files are bundled
     with this repo (real tune files carry personal path/username metadata and
     shouldn't be committed), so this only verifies the codec is internally
-    consistent, not that the key matches a real PC-Tool 6 file. Run
-    `python pct6.py decode <your file>` against a real file to confirm that."""
-    sample = '<ATF JPT="1" V="6.01.08"><OC><Fil T="17" F="110.00" Q="1.30" G="-4.00" FN="1"/></OC></ATF>'
+    consistent, not that the key matches a real PC-Tool 6 file. Against a real
+    file, also check: decode_bytes(original) == decode_bytes(reencoded) --
+    that's the real safety check (byte-identical .pct6 output is a nice-to-
+    have if the compressor is deterministic, but decoded-content equality is
+    what actually matters)."""
+    sample = b'<ATF JPT="1" V="6.01.08"><OC><Fil T="17" F="110.00" Q="1.30" G="-4.00" FN="1"/></OC></ATF>'
     tmp = Path('_pct6_selftest.pct6')
     try:
-        encode(sample, tmp)
-        back = decode(tmp)
-        assert back == sample, 'round-trip mismatch'
-        print('SELFTEST PASSED (synthetic round-trip only -- verify against a real file too)')
+        # bytes-level round-trip
+        encode_bytes(sample, tmp)
+        back_bytes = decode_bytes(tmp)
+        assert back_bytes == sample, 'decode_bytes/encode_bytes round-trip mismatch'
+
+        # latin-1 text-view round-trip, including a non-ASCII byte to prove
+        # nothing gets substituted the way utf-8/replace would
+        sample_binary = sample[:-6] + bytes([0x93, 0xC1, 0xFE]) + sample[-6:]
+        encode_bytes(sample_binary, tmp)
+        text = decode(tmp)
+        assert text.encode('latin-1') == sample_binary, 'latin-1 text view lost information'
+        encode(text, tmp)
+        assert decode_bytes(tmp) == sample_binary, 'decode()/encode() round-trip mismatch'
+
+        print('SELFTEST PASSED (synthetic round-trip only -- verify against a real file too:'
+              ' decode_bytes(original) == decode_bytes(reencoded))')
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -103,14 +158,14 @@ def _main():
     if cmd == 'selftest':
         _selftest()
     elif cmd == 'decode':
-        xml = decode(sys.argv[2])
+        xml_bytes = decode_bytes(sys.argv[2])
         out = Path(sys.argv[2]).with_suffix('.decoded.xml')
-        out.write_text(xml, encoding='utf-8')
+        out.write_bytes(xml_bytes)
         print('decoded ->', out)
-        print(xml[:200])
+        print(repr(xml_bytes[:200]))
     elif cmd == 'encode':
-        xml = Path(sys.argv[2]).read_text(encoding='utf-8')
-        encode(xml, sys.argv[3])
+        xml_bytes = Path(sys.argv[2]).read_bytes()
+        encode_bytes(xml_bytes, sys.argv[3])
         print('encoded ->', sys.argv[3])
     else:
         print('unknown command:', cmd)
