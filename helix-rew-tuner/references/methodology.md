@@ -35,6 +35,19 @@ fix. A few things to get right before trusting a measurement:
   measurement — "IR start time" (robust) vs. "estimated IR delay" (fragile). Treat
   the latter, and anything carrying a correlation warning, as **unusable for
   delay/time-alignment decisions** until it's re-measured cleanly.
+- **If REW's "IR windows" (time-domain gating) is used to cut out room
+  reflections, that choice has a hard low-frequency cost — know it before
+  trusting the bass region.** Standard quasi-anechoic practice (from
+  HolmImpulse's own documented gating limits, verified against their real
+  example): a gate needs to contain **at least one full wavelength** of a
+  frequency before that frequency's response means anything — cut the window
+  short to exclude an early reflection and everything below
+  `tunelib.gating_frequency_limit(gate_ms)` is not real data, just a windowing
+  artifact. A 1 m reflection path difference (a ~2.9 ms gate) already puts the
+  floor around 340 Hz — tight gating for reflection control and trustworthy
+  deep bass are directly in tension. If a gated measurement's bass region
+  looks reported below that floor, don't use it; a longer/ungated capture is
+  needed for that range instead.
 
 ## Deviation analysis
 
@@ -123,6 +136,18 @@ magnitude-only average. Vector averaging cancels position-specific comb-filterin
 (which differs per position) while preserving the real driver phase (which is
 common to all of them); a magnitude-only average would just bake the comb-
 filtering artifacts into the averaged level instead of cancelling them.
+
+**Why this is trustworthy: it's the same discipline pro alignment tools require,
+computed a different way because our data source is different.** Rational
+Acoustics' Smaart gates every timing/EQ decision on a **coherence** trace —
+a per-frequency measure of how much of the response is causally explained by
+the reference signal, computed from a genuine dual-channel (reference vs.
+measured) capture. That input isn't available here — a REW sweep export is a
+single-channel deconvolved measurement, not a dual-channel transfer-function
+capture, so there's no coherence trace to read. `phase_linearity_residual` and
+`prediction_confidence` exist to serve the exact same purpose (know when NOT
+to trust a region) from the data this project actually has access to. The
+philosophy transfers even though the math doesn't.
 
 ## The crossover action-ladder (cheapest, safest first)
 

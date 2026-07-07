@@ -49,6 +49,8 @@ Run these with the user's files; they are the deterministic layer.
   / `reaches_target_after_boost` (sanity checks before trusting a proposed EQ band),
   `fit_peq`'s `null_boost_penalty` (actively penalizes a candidate band spilling
   boost into a masked null, not just excluding the null from the fit error),
+  `gating_frequency_limit`/`min_gate_for_frequency` (the low-frequency cost of
+  time-domain gating a measurement — HolmImpulse-verified formula),
   perceptual scoring, min-phase/excess-group-delay classifier, and the verified filter
   writers (`allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str`). Run
   `python tunelib.py` to self-test (prints ALL TESTS PASSED).
