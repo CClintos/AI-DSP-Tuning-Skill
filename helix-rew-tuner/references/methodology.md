@@ -46,8 +46,10 @@ fix. A few things to get right before trusting a measurement:
   artifact. A 1 m reflection path difference (a ~2.9 ms gate) already puts the
   floor around 340 Hz — tight gating for reflection control and trustworthy
   deep bass are directly in tension. If a gated measurement's bass region
-  looks reported below that floor, don't use it; a longer/ungated capture is
-  needed for that range instead.
+  looks reported below that floor, don't use it — pair the warning
+  (`tunelib.gating_warning(gate_ms)` gives the ready-to-say sentence) with the
+  actual remedy: an ungated capture, or `complex_vector_average` across
+  several mic positions (see below) for that range instead.
 
 ## Deviation analysis
 
@@ -147,13 +149,29 @@ single-channel deconvolved measurement, not a dual-channel transfer-function
 capture, so there's no coherence trace to read. `phase_linearity_residual` and
 `prediction_confidence` exist to serve the exact same purpose (know when NOT
 to trust a region) from the data this project actually has access to. The
-philosophy transfers even though the math doesn't.
+philosophy transfers even though the math doesn't. **If a measurement chain
+ever does supply real per-frequency coherence** (not REW's normal sweep
+export, but forward-compatibility is cheap), `measure.load_text_export` reads
+an optional 4th column as coherence and returns it — usable directly as the
+`conf` weight `fit_peq`/`prediction_confidence` already accept, at which point
+you'd have the genuine Smaart-style signal instead of a proxy for it.
 
 ## The crossover action-ladder (cheapest, safest first)
 
-When two drivers don't sum well through their crossover, test in this order and
-stop when the problem is solved (a later, riskier tool must clearly beat the
-earlier one to be worth it):
+**Start with `tunelib.crossover_confidence(freqs, solo_a, solo_b, together_db,
+band)`, band-limited to just that crossover** (e.g. `(50.0, 120.0)` for sub/
+midbass, `(1800.0, 4500.0)` for mid/tweeter) — not the whole trace. It bundles
+`prediction_confidence`, `interference_audit`, and `phase_linearity_residual`
+for that one region into a single `usable_for_crossover_decisions` verdict
+plus a `destructive_interference_in_band` flag. If it comes back unusable,
+stop and say so rather than running the ladder below on data that can't
+support it — none of these steps are trustworthy on phase data the region
+itself has already failed.
+
+When `crossover_confidence` says the data is usable and two drivers don't sum
+well through their crossover, test in this order and stop when the problem is
+solved (a later, riskier tool must clearly beat the earlier one to be worth
+it):
 
 1. **Polarity** (free, binary).
 2. **Delay** (cheap, no group-delay cost). `tunelib.polarity_delay_search` searches
