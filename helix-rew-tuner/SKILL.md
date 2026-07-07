@@ -55,11 +55,16 @@ Run these with the user's files; they are the deterministic layer.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
   resample onto a common grid, load target curves.
 - **`pct6.py`** — **BETA, personal-use only** — decode/encode `.pct6` (DSP
-  PC-Tool 6, no-password saves only). Decodes to the same XML shape as
-  `.afpx`, so pass the result straight into `afpx.py`'s functions (`channels`,
-  `roundtrip_lint`, etc.) rather than treating it as a separate parser. **Read
-  `references/pct6_format.md` before using this on a real file** — the
-  container key is version-fragile and unverified beyond PC-Tool 6.01.08.
+  PC-Tool 6, no-password saves only). `decode()`/`encode()` give a byte-
+  preserving (latin-1) text view safe to pass straight into `afpx.py`'s
+  functions (`channels`, `roundtrip_lint`, etc.); `decode_bytes()`/
+  `encode_bytes()` give raw bytes for read-only inspection or a verified
+  round-trip check. **Never decode with `errors='replace'` for anything
+  that gets written back** — real files carry binary-ish attributes (e.g.
+  `AV=`) that aren't reliably valid UTF-8, and `'replace'` silently
+  corrupts them on re-encode. **Read `references/pct6_format.md` before
+  using this on a real file** — the container key is version-fragile and
+  unverified beyond PC-Tool 6.01.08/6.03.04.
 
 For anything not covered by a script, write short Python that imports these —
 never hand-guess `.afpx`/`.pct6` bytes or filter codes.

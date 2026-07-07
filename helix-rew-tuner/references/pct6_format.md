@@ -26,13 +26,43 @@ container; it doesn't reimplement any tune-XML parsing.
 
 ```python
 import pct6
-xml = pct6.decode('MyTune.pct6')   # -> XML string, same shape as afpx.decode()
+xml = pct6.decode('MyTune.pct6')   # -> byte-preserving text view, same shape as afpx.decode()
 pct6.encode(xml, 'Out.pct6')
 ```
 
 **Password-protected `.pct6` saves use a different, unidentified scheme and are
 NOT supported** — `decode()` will raise a clear error rather than silently
 return garbage if it doesn't see plausible `<ATF ...>` XML come out.
+
+### The decoded content is XML-ish, but not reliably valid UTF-8 text
+
+Real files carry attributes (e.g. `AV=`) with raw binary content. **Never
+decode with `errors='replace'` if the result will be edited and written
+back** — `'replace'` is lossy by design (it substitutes any invalid byte
+sequence with U+FFFD), and re-encoding that substitution produces different
+bytes than the original, silently corrupting whatever untouched data happened
+to be in that field. This hasn't been reproduced as an actual corruption on
+the files tested so far (their binary-looking attributes happened to already
+be valid UTF-8) — that's luck on two samples, not a guarantee for every file,
+version, or attribute this project hasn't seen yet.
+
+`pct6.py` gives you two layers, matching how you're using the data:
+
+- **`decode_bytes(path)` / `encode_bytes(bytes, path)`** — raw bytes, no text
+  decoding at all. Use for read-only inspection or a verified round-trip
+  check (`decode_bytes(original) == decode_bytes(reencoded)` after an
+  edit-and-write-back — this is the real safety check, not just a file
+  looking similar).
+- **`decode(path)` / `encode(xml, path)`** — a byte-preserving **latin-1**
+  text view, safe to hand to `afpx.py`'s regex-based functions. latin-1 maps
+  every byte 0–255 to exactly one character 1:1 — no decode errors are
+  possible and no information is lost, unlike `errors='replace'`. Always
+  encode back with `encode()` (also latin-1) — mixing this with a
+  utf-8-decoded string reintroduces the exact corruption this pair avoids.
+
+**Don't parse this text with `xml.etree` or another strict XML parser
+either** — the same non-strict binary content that survives regex parsing
+will not survive that.
 
 ## Provenance — read this before trusting the key
 
@@ -117,3 +147,17 @@ Decoded tune XML carries personal metadata (the original file path, which
 includes a Windows username, has been seen embedded in the `FN=` attribute).
 Use synthetic XML for tests (see `pct6.py selftest`), never a real user's tune
 file.
+
+If you have a real file locally, the one check worth running by hand before
+trusting an edit-and-write-back workflow (can't be shipped in the repo's own
+test suite, since it needs a real file):
+
+```python
+import pct6
+orig = pct6.decode_bytes('MyTune.pct6')
+pct6.encode(pct6.decode('MyTune.pct6'), 'roundtrip_check.pct6')
+assert pct6.decode_bytes('roundtrip_check.pct6') == orig
+```
+
+Byte-identical `.pct6` *files* isn't required (the zlib compressor doesn't
+guarantee that) — decoded-content equality is the real safety check.
