@@ -201,17 +201,43 @@ the plateau.
 An all-pass has flat magnitude; it only changes how two branches sum. Earn it only
 when the defect is phase (a summation null), never a magnitude bump.
 
-- **F** = the null / phase-crossing frequency. **Q** = how sharp: 0.5 broad, 2 tight
-  at F. Use the **lowest Q that fills the null** — higher Q rings more on transients.
+- **F** = the null / phase-crossing frequency. **Q** = how sharp the correction is
+  confined around F. Q is **not capped at ~2** (see helix_hardware.md — that was a
+  documentation error, corrected 2026-07-11); PC-Tool accepts at least Q=9. Don't
+  default to low Q out of a mistaken belief that higher is illegal — a low-Q APF
+  aimed at a narrow null spills its rotation into a wider band and can create a
+  *new* hole in territory that was previously clean, which is its own real cost.
+  Use whichever Q actually confines the fix to the null without damaging the
+  surrounding response — check both narrow and broad candidates against the
+  measured summation, don't assume the lower one is automatically safer.
 - 1st-order (T=19, no Q) for gentle broad correction; 2nd-order (T=20) for more/
   more-local rotation.
 - The **invert** flag (`I="1"`) flips rotation direction: if the null gets *worse*
   at every F/Q, invert and re-sweep.
-- **Imaging cost is real and often unavoidable**: fixing an L↔R null needs a one-
-  sided APF, which injects interaural group-delay mismatch (can be ~1 ms spread over
-  a wide band). Put it on the **subordinate** (weaker/farther) side, keep it below
-  ~1 kHz for one-sided use, and **verify centre image with a mono vocal** after.
-- Symmetric APF (same branch on both L and R) is summation-only and image-safe.
+- **The real cost of any APF is group delay, and the real imaging-risk metric is
+  INTERAURAL group delay — not per-filter Q, and not "how many sides have a
+  filter."** `tunelib.group_delay_ms_from_H` gives one filter's own group delay;
+  `tunelib.interaural_group_delay_ms(freqs, H_left, H_right)` gives the L−R
+  *difference* vs frequency, which is what actually predicts image smearing.
+  **A split-side configuration (a different APF on each of L and R) is NOT
+  automatically gentler on imaging than stacking correction on one side alone —
+  it can be worse.** Confirmed from a real case: a high-Q APF on each side at two
+  different frequencies (Q4.7 on one side, Q8 on the other) produced a peak
+  interaural group delay of ~17 ms, versus ~7 ms for a single lower-Q APF placed
+  on one side only — because opposite-side high-Q filters maximize the L−R phase
+  *difference* right at the correction frequency, even though each individual
+  filter looks modest in isolation. **Always compute `interaural_group_delay_ms`
+  for the actual proposed L+R combination before judging it "safe" from Q or
+  filter count alone.**
+- Put a one-sided APF on the **subordinate** (weaker/farther) side when only one
+  side needs it, keep it below ~1 kHz for one-sided use, and **verify centre image
+  with a mono vocal** after — plus, for anything with meaningful interaural GD, a
+  mono bass line through the correction frequency, listening for a note that
+  smears or pulls sideways rather than staying anchored with the rest of the line.
+- Symmetric APF (identical F/Q on both L and R) is summation-only and image-safe —
+  zero interaural group delay by construction, since both branches get the same
+  filter. This is different from a *split* configuration, which deliberately uses
+  **different** F/Q per side and does carry real interaural GD risk (above).
 
 ## Imaging
 

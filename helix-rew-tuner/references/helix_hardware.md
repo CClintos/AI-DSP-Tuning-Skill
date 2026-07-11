@@ -9,9 +9,20 @@ the specific model when in doubt (they're in that model's PC-Tool).
 Four per-band EQ modes: **Parametric**, **FineEQ**, **Allpass**, **Shelf**.
 
 - **Parametric / FineEQ PEQ**: Q range **0.5–15**.
-- **All-pass**: 1st order (90° at corner, no Q) or 2nd order (180° at corner);
-  Q range **0.5–2**. Prefer low Q — abrupt narrow phase shifts are more audible and
-  high-Q all-passes ring on transients.
+- **All-pass**: 1st order (90° at corner, no Q) or 2nd order (180° at corner).
+  **Q range CORRECTED 2026-07-11**: earlier documentation here claimed a hard
+  0.5–2 hardware ceiling — that was wrong. A real PC-Tool screenshot shows Q=9
+  accepted and displayed (Band 14, 420 Hz, 2nd order). Don't tell a user a
+  high-Q APF is illegal or will get clamped — it won't. High Q is often the
+  *correct* choice for a narrow null: it confines the phase rotation to the
+  target frequency instead of spilling a broad correction into neighbouring
+  bands (a low-Q APF aimed at a narrow null can create a new, broader hole
+  elsewhere as its own tradeoff). The real cost of high Q is **group delay /
+  transient ringing**, not legality — evaluate that directly (`tunelib.
+  group_delay_ms_from_H`, and for an L/R pair `interaural_group_delay_ms` —
+  see methodology.md's All-pass cookbook) rather than treating Q itself as the
+  risk metric. AF's own guidance that "Q above 1.5 is rarely used" is a style
+  note about typical taste, not a hard limit.
 - **Shelf**: first band (25 Hz) = low shelf, last band (20 kHz) = high shelf; the
   **Q (0.1–2) IS the slope** (no separate S parameter). Shown green in PC-Tool.
 
