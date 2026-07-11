@@ -345,7 +345,17 @@ def crossover_confidence(freqs, solo_a, solo_b, together_db, band):
 #   T=19 1st-order ALL-PASS (G=0, Q written as 1 placeholder; MIDDLE slots OK)
 #        [CONFIRMED 2026-07-03: PC-Tool screenshot, Band 20 middle slot,
 #         "Q: N/A for 1st order", "1. Order" active]
-#   T=20 2nd-order ALL-PASS (G=0, Q meaningful 0.5-2)       [VERIFIED 2026-07-02]
+#   T=20 2nd-order ALL-PASS (G=0, Q meaningful)              [VERIFIED 2026-07-02]
+#        Q range CORRECTED 2026-07-11: earlier "0.5-2 hardware ceiling" claim was
+#        WRONG -- PC-Tool screenshot shows Q=9 accepted and displayed (Band 14,
+#        420 Hz, 2nd order). Not yet export-diff round-trip verified above Q=2,
+#        but do NOT block or warn a user off high Q as "illegal" -- it isn't.
+#        High Q is often the CORRECT choice for a narrow null: it confines the
+#        phase rotation to the target frequency and avoids the collateral
+#        cancellation a broad (low-Q) APF creates in neighbouring bands. The
+#        real cost of high Q is GROUP DELAY / transient ringing, not legality --
+#        see interaural_group_delay_ms() below and methodology.md's All-pass
+#        cookbook.
 # The I attribute (present on EVERY <Fil>) = the INVERT flag, 0/1 -- VERIFIED
 # 2026-07-03 by export-diff: pressing 'invert' on the T=19 APF flipped exactly
 # I="0" -> I="1" and nothing else in the whole file. (It was previously
@@ -358,8 +368,16 @@ def crossover_confidence(freqs, solo_a, solo_b, together_db, band):
 def allpass_fil_str(F, Q, FN, dF='20000', invert=False):
     """2nd-order all-pass (T=20). G always "0" -- that's what makes it an APF.
     Middle slots allowed (verified via the T=19 sighting + AF docs), but default
-    stays the end slot for consistency with the verified example."""
-    assert 0.5 <= Q <= 2.0, 'APF Q must be 0.5-2 (hardware range, AF PC-Tool 4 spec)'
+    stays the end slot for consistency with the verified example.
+
+    Q range: PC-Tool accepts at least up to 9 (screenshot-verified 2026-07-11,
+    corrects the earlier wrong "0.5-2 hardware ceiling" claim). This writer
+    does not cap Q -- only checks it's a sane positive number -- because a
+    hard ceiling here would silently block a legitimate high-Q correction.
+    The real tradeoff of high Q is group delay / ringing, which the CALLER
+    should evaluate with group_delay_ms_from_H / interaural_group_delay_ms,
+    not a magnitude/legality check on Q itself."""
+    assert Q > 0.0, 'APF Q must be positive'
     return '<Fil G="0" FN="%s" F="%.2f" T="20" I="%s" dF="%s" Q="%s"/>' % (FN, F, '1' if invert else '0', dF, Q)
 
 def allpass1_fil_str(F, FN, dF, invert=False):
@@ -482,8 +500,30 @@ def group_delay_ms_from_H(freqs, H):
     w = 2 * np.pi * freqs
     return -np.gradient(ph, w) * 1000.0
 
+def interaural_group_delay_ms(freqs, H_left=None, H_right=None):
+    """The imaging-risk metric for a proposed L/R APF pair -- added 2026-07-11
+    after a real split-side candidate (APF on FL AND a different APF on FR)
+    turned out to have a LARGER interaural group-delay spike (~17 ms) than a
+    single APF on one side alone (~7 ms), despite each individual filter
+    looking gentler in isolation. Per-filter group_delay_ms_from_H does not
+    catch this -- it only sees one branch at a time. Pass None for a branch
+    with no added filter (treated as flat/unity). Returns the L-R DIFFERENCE
+    in group delay vs frequency (ms); its peak magnitude near the correction
+    frequency/frequencies is what predicts image smearing risk -- compare
+    candidates on THIS number, not on individual filter Q. A split-side
+    (one APF per side) is not automatically gentler than stacking multiple
+    APFs on one side -- check both shapes with this function before assuming."""
+    HL = H_left if H_left is not None else np.ones_like(freqs, dtype=complex)
+    HR = H_right if H_right is not None else np.ones_like(freqs, dtype=complex)
+    ph_L = np.unwrap(np.angle(HL))
+    ph_R = np.unwrap(np.angle(HR))
+    w = 2 * np.pi * freqs
+    gd_L = -np.gradient(ph_L, w) * 1000.0
+    gd_R = -np.gradient(ph_R, w) * 1000.0
+    return gd_L - gd_R
+
 def optimize_allpass(freqs, driver_a, driver_b, search_band, apply_to='A',
-                     order=2, f_steps=96, q_steps=24, q_lim=(0.5, 2.0),
+                     order=2, f_steps=96, q_steps=24, q_lim=(0.5, 8.0),
                      damage_band=(60.0, 16000.0), damage_free_db=0.5,
                      damage_penalty=1.0, gd_penalty=0.0, max_gd_ms=2.0):
     """Grid-search a 2nd-order APF for a driver-pair sum.
@@ -491,6 +531,19 @@ def optimize_allpass(freqs, driver_a, driver_b, search_band, apply_to='A',
     Inputs are complex solo-driver responses with shared time zero. The score is
     the weighted gap from the coherent-sum ceiling inside `search_band`, plus a
     penalty for making other audible regions worse than the no-APF sum.
+
+    q_lim defaults to (0.5, 8.0) -- widened 2026-07-11, high Q is legal (see
+    helix_hardware.md) and often the right answer for a narrow null.
+
+    This searches ONE branch (mid<->tweeter or sub<->mid) in isolation. If you
+    are choosing a filter for the LEFT side and a separate filter for the RIGHT
+    side of the same crossover (a "split" configuration, different F/Q per
+    side), running this twice independently does NOT tell you the imaging cost
+    of the combined result -- the L-R difference is a property of the pair, not
+    of either filter alone. After picking candidates for both sides, run
+    `interaural_group_delay_ms(freqs, H_left, H_right)` on the actual combined
+    pair before treating it as safe; a split configuration is not automatically
+    gentler than concentrating correction on one side (see methodology.md).
 
     This is a candidate finder, not a blind finalizer: verify the chosen APF by
     re-measuring the acoustic sum after loading it.
@@ -1393,5 +1446,26 @@ if __name__ == '__main__':
              r_bad['usable_for_crossover_decisions'], r_bad['destructive_interference_in_band']))
     assert r_healthy['usable_for_crossover_decisions'] and not r_healthy['destructive_interference_in_band']
     assert r_bad['destructive_interference_in_band']
+
+    # ---- TEST27: interaural_group_delay_ms -- split-side (one APF per side, at
+    # DIFFERENT frequencies) must show a LARGER peak interaural GD than a single
+    # APF on one side alone. This is the real-session finding that motivated the
+    # function: don't assume "one APF per side" is automatically gentler on
+    # imaging than stacking on one side, just because each filter looks modest.
+    H_split_L = allpass_H(freqs, 173.4, 4.7)
+    H_split_R = allpass_H(freqs, 402.8, 8.0)
+    igd_split = interaural_group_delay_ms(freqs, H_split_L, H_split_R)
+
+    H_single_L = allpass_H(freqs, 174.0, 2.0)
+    igd_single = interaural_group_delay_ms(freqs, H_single_L, None)
+
+    peak_split = float(np.max(np.abs(igd_split)))
+    peak_single = float(np.max(np.abs(igd_single)))
+    print('TEST27 interaural_group_delay_ms: split-side peak=%.1fms  single-side peak=%.1fms'
+          % (peak_split, peak_single))
+    assert peak_split > peak_single, 'split-side should show larger interaural GD in this scenario'
+    # a branch with nothing added must contribute exactly zero group delay
+    zero_gd = interaural_group_delay_ms(freqs, None, None)
+    assert np.allclose(zero_gd, 0.0)
 
     print('\nALL TESTS PASSED')
