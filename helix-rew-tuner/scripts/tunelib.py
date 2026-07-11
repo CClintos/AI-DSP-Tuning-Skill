@@ -464,6 +464,78 @@ def target_anchor_offset(freqs, measured_db, target_db, confidence=None,
     sel = np.isfinite(dev)
     return weighted_median(dev[sel], confidence[sel])
 
+# --------------------------------------------------------------------------
+# VOICING -- the single most audible tuning layer (overall tonal balance),
+# expressed as the four knobs people actually voice by rather than as
+# individual filters. voice_target() shapes the GOAL; the measurement-driven
+# EQ engine (fit_peq) still does the correcting, so voicing composes cleanly
+# with everything downstream -- you voice the target, then match to it.
+# measure_tilt() is the diagnostic half: where the measured (or target) curve
+# actually sits, in plain language, so you can decide which way to nudge.
+def voice_target(freqs, base_target_db, tilt_db_per_oct=0.0,
+                 bass_shelf_db=0.0, bass_shelf_hz=100.0,
+                 presence_db=0.0, presence_hz=3000.0, presence_width_oct=0.8,
+                 air_db=0.0, air_hz=9000.0, pivot_hz=1000.0, shelf_slope=1.4):
+    """Apply broad VOICING adjustments on top of a base target curve. Returns a
+    new target array; feed it to fit_peq exactly like any other target. All
+    knobs default to 0 (= base curve unchanged). This shapes the target only --
+    it does NOT add filters directly; the EQ engine still corrects the
+    measurement toward this voiced goal.
+
+    Knobs (mapped to how listeners actually describe sound):
+      tilt_db_per_oct : overall slope, pivoting at pivot_hz (~1 kHz, so the
+                        midrange level is preserved). NEGATIVE = warmer (highs
+                        quieter relative to mids). See measure_tilt for the
+                        typical good-in-car range; a studio-flat (~0) target
+                        tends to sound bright/thin in a cabin.
+      bass_shelf_db   : low-shelf lift/cut below bass_shelf_hz. "More weight."
+      presence_db     : gentle broad bell at presence_hz (~3 kHz), width in
+                        octaves. "More forward" (+) / "more laid back" (-).
+      air_db          : high-shelf above air_hz (~9 kHz). "More air" / tame top.
+    """
+    f = np.asarray(freqs, float)
+    out = np.asarray(base_target_db, float).copy()
+    out = out + tilt_db_per_oct * np.log2(f / pivot_hz)
+    if bass_shelf_db:
+        out = out + bass_shelf_db * 0.5 * (1.0 - np.tanh(np.log2(f / bass_shelf_hz) * shelf_slope))
+    if air_db:
+        out = out + air_db * 0.5 * (1.0 + np.tanh(np.log2(f / air_hz) * shelf_slope))
+    if presence_db:
+        out = out + presence_db * np.exp(-0.5 * (np.log2(f / presence_hz) / presence_width_oct) ** 2)
+    return out
+
+
+def measure_tilt(freqs, spl_db, band=(120.0, 10000.0), good_lo=-1.0, good_hi=-0.8):
+    """Fit the broadband tonal TILT (dB/octave) of a curve -- the macro voicing
+    metric. Heavily smooths first (so resonances don't skew the slope), then
+    does an audibility-weighted linear fit of level vs log2(freq) over `band`.
+
+    Returns the slope plus a plain-language read against the typical good-in-car
+    range. Rule-of-thumb consensus (NOT gospel -- bounds are tunable): a car
+    wants roughly -0.8..-1.0 dB/oct of downward tilt, more than a studio,
+    because near-field reflections and an off-axis seat otherwise leave it
+    sounding bright and thin. Use this on the measured System Sum to see where
+    you are, and on a candidate voiced target to see where you're aiming."""
+    f = np.asarray(freqs, float)
+    y = erb_smooth(f, np.asarray(spl_db, float))
+    sel = (f >= band[0]) & (f <= band[1])
+    if np.count_nonzero(sel) < 4:
+        raise ValueError('band does not overlap enough of the axis')
+    x = np.log2(f[sel])
+    w = audibility_weight(f[sel])
+    W = np.sum(w)
+    xm, ym = np.sum(w * x) / W, np.sum(w * y[sel]) / W
+    var = np.sum(w * (x - xm) ** 2)
+    slope = float(np.sum(w * (x - xm) * (y[sel] - ym)) / var) if var > 1e-12 else 0.0
+    if slope > good_hi:
+        read = 'brighter/thinner than typical in-car -- consider MORE downward tilt (more negative)'
+    elif slope < good_lo:
+        read = 'darker/duller than typical in-car -- consider LESS downward tilt'
+    else:
+        read = 'within the typical good in-car tilt range'
+    return {'tilt_db_per_oct': round(slope, 2),
+            'good_incar_range': (good_lo, good_hi), 'read': read}
+
 def allpass_H(freqs, f0, Q=0.7, order=2, fs=FS):
     """Digital all-pass response used by Helix-style filters.
     order=2 is the verified AFPX-writeable APF. order=1 is kept for modelling
@@ -1467,5 +1539,28 @@ if __name__ == '__main__':
     # a branch with nothing added must contribute exactly zero group delay
     zero_gd = interaural_group_delay_ms(freqs, None, None)
     assert np.allclose(zero_gd, 0.0)
+
+
+    # ---- TEST27: voicing layer (voice_target + measure_tilt) --------------------
+    base27 = np.zeros_like(freqs)
+    # tilt round-trips through measure_tilt, and midrange pivot is preserved
+    voiced27 = voice_target(freqs, base27, tilt_db_per_oct=-0.9)
+    mt27 = measure_tilt(freqs, voiced27)
+    i1k = int(np.argmin(np.abs(freqs - 1000)))
+    print()
+    print('TEST27 voicing: applied -0.9 dB/oct -> measured %.2f | 1kHz pivot level %.3f'
+          % (mt27['tilt_db_per_oct'], voiced27[i1k]))
+    assert abs(mt27['tilt_db_per_oct'] - (-0.9)) < 0.1, 'tilt did not round-trip'
+    assert abs(voiced27[i1k]) < 0.05, 'tilt pivot did not preserve midrange level'
+    # a flat target correctly reads as too bright for a car (the feature's point)
+    assert measure_tilt(freqs, base27)['tilt_db_per_oct'] > -0.8
+    # bass shelf lifts LF, leaves the midrange alone
+    bs27 = voice_target(freqs, base27, bass_shelf_db=3.0, bass_shelf_hz=100.0)
+    i50 = int(np.argmin(np.abs(freqs - 50)))
+    assert bs27[i50] > 2.0 and abs(bs27[i1k]) < 0.1, 'bass shelf shape wrong'
+    # presence bell is local to its center
+    pr27 = voice_target(freqs, base27, presence_db=2.0, presence_hz=3000.0)
+    i3k = int(np.argmin(np.abs(freqs - 3000))); i300 = int(np.argmin(np.abs(freqs - 300)))
+    assert abs(pr27[i3k] - 2.0) < 0.05 and abs(pr27[i300]) < 0.2, 'presence bell not local'
 
     print('\nALL TESTS PASSED')

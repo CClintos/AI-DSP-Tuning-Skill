@@ -64,6 +64,37 @@ fix. A few things to get right before trusting a measurement:
    EQ-able. Above it, only broad trends are reliable — reflections dominate the fine
    structure and move with the mic.
 
+## Voicing — the most audible decision, and it's about the target, not the filters
+
+Before correcting *toward* a target, get the target's overall **tilt** right,
+because the broad tonal slope is the single most audible property of the whole
+tune — more than any individual filter. Matching a curve precisely is not the
+same as sounding good: a **studio-flat target reliably sounds bright and thin
+in a car**, because near-field reflections and an off-axis seat rob perceived
+warmth that a flat anechoic target never accounted for.
+
+- **Measure where you are.** `tunelib.measure_tilt(freqs, system_sum_db)` fits
+  the broadband dB/octave slope (heavily smoothed, audibility-weighted) and
+  reads it against the typical good-in-car range — roughly **−0.8 to −1.0
+  dB/oct** of downward tilt (a rule-of-thumb consensus, the ResoNix/Harman
+  in-car target family sits here; not a hard law). Run it on the supplied
+  target too — if the user handed you a flat/studio curve, that's worth saying
+  out loud before you spend filters chasing it.
+- **Voice by ear-language, not by curve-drawing.** `tunelib.voice_target`
+  exposes four knobs that map to how people actually describe sound: **tilt**
+  (warmer ↔ brighter), **bass shelf** (more ↔ less weight), **presence** (more
+  forward ↔ laid back, ~3 kHz), **air** (more air ↔ tame the top). It returns a
+  modified target; everything downstream is unchanged.
+- **Keep voicing and correction conceptually separate.** Voicing shapes the
+  *goal* (a taste choice — offer defaults, let the user pick). Correction is
+  measurement-driven work *toward* that goal. Say which is which in the report
+  so the user knows what's their preference vs. what the room forced.
+- Voicing is broad by construction (tilt + gentle shelves + one wide presence
+  bell) — it never introduces narrow, seat-specific, or high-Q moves, so it
+  carries none of the robustness risk that aggressive corrective EQ does. This
+  is the rare place where a boost (e.g. a bass-shelf lift) is both very audible
+  and very safe.
+
 ## Classify the problem (the core skill)
 
 For each region, decide the **type** before proposing a fix:
