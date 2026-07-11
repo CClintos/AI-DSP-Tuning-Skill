@@ -140,7 +140,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             g_lim=(-15.0, 3.0), q_lim=(0.5, 8.0), min_gain=1.0,
             improve_pct=6.0, boost_penalty=0.5, hf_q_penalty=0.4,
             hf_q_knee=4.0, transition_hz=1000.0, selection_tax_weight=0.25,
-            null_boost_penalty=0.8, verbose=False):
+            null_boost_penalty=0.8, partner_target_db=None, partner_weight=0.0,
+            partner_band=(700.0, 5000.0), verbose=False):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -172,9 +173,35 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         makes inside masked-out bins (null_boost_penalty x mean boost there),
         closing that loophole instead of just declining to reward it;
       - bands with fitted |G| < min_gain dB are dropped at the end.
+      - PARTNER MATCH (image stability, Smaart discipline: interchannel
+        mismatch is more audible than absolute-curve error): pass
+        partner_target_db = the OTHER channel's already-fitted post-EQ curve
+        (dev_db + cascade_db(freqs, other_bands)) and partner_weight > 0 to
+        additionally pull THIS channel's corrected curve toward matching it
+        within partner_band (default 700 Hz-5 kHz, the image-critical range
+        lr_match_report also uses). This can justify a band purely to close
+        an L/R gap even when it barely moves this channel's own distance to
+        target -- both the fit and the parsimony gate are partner-aware so
+        such a band isn't rejected as "no improvement." See lr_match_report
+        for the read-only diagnostic that tells you whether this is needed.
+
+        IMPORTANT ASYMMETRY: closing a gap by matching the WORSE side means
+        pulling the better-matching channel away from target on purpose --
+        trading absolute tonal accuracy for image stability. That's often
+        the right trade (imaging is more audible than a small absolute
+        error), but it's a real trade, not a free win, so it isn't free in
+        the math either: partner_weight competes against the existing boost
+        tax (boost_penalty/selection_tax_weight), which correctly resists a
+        boost that helps nothing but matching. A weight around 1.0 may not
+        be enough to win that fight if the needed move is a boost -- raise
+        it (2-4+) once you've decided the image-stability payoff is worth
+        it; don't just crank it by default. Prefer improving the worse
+        channel directly when that's possible instead of degrading the
+        better one to match it.
 
     Returns (bands, report) - bands as [(F, Q, G), ...] rounded to hardware
-    steps (0.25 dB gain), report dict with before/after scores.
+    steps (0.25 dB gain), report dict with before/after scores (plus
+    partner_mismatch_before/after when partner matching is active).
     """
     from scipy.optimize import least_squares
 
@@ -185,6 +212,24 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     w = audibility_weight(fsel)
     if conf is not None:
         w = w * np.clip(conf[sel], 0.0, 1.0)     # continuous confidence down-weight
+
+    psel = pw = ptarget = None
+    if partner_target_db is not None and partner_weight > 0:
+        psel = ((freqs >= max(fit_band[0], partner_band[0])) &
+                (freqs <= min(fit_band[1], partner_band[1])))
+        if mask is not None:
+            psel = psel & mask
+        if np.any(psel):
+            pw = audibility_weight(freqs[psel])
+            ptarget = np.asarray(partner_target_db, dtype=float)[psel]
+        else:
+            psel = None
+
+    def partner_mismatch(bands):
+        if psel is None:
+            return 0.0
+        own = dev_db[psel] + cascade_db(freqs[psel], bands)
+        return float(wrms(np.abs(own - ptarget), pw))
 
     def penalties(bands):
         # CONSTANT length (2 terms/band) so least_squares' finite-diff Jacobian
@@ -200,13 +245,28 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
         r = (dev_db[sel] + cascade_db(fsel, bands)) * w
-        return np.concatenate([r, penalties(bands)])
+        parts = [r, penalties(bands)]
+        if psel is not None:
+            own_p = dev_db[psel] + cascade_db(freqs[psel], bands)
+            parts.append(partner_weight * pw * (own_p - ptarget))
+        return np.concatenate(parts)
 
     def score_of(params):
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
         full = dev_db + cascade_db(freqs, bands)
         return audibility_score(freqs, full, band=fit_band, mask=mask, conf=conf)
+
+    def combined_score_of(params):
+        """score_of plus the partner-match penalty, when active. This (not
+        score_of) is what drives band-count decisions -- a band that only
+        closes an L/R gap should count as progress even if it barely moves
+        this channel's own distance to target. score_of/audibility_score
+        stay pure for the reported 'score_after' (still means distance-to-
+        target, not distance-to-partner)."""
+        bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
+                 for i in range(len(params) // 3)]
+        return score_of(params) + partner_weight * partner_mismatch(bands)
 
     def selection_score_of(params):
         """Score used by the parsimony gate.
@@ -225,19 +285,29 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             if np.any(excluded):
                 spill = cascade_db(freqs, bands)[excluded]
                 null_cost = null_boost_penalty * float(np.mean(np.maximum(spill, 0.0)))
-        return score_of(params) + selection_tax_weight * tax + null_cost
+        return combined_score_of(params) + selection_tax_weight * tax + null_cost
 
     base_score = audibility_score(freqs, dev_db, band=fit_band, mask=mask, conf=conf)
+    base_partner = partner_mismatch([])
+    base_combined = base_score + partner_weight * base_partner
     params = np.array([])
     lo_f, hi_f = np.log10(fit_band[0] * 1.02), np.log10(fit_band[1] * 0.98)
-    cur_score = base_score
-    cur_select_score = base_score
+    cur_score = base_combined
+    cur_select_score = base_combined
 
     for k in range(n_bands_max):
-        # seed the next band at the biggest remaining weighted, smoothed bump
+        # seed the next band at the biggest remaining weighted, smoothed bump.
+        # Blends in partner mismatch (when active) so a channel that's
+        # already flat vs target but diverging from its partner still gets a
+        # seed frequency, instead of the empty-residual break below firing
+        # before partner matching ever gets a chance.
         bands_now = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                      for i in range(len(params) // 3)]
-        res_now = erb_smooth(freqs, dev_db + cascade_db(freqs, bands_now))
+        raw_now = dev_db + cascade_db(freqs, bands_now)
+        seed_basis = raw_now.copy()
+        if psel is not None:
+            seed_basis[psel] = raw_now[psel] + partner_weight * (raw_now[psel] - ptarget)
+        res_now = erb_smooth(freqs, seed_basis)
         res_w = np.where(sel, np.abs(res_now) * audibility_weight(freqs), 0)
         if conf is not None:
             res_w *= np.clip(conf, 0.0, 1.0)
@@ -251,7 +321,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         ub = np.tile([hi_f, q_lim[1], g_lim[1]], nb)
         fit = least_squares(resid, np.clip(trial, lb, ub), bounds=(lb, ub),
                             method='trf', max_nfev=400)
-        new_score = score_of(fit.x)
+        new_score = combined_score_of(fit.x)
         new_select_score = selection_score_of(fit.x)
         raw_gain_pct = 100.0 * (cur_score - new_score) / max(cur_score, 1e-9)
         select_gain_pct = 100.0 * (cur_select_score - new_select_score) / max(cur_select_score, 1e-9)
@@ -272,12 +342,16 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     final = audibility_score(freqs, dev_db + cascade_db(freqs, bands),
                              band=fit_band, mask=mask, conf=conf)
     final_tax = selection_score_of(np.array(
-        sum(([np.log10(F), Q, G] for F, Q, G in bands), []), dtype=float)) if bands else base_score
-    return bands, {'score_before': round(base_score, 3),
-                   'score_after': round(final, 3),
-                   'selection_score_before': round(base_score, 3),
-                   'selection_score_after': round(final_tax, 3),
-                   'bands_used': len(bands)}
+        sum(([np.log10(F), Q, G] for F, Q, G in bands), []), dtype=float))
+    report = {'score_before': round(base_score, 3),
+              'score_after': round(final, 3),
+              'selection_score_before': round(base_score, 3),
+              'selection_score_after': round(final_tax, 3),
+              'bands_used': len(bands)}
+    if psel is not None:
+        report['partner_mismatch_before'] = round(base_partner, 3)
+        report['partner_mismatch_after'] = round(partner_mismatch(bands), 3)
+    return bands, report
 
 # --------------------------------------------------------------------------
 # 3c) INTERFERENCE / SUMMATION AUDIT — added 2026-07-03 (Fable pass).
@@ -333,6 +407,52 @@ def crossover_confidence(freqs, solo_a, solo_b, together_db, band):
             'destructive_interference_in_band': cancelling,
             'phase_reliability_a': ph_a, 'phase_reliability_b': ph_b,
             'usable_for_crossover_decisions': usable}
+
+# --------------------------------------------------------------------------
+# L/R IMAGE-STABILITY REPORT -- Smaart practice: interchannel mismatch is more
+# audible than absolute-curve error, because a center image (vocals, kick,
+# anything panned center) is built from L and R summing coherently. Wherever
+# the two sides diverge in level, the image pulls toward the louder side AT
+# THAT FREQUENCY -- heard as smear/wander even when each channel individually
+# looks close to target. perceptual_score()'s 'stereo' term already scores
+# this as one scalar; this exposes WHERE and BY HOW MUCH so a fix can be
+# targeted instead of guessed at. Read-only diagnostic -- see fit_peq's
+# partner_target_db/partner_weight below for the matching bias itself.
+def lr_match_report(freqs, left_db, right_db, band=(300.0, 6000.0), flag_db=1.5):
+    """left_db/right_db: any two curves on the same freq grid (raw measured,
+    or post-EQ-predicted dev+cascade) -- whichever comparison you want a
+    verdict on. band: image-critical range to judge (vocals/timbre); default
+    matches perceptual_score's stereo term. flag_db: per-ERB-band mismatch
+    that counts as audible (~1.5 dB is a reasonable "you'd notice" floor).
+
+    Returns per-region flags (extent, peak mismatch, louder side) plus an
+    overall wrms mismatch score. Does not decide anything -- surfaces it."""
+    freqs = np.asarray(freqs, dtype=float)
+    diff = erb_smooth(freqs, np.asarray(left_db, dtype=float) - np.asarray(right_db, dtype=float))
+    sel = (freqs >= band[0]) & (freqs <= band[1])
+    flagged = sel & (np.abs(diff) >= flag_db)
+
+    regions = []
+    in_run = False
+    start = 0
+    for i in range(len(freqs)):
+        if flagged[i] and not in_run:
+            start, in_run = i, True
+        if in_run and (not flagged[i] or i == len(freqs) - 1):
+            end = i if flagged[i] else i - 1
+            seg = slice(start, end + 1)
+            j = start + int(np.argmax(np.abs(diff[seg])))
+            regions.append({'f_lo': round(float(freqs[start]), 1),
+                            'f_hi': round(float(freqs[end]), 1),
+                            'peak_hz': round(float(freqs[j]), 1),
+                            'peak_delta_db': round(float(diff[j]), 2),
+                            'louder_side': 'left' if diff[j] > 0 else 'right'})
+            in_run = False
+
+    w = band_weight(freqs, band[0], band[1])
+    overall_db = wrms(np.abs(diff)[sel], w[sel]) if np.any(sel) else 0.0
+    return {'regions': regions, 'overall_mismatch_db': round(float(overall_db), 2),
+            'stable': len(regions) == 0}
 
 # --------------------------------------------------------------------------
 # SPECIAL-FILTER XML WRITERS -- encodings VERIFIED by controlled export-diffs.
@@ -1672,5 +1792,51 @@ if __name__ == '__main__':
           % (r29['delay_ms_B'], r29['xcorr_delay_ms'], r29['xcorr_agrees']))
     assert r29['xcorr_agrees']
     assert abs(r29['delay_ms_B'] - r29['xcorr_delay_ms']) < 0.05
+
+    # ---- TEST33: lr_match_report flags a real L/R gap, clears on a match --------
+    left33 = peaking_db(freqs, 1500.0, 2.0, 3.0)      # left channel +3dB bump @1.5k
+    right33 = np.zeros_like(freqs)
+    rep33 = lr_match_report(freqs, left33, right33, band=(300.0, 6000.0), flag_db=1.5)
+    print('\nTEST33 lr_match_report (left +3dB@1.5k vs flat right):')
+    print('  regions:', rep33['regions'], '| overall=%.2f dB | stable=%s' %
+          (rep33['overall_mismatch_db'], rep33['stable']))
+    assert not rep33['stable'] and len(rep33['regions']) >= 1
+    r0 = rep33['regions'][0]
+    assert abs(r0['peak_hz'] - 1500.0) < 1500.0 * 0.15
+    assert r0['louder_side'] == 'left' and r0['peak_delta_db'] > 1.5
+
+    rep33b = lr_match_report(freqs, left33, left33, band=(300.0, 6000.0), flag_db=1.5)
+    assert rep33b['stable'] and rep33b['overall_mismatch_db'] < 0.05
+    print('  identical L/R -> stable=%s overall=%.3f dB (exp ~0)' %
+          (rep33b['stable'], rep33b['overall_mismatch_db']))
+
+    # ---- TEST34: fit_peq partner matching -- closes an L/R gap that this
+    # channel's own distance-to-target alone would never justify a band for ------
+    partner34 = peaking_db(freqs, 1500.0, 2.0, 3.0)   # "left" ended up +3dB@1.5k
+    dev_r34 = np.zeros_like(freqs)                     # "right" already matches target
+    bands_off34, rep_off34 = fit_peq(freqs, dev_r34, (200.0, 6000.0), n_bands_max=3)
+    print('\nTEST34 partner match: without partner_weight, right stays untouched:', bands_off34)
+    assert len(bands_off34) == 0, 'right should not touch an already-flat curve on its own'
+
+    # partner_weight=1.0 is deliberately NOT enough here -- the existing boost
+    # tax (boost_penalty/selection_tax_weight) correctly resists a boost that
+    # only helps partner-matching and does nothing for this channel's own
+    # target accuracy. That resistance is a feature, not a bug: matching a
+    # partner isn't free, and the caller must weight it high enough to say
+    # "the image-stability payoff is worth it here."
+    bands_on34, rep_on34 = fit_peq(freqs, dev_r34, (200.0, 6000.0), n_bands_max=3,
+                                   partner_target_db=partner34, partner_weight=3.0,
+                                   partner_band=(700.0, 5000.0))
+    print('TEST34 partner match: with partner_weight=3, right gets:', bands_on34)
+    print('  partner mismatch %.3f -> %.3f' %
+          (rep_on34['partner_mismatch_before'], rep_on34['partner_mismatch_after']))
+    assert len(bands_on34) >= 1, 'partner matching should justify a band here'
+    assert rep_on34['partner_mismatch_after'] < 0.5 * rep_on34['partner_mismatch_before']
+
+    right_corrected34 = dev_r34 + cascade_db(freqs, bands_on34)
+    rep34_after = lr_match_report(freqs, partner34, right_corrected34, band=(300.0, 6000.0))
+    print('  lr_match_report after partner match: stable=%s overall=%.2f dB' %
+          (rep34_after['stable'], rep34_after['overall_mismatch_db']))
+    assert rep34_after['overall_mismatch_db'] < 1.0, 'partner match should close most of the L/R gap'
 
     print('\nALL TESTS PASSED')
