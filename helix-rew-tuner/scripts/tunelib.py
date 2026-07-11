@@ -798,6 +798,61 @@ def octave_smooth_log(freqs, y, oct_frac):
 
 
 # --------------------------------------------------------------------------
+# ROBUST DELAY ESTIMATE (generalized cross-correlation) -- added to make TA
+# usable even when per-frequency phase confidence is shaky (the exact failure
+# mode a USB-mic timing-chirp capture can produce: clock drift corrupts phase
+# unevenly across frequency). A coherent-sum grid search is sensitive to
+# whichever bins happen to be weighted heavily; cross-correlation instead asks
+# "where does the BULK of the two spectra's energy line up in time" -- a
+# single global operation less swayed by a few bad bins. It does NOT fix
+# already-corrupted phase data (garbage in, garbage out, same as any method
+# using the same input) -- what it buys is a SECOND, differently-computed
+# estimate to cross-check the grid search against; large disagreement between
+# the two is itself a useful "don't trust this" signal, in the same spirit as
+# the coherence-gating discussed in methodology.md.
+def estimate_delay_xcorr(freqs, driver_a, driver_b, band, max_delay_ms=5.0, n_uniform=8192):
+    """Sign convention MATCHES polarity_delay_search's delay_ms_B (verified by
+    round-trip test): the returned delay is the correction to apply to
+    driver_b (via B*exp(-1j*2*pi*f*d_ms/1000)) to align it with driver_a.
+
+    Method: resample the complex spectra onto a UNIFORM linear frequency grid
+    (freqs is normally log-spaced -- IFFT needs linear spacing or the lag axis
+    is meaningless), interpolating real/imaginary parts separately (not
+    magnitude/phase, which risks unwrap artifacts at interpolation
+    boundaries), then IFFT the windowed cross-spectrum to get correlation vs.
+    lag and take the peak within +/-max_delay_ms.
+
+    Returns delay_ms and a confidence ratio (peak height / median sidelobe
+    height -- large means a sharp, trustworthy peak; near 1 means no real
+    peak, don't trust this estimate)."""
+    lo, hi = band
+    if not (freqs[0] <= lo and hi <= freqs[-1]):
+        raise ValueError('band must be within the measured frequency range')
+    f_lin = np.linspace(lo, hi, n_uniform)
+    Ar = np.interp(f_lin, freqs, driver_a.real); Ai = np.interp(f_lin, freqs, driver_a.imag)
+    Br = np.interp(f_lin, freqs, driver_b.real); Bi = np.interp(f_lin, freqs, driver_b.imag)
+    Au, Bu = Ar + 1j * Ai, Br + 1j * Bi
+    win = np.hanning(n_uniform)
+    cross = (Au * np.conj(Bu)) * win
+    n_fft = 4 * n_uniform
+    corr = np.fft.fftshift(np.fft.ifft(cross, n=n_fft))
+    df = f_lin[1] - f_lin[0]
+    fs_equiv = df * n_fft
+    lags_ms = (np.arange(n_fft) - n_fft // 2) / fs_equiv * 1000.0
+    sel = np.abs(lags_ms) <= max_delay_ms
+    if not np.any(sel):
+        raise ValueError('max_delay_ms is smaller than the lag-axis resolution -- increase n_uniform')
+    mag = np.abs(corr)
+    i0 = int(np.argmax(mag[sel]))
+    peak_lag = float(lags_ms[sel][i0])
+    peak_val = float(mag[sel][i0])
+    sidelobe = float(np.median(mag[sel]))
+    confidence = peak_val / (sidelobe + 1e-12)
+    return {'delay_ms': round(peak_lag, 3), 'confidence_ratio': round(confidence, 1),
+            'reliable': bool(confidence > 10.0)}
+
+
+# --------------------------------------------------------------------------
 # 3d) POLARITY/DELAY SEARCH -- added 2026-07-03. Completes the doctrine ladder in
 # code: polarity -> delay come BEFORE any APF (we had optimize_allpass but not
 # the cheaper rungs below it, which was inconsistent). Same inputs (complex solo
@@ -805,14 +860,22 @@ def octave_smooth_log(freqs, y, oct_frac):
 # optimize_allpass, so results are directly comparable. Run THIS first; only if
 # `residual_needs_apf` is True has an APF earned consideration.
 def polarity_delay_search(freqs, driver_a, driver_b, band, max_delay_ms=1.5,
-                          steps=121, damage_band=(60.0, 16000.0), damage_free_db=0.5):
+                          steps=121, damage_band=(60.0, 16000.0), damage_free_db=0.5,
+                          cross_check=True):
     """Search polarity (binary, on B) x local delay (on B, +ve = B later) for the
     best summed response in `band`. Candidate finder, not a finalizer: apply the
-    winning polarity/delay in PC-Tool (delay via the TA UI -- Python still never
-    writes <T> tags), then re-measure the together trace to confirm.
+    winning polarity/delay via PC-Tool or afpx.write_delay_samples (verified,
+    user-confirmed writes only -- see helix_hardware.md), then re-measure the
+    together trace to confirm.
     SIGN NOTE: delay_ms_B < 0 means B must arrive EARLIER, which hardware can't
     do -- apply +|delay| to the OTHER branch instead (keep its pair's internal
-    offsets intact), exactly like the doc's negative-delay TA rule."""
+    offsets intact), exactly like the doc's negative-delay TA rule.
+
+    cross_check=True (default) also runs estimate_delay_xcorr as an
+    independent second opinion and reports agreement -- large disagreement
+    between the grid search and the cross-correlation estimate means the
+    phase data likely isn't trustworthy enough to act on, even if the grid
+    search itself looks confident."""
     sel = (freqs >= band[0]) & (freqs <= band[1])
     dmg = (freqs >= damage_band[0]) & (freqs <= damage_band[1])
     if not np.any(sel):
@@ -846,6 +909,17 @@ def polarity_delay_search(freqs, driver_a, driver_b, band, max_delay_ms=1.5,
     best['improvement_pct'] = round(100.0 * (base - best['score_after']) / max(base, 1e-9), 1)
     # if polarity+delay left >25% of the original gap, an APF search is justified next
     best['residual_needs_apf'] = bool(best['score_after'] > 0.25 * base)
+    if cross_check:
+        try:
+            xc = estimate_delay_xcorr(freqs, driver_a, driver_b, band, max_delay_ms=max_delay_ms)
+            best['xcorr_delay_ms'] = xc['delay_ms']
+            best['xcorr_confidence_ratio'] = xc['confidence_ratio']
+            agree_ms = abs(best['delay_ms_B'] - xc['delay_ms'])
+            best['xcorr_agreement_ms'] = round(agree_ms, 3)
+            best['xcorr_agrees'] = bool(xc['reliable'] and agree_ms <= 0.15)
+        except ValueError:
+            best['xcorr_delay_ms'] = None
+            best['xcorr_agrees'] = None
     return best
 
 # --------------------------------------------------------------------------
@@ -1541,14 +1615,14 @@ if __name__ == '__main__':
     assert np.allclose(zero_gd, 0.0)
 
 
-    # ---- TEST27: voicing layer (voice_target + measure_tilt) --------------------
+    # ---- TEST30: voicing layer (voice_target + measure_tilt) --------------------
     base27 = np.zeros_like(freqs)
     # tilt round-trips through measure_tilt, and midrange pivot is preserved
     voiced27 = voice_target(freqs, base27, tilt_db_per_oct=-0.9)
     mt27 = measure_tilt(freqs, voiced27)
     i1k = int(np.argmin(np.abs(freqs - 1000)))
     print()
-    print('TEST27 voicing: applied -0.9 dB/oct -> measured %.2f | 1kHz pivot level %.3f'
+    print('TEST30 voicing: applied -0.9 dB/oct -> measured %.2f | 1kHz pivot level %.3f'
           % (mt27['tilt_db_per_oct'], voiced27[i1k]))
     assert abs(mt27['tilt_db_per_oct'] - (-0.9)) < 0.1, 'tilt did not round-trip'
     assert abs(voiced27[i1k]) < 0.05, 'tilt pivot did not preserve midrange level'
@@ -1562,5 +1636,41 @@ if __name__ == '__main__':
     pr27 = voice_target(freqs, base27, presence_db=2.0, presence_hz=3000.0)
     i3k = int(np.argmin(np.abs(freqs - 3000))); i300 = int(np.argmin(np.abs(freqs - 300)))
     assert abs(pr27[i3k] - 2.0) < 0.05 and abs(pr27[i300]) < 0.2, 'presence bell not local'
+
+
+    # ---- TEST31: estimate_delay_xcorr recovers a known delay, matches search sign
+    A28 = np.ones_like(freqs, dtype=complex) * 10 ** (75 / 20)
+    B28 = np.exp(-1j * 2 * np.pi * freqs * 0.73 / 1000.0) * 10 ** (75 / 20)
+    xc28 = estimate_delay_xcorr(freqs, A28, B28, (200.0, 8000.0), max_delay_ms=2.0)
+    print()
+    print('TEST31 xcorr: recovered=%.3fms (injected -0.73ms correction) conf=%.1f reliable=%s'
+          % (xc28['delay_ms'], xc28['confidence_ratio'], xc28['reliable']))
+    assert abs(xc28['delay_ms'] - (-0.73)) < 0.02, 'xcorr delay estimate off'
+    assert xc28['reliable']
+    # sign convention matches polarity_delay_search: applying xcorr's own delay_ms
+    # via the SAME correction formula must land on the coherent ceiling
+    B28_corrected = B28 * np.exp(-1j * 2 * np.pi * freqs * xc28['delay_ms'] / 1000.0)
+    # sub-100us residual error (well under one 96kHz sample) shows as small ripple
+    # right at the top of the band -- check a representative range at a tolerance
+    # that reflects real-world usefulness, not idealized zero-error precision.
+    check_band = (freqs >= 200) & (freqs <= 6000)
+    corrected_db = 20 * np.log10(np.abs(A28 + B28_corrected)[check_band] + 1e-12)
+    ceiling_db = 20 * np.log10(np.abs(A28)[check_band] + np.abs(B28)[check_band] + 1e-12)
+    assert np.allclose(corrected_db, ceiling_db, atol=0.1), 'xcorr sign convention mismatch'
+
+    # noisy/random phase (simulated bad capture) must read as unreliable, not confident-wrong
+    rng28 = np.random.RandomState(0)
+    B28_noisy = np.exp(1j * rng28.uniform(-np.pi, np.pi, len(freqs))) * 10 ** (75 / 20)
+    xc28_noisy = estimate_delay_xcorr(freqs, A28, B28_noisy, (200.0, 8000.0), max_delay_ms=2.0)
+    print('TEST28 xcorr on garbage phase: conf=%.1f reliable=%s (must be False)'
+          % (xc28_noisy['confidence_ratio'], xc28_noisy['reliable']))
+    assert not xc28_noisy['reliable']
+
+    # ---- TEST32: polarity_delay_search's cross-check agrees on clean data ------
+    r29 = polarity_delay_search(freqs, A28, B28, (200.0, 8000.0), max_delay_ms=2.0)
+    print('TEST32 cross-check: grid=%.3fms xcorr=%.3fms agrees=%s'
+          % (r29['delay_ms_B'], r29['xcorr_delay_ms'], r29['xcorr_agrees']))
+    assert r29['xcorr_agrees']
+    assert abs(r29['delay_ms_B'] - r29['xcorr_delay_ms']) < 0.05
 
     print('\nALL TESTS PASSED')

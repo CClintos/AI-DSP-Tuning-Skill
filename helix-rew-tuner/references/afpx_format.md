@@ -86,6 +86,21 @@ Notes that have burned people:
 DSP's internal sample rate (model-specific — see `helix_hardware.md`, don't assume
 96 kHz). **Preserve this tag unless the user asks to change timing.**
 
+**Writing a delay is now a real, verified capability — `afpx.write_delay_samples`
+/ `afpx.verify_delay_write`.** This does NOT change the standing rule: delay
+writes are **user-initiated and explicitly confirmed for that specific change,
+every time — never applied automatically from a `polarity_delay_search` or
+`estimate_delay_xcorr` result.** Those functions are candidate finders; a
+found delay becomes a write only after the user has seen the specific number
+and said to apply it. `write_delay_samples` touches only the one channel's `T=`
+value — `PM`/`P` are left byte-identical (they aren't confirmed to mean
+anything, see below, so nothing should touch them). `verify_delay_write` is
+deliberately stronger than the generic `roundtrip_lint(allow_delay=True)`: it
+confirms the exact new value landed, every other channel's delay tag is
+untouched, and every `<OC>` block is unchanged — not just "something delay-
+related changed." Always run it after a delay write, and always follow with a
+re-measure — a predicted-good delay is still a prediction until confirmed.
+
 **Polarity is `CINV` on the `<OC>` tag — VERIFIED 2026-07-07 by controlled diff**
 (on a `.pct6` file, same `<OC>` schema as `.afpx`): flipping polarity for one
 channel in PC-Tool changed exactly one thing, `CINV="1"` → `CINV="0"`, and nothing

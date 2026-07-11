@@ -50,13 +50,17 @@ and is outside the safe auto-write path.
 ## Delay & polarity
 
 Per-channel delay in samples. Delay writes are lower-risk than all-passes but
-should still be **user-initiated**, not auto-written, and verified by re-measure.
+should still be **user-initiated for that specific change, every time**, not
+auto-written from a search result, and always **verified by re-measure** after.
+`afpx.write_delay_samples`/`afpx.verify_delay_write` make the write itself
+safe and specific (touches only the one intended value, verified nothing else
+moved) — they do not change *when* it's appropriate to write. See
+`afpx_format.md` for the write-path details.
 
-**Polarity attribute mapping is UNVERIFIED.** See `afpx_format.md` for the full
-account — a real counterexample (a sub channel with `PM="4"` that PC-Tool showed
-as Normal, with `P="0"` present regardless) contradicts the earlier `PM=1/4`
-claim. Don't assert normal/inverted from either attribute until a controlled
-export-diff confirms which one (if either) actually encodes it.
+**Polarity is `CINV` on `<OC>` — confirmed by controlled diff, not `PM`/`P` on
+the delay tag.** (This section previously said the mapping was unverified;
+that was resolved and this note was stale — see `afpx_format.md` for the full
+account.) `PM`/`P` don't reliably mean anything and should never be written.
 
 **Sample rate is model-specific — never assume it.** The P SIX DSP MK2 runs at
 96 kHz internally, so `delay_ms = samples / 96`. A different Helix model may run at
