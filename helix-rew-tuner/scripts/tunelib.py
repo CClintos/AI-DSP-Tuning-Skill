@@ -1333,6 +1333,64 @@ def complex_vector_average(complex_traces):
     return np.mean(stack, axis=0)
 
 # --------------------------------------------------------------------------
+# SPATIAL CONSISTENCY MASK -- the core Smaart discipline this skill was
+# missing: measure several (3-7) mic positions spanning the listening area,
+# then only correct what's COMMON across them. A dip that's at the mic spot
+# but gone (or moved) a few inches away is position-specific interference
+# (comb-filtering between direct sound and a nearby reflection, e.g. dash/
+# door/opposite-side arrival) -- EQing it makes that one spot better and
+# everywhere else worse. A dip that holds at every position is a real
+# driver/room feature and is safe to correct. This is the honest,
+# measurement-driven answer to "is this dip safe to boost" that a single-
+# position phase/min-phase check can't fully give (see fit_peq's docstring
+# and methodology.md -- excess_gd_mask can call a comb-filter null locally
+# minimum-phase-ish from one position and still be wrong about whether it's
+# interference, because it never sees a second position to compare against).
+# fit_peq's mask/conf parameters were built for exactly this kind of input --
+# this is what finally sources them from real spatial data instead of a
+# single-position guess.
+def spatial_consistency(freqs, position_traces, consistent_db=1.5,
+                        min_positions=3, smooth_oct=1.0 / 12.0):
+    """position_traces: list of >=min_positions arrays on the SAME freq grid,
+    one per mic position -- either complex (magnitude+phase, reduced to
+    magnitude here) or plain SPL in dB (fine, and usually all that's
+    practical to capture per position -- phase-valid capture at multiple
+    positions is a much bigger ask than just moving the mic). Judges
+    MAGNITUDE consistency only; phase at an arbitrary position isn't a
+    meaningful thing to average the way "is this dip here or not" is.
+
+    consistent_db: how much across-position spread still counts as "the same
+    feature" (~1.5 dB is a reasonable floor -- normal measurement/positioning
+    noise is smaller than that; a real interference null is usually much
+    larger, often 6+ dB at one spot and near-zero a few inches away).
+
+    Returns mean_db (across-position average), spread_db (per-frequency
+    across-position std, lightly octave-smoothed so single-bin position-grid
+    jitter doesn't flip the mask), mask (bool, True = consistent enough to
+    trust a correction there), conf (continuous 0..1, 1 at spread=0 tapering
+    to 0 by 2x consistent_db -- feed directly into fit_peq's conf=).
+
+    Use: sc = spatial_consistency(freqs, [pos1, pos2, pos3])
+         fit_peq(freqs, dev_db, band, mask=sc['mask'], conf=sc['conf'])"""
+    if len(position_traces) < min_positions:
+        raise ValueError('need >= %d position traces (got %d) -- a single '
+                         'position cannot tell a real dip from a position-'
+                         'specific null' % (min_positions, len(position_traces)))
+    freqs = np.asarray(freqs, dtype=float)
+    db_traces = []
+    for t in position_traces:
+        t = np.asarray(t)
+        db_traces.append(20 * np.log10(np.abs(t)) if np.iscomplexobj(t) else t.astype(float))
+    stack = np.stack(db_traces, axis=0)
+    mean_db = np.mean(stack, axis=0)
+    spread_raw = np.std(stack, axis=0, ddof=0)
+    spread_db = octave_smooth_log(freqs, spread_raw, smooth_oct)
+    mask = spread_db <= consistent_db
+    conf = np.clip(1.0 - spread_db / (2.0 * consistent_db), 0.0, 1.0)
+    return {'mean_db': mean_db, 'spread_db': spread_db,
+            'mask': mask, 'conf': conf}
+
+# --------------------------------------------------------------------------
 # "INERT BAND" CHECK -- before trusting a proposed (or externally-supplied) EQ
 # band, confirm the target driver actually has enough LEVEL at that frequency
 # to matter in the sum. A cut/boost on a driver that's already >~6 dB below
@@ -1838,5 +1896,35 @@ if __name__ == '__main__':
     print('  lr_match_report after partner match: stable=%s overall=%.2f dB' %
           (rep34_after['stable'], rep34_after['overall_mismatch_db']))
     assert rep34_after['overall_mismatch_db'] < 1.0, 'partner match should close most of the L/R gap'
+
+    # ---- TEST35: spatial_consistency separates a real dip from a comb-filter
+    # null that just happens to sit under the mic at one position ---------------
+    real_dip35 = peaking_db(freqs, 300.0, 2.0, -6.0)      # holds at every position
+    rng35 = np.random.RandomState(1)
+    null_centers35 = [380.0, 415.0, 450.0, 415.0]         # wanders position to position
+    positions35 = []
+    for nc in null_centers35:
+        noise = rng35.normal(0, 0.2, size=freqs.shape)
+        positions35.append(real_dip35 + peaking_db(freqs, nc, 8.0, -8.0) + noise)
+    sc35 = spatial_consistency(freqs, positions35, consistent_db=1.5, min_positions=3)
+    i300_35 = int(np.argmin(np.abs(freqs - 300.0)))
+    i415_35 = int(np.argmin(np.abs(freqs - 415.0)))
+    print('\nTEST35 spatial_consistency: real dip@300Hz spread=%.2fdB mask=%s conf=%.2f | '
+          'wandering null@415Hz spread=%.2fdB mask=%s conf=%.2f' %
+          (sc35['spread_db'][i300_35], sc35['mask'][i300_35], sc35['conf'][i300_35],
+           sc35['spread_db'][i415_35], sc35['mask'][i415_35], sc35['conf'][i415_35]))
+    assert sc35['mask'][i300_35] and sc35['conf'][i300_35] > 0.7, \
+        'real, position-invariant dip should stay trusted'
+    assert not sc35['mask'][i415_35] and sc35['conf'][i415_35] < 0.5, \
+        'position-varying null should be excluded/down-weighted'
+
+    # too few positions must refuse outright rather than silently trust a
+    # single-position measurement it cannot actually validate
+    try:
+        spatial_consistency(freqs, positions35[:2], min_positions=3)
+        raise AssertionError('spatial_consistency accepted too few positions')
+    except ValueError:
+        pass
+    print('  <3 positions correctly rejected')
 
     print('\nALL TESTS PASSED')

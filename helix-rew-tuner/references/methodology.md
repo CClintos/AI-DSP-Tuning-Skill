@@ -108,6 +108,9 @@ For each region, decide the **type** before proposing a fix:
 - **Modal / reflection / spatial null** — a deep dip that appears in the solos too,
   moves across mic positions, or has wild excess group delay. → do **not** correct;
   boosting it wastes headroom and fixes nothing. Report it as non-correctable.
+  If multiple position sweeps are available, `tunelib.spatial_consistency`
+  (below) turns "moves across mic positions" from a judgment call into a
+  per-frequency mask/conf you can hand straight to `fit_peq`.
 - **Measurement invalid** — low prediction confidence, clock-drift artifacts, wrong
   axis. → request a re-measure; don't apply math to bad data.
 
@@ -186,6 +189,37 @@ export, but forward-compatibility is cheap), `measure.load_text_export` reads
 an optional 4th column as coherence and returns it — usable directly as the
 `conf` weight `fit_peq`/`prediction_confidence` already accept, at which point
 you'd have the genuine Smaart-style signal instead of a proxy for it.
+
+### Multi-position variance — "EQ what's common, ignore what moves"
+
+`complex_vector_average` (above) is for CLEANING UP a phase-valid measurement.
+`tunelib.spatial_consistency(freqs, position_traces, consistent_db=1.5)` is for
+a different, earlier decision: **deciding what's even safe to correct**, and it
+only needs plain SPL (dB) per position — no phase capture required, which makes
+it far cheaper to gather than what `complex_vector_average` needs. Take 3–7
+sweeps at slightly different fixed positions spanning head-width (same capture
+discipline as above — don't move the mic mid-sweep), pass the list of SPL
+curves in, and it returns a per-frequency `mask`/`conf` pair straight from the
+across-position spread: low spread (holds at every position) = a real driver/
+room feature, safe to correct; high spread (present at one spot, gone or
+shifted a few inches away) = position-specific comb-filtering, the textbook
+signature of the "Modal / reflection / spatial null" category above — feed it
+straight into `fit_peq(freqs, dev_db, band, mask=sc['mask'], conf=sc['conf'])`
+so the optimizer never spends a band on a dip that only exists at one seat
+position.
+
+**This is also the honest, data-driven answer to "is this dip safe to boost,"
+sharper than a single-position minimum-phase check alone can give.**
+`excess_gd_mask` asks whether a dip's *phase behavior* looks minimum-phase at
+one position — but a comb-filter null can look locally minimum-phase-ish from
+a single vantage point and still be interference-driven; the single-position
+math has no way to see that from one capture. Multiple positions do: a real
+minimum-phase amplitude rolloff holds its shape as you move the mic; an
+interference null's depth and center frequency both shift. Where the two
+checks agree (min-phase AND spatially consistent), correcting it is on solid
+ground. Where they disagree, or only one is available, treat the correction as
+unproven and say so — don't let a passing `excess_gd_mask` alone green-light a
+boost into what might still be a position-dependent cancellation.
 
 ## The crossover action-ladder (cheapest, safest first)
 
