@@ -294,6 +294,31 @@ localization. Broad level-match the two sides in the image band (~500 Hz–8 kHz
 weighted 700 Hz–5 kHz) — `tune_scorecard` reports L/R balance. A system sum cannot
 reveal L/R imbalance, so per-side work needs solo measurements.
 
+**Where, not just how much.** `tune_scorecard`/`perceptual_score`'s stereo term
+give one scalar for the whole band — useful as a headline number, useless for
+deciding what to fix. `lr_match_report(freqs, left, right, band, flag_db)`
+(Smaart discipline: interchannel mismatch is more audible than absolute-curve
+error, since a center image is built from L and R summing coherently — wherever
+they diverge in level at a frequency, the image pulls toward the louder side
+*at that frequency*, heard as smear/wander even when each channel individually
+reads close to target) gives the actual regions: extent, peak mismatch in dB,
+and which side is louder. Read-only — it tells you where to look, not what to
+do about it.
+
+**Closing a flagged gap** usually means fixing the worse channel directly
+(preferred — it also improves that channel's own accuracy). When that's not
+possible — the "worse" side's deviation is a masked null, non-min-phase, or
+otherwise un-EQ-able — `fit_peq`'s `partner_target_db`/`partner_weight` can
+instead pull the *better* channel toward matching the compromised one, trading
+a bit of that channel's own tonal accuracy for a stable image. This is a real
+trade, not a free win: it competes against `fit_peq`'s existing boost tax by
+design, so `partner_weight` around 1.0 often isn't enough to win when the
+needed move is a boost — that resistance is intentional, not a bug, since a
+boost that only helps matching and does nothing for the channel's own target
+accuracy should have to earn its place. Raise the weight (2–4+) once you've
+actually decided the image-stability payoff is worth it for that specific
+region; don't reach for it as a default.
+
 ## Restraint (the thing that beats aggressive auto-EQ)
 
 - Model candidate edits jointly and predict the summed result — bands within an

@@ -59,7 +59,16 @@ Run these with the user's files; they are the deterministic layer.
   verified formula), `crossover_confidence` (bundles prediction_confidence +
   interference_audit + phase_linearity_residual into one band-limited check
   for a SPECIFIC crossover region — always pass the crossover band, never
-  the whole trace), perceptual scoring, min-phase/excess-group-delay
+  the whole trace), `lr_match_report` (Smaart discipline: interchannel
+  mismatch is more audible than absolute-curve error — flags WHERE L and R
+  diverge in the image-critical band and by how much, read-only) and
+  `fit_peq`'s `partner_target_db`/`partner_weight` (can justify a band that
+  closes an L/R gap even when it barely helps this channel's own distance to
+  target — competes against the existing boost tax by design, so
+  partner_weight needs deliberate tuning above ~1.0 to win when the fix is a
+  boost; see the docstring's "IMPORTANT ASYMMETRY" note before using it —
+  prefer fixing the worse channel directly when that's possible), perceptual
+  scoring, min-phase/excess-group-delay
   classifier, and the verified filter writers (`allpass_fil_str`,
   `allpass1_fil_str`, `shelf_fil_str`). Run `python tunelib.py` to self-test
   (prints ALL TESTS PASSED).
