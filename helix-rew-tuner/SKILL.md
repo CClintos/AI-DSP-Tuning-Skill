@@ -39,7 +39,10 @@ spending a limited filter budget where it improves the whole system.
 Run these with the user's files; they are the deterministic layer.
 
 - **`tunelib.py`** — the verified analysis + DSP core (import it). Biquad/shelf/
-  all-pass math, `interference_audit`, `polarity_delay_search`, `optimize_allpass`,
+  all-pass math, `voice_target`/`measure_tilt` (the VOICING layer — adjust the
+  target's overall tonal tilt/bass/presence/air, the most audible single lever;
+  see workflow step 3b), `interference_audit`, `polarity_delay_search`,
+  `optimize_allpass`,
   `prediction_confidence`, `tune_scorecard`, `headroom_report`, `compression_check`,
   `hpf_excursion_risk` (optional driver-safety check), `ms_to_samples`/`samples_to_ms`
   (sample-rate-aware delay conversion — never hardcode a rate), `calibrate_solo_levels`
@@ -152,6 +155,28 @@ For each region, decide the *type* of problem before proposing a fix
 Use the `interference_audit` (power-sum vs measured) to tell a real magnitude dip
 from destructive summation. Use `tune_scorecard` for every before/after comparison
 so the math is identical each time.
+
+### 3b. Voice the target — the most audible single decision
+
+Do this **before** proposing EQ, because it changes the *goal* the EQ then
+matches. The overall tonal tilt is the most audible thing in the whole tune —
+more than any individual filter — and matching a curve exactly is not the same
+as sounding good. A studio-flat target reliably sounds bright and thin in a
+car.
+
+- Run `measure_tilt` on the measured **System Sum** to see where it currently
+  sits (dB/octave) and how that compares to the typical good-in-car range
+  (~−0.8 to −1.0 dB/oct). Report it in plain language.
+- Run `measure_tilt` on the **supplied target** too — if the user handed you a
+  studio/flat curve, say so, and note it will likely sound bright before you
+  correct toward it.
+- Offer to **voice** the target with `voice_target` using the four listener-
+  language knobs — tilt (warmer/brighter), bass shelf (more/less weight),
+  presence (more forward / laid back), air (more air / tame the top). Present
+  these as taste choices with sensible defaults, not as a correction; let the
+  user pick. Feed the voiced curve into step 4 exactly like any other target.
+- Keep voicing (a taste layer on the *goal*) conceptually separate from
+  correction (measurement-driven, toward that goal). Say which is which.
 
 ### 4. Propose — jointly, within budget
 
