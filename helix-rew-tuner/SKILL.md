@@ -50,7 +50,13 @@ Run these with the user's files; they are the deterministic layer.
   (sample-rate-aware delay conversion — never hardcode a rate), `calibrate_solo_levels`
   (recover true relative level between mismatched-test-level solos before magnitude
   analysis), `phase_linearity_residual` (quantify single-position phase reliability),
-  `complex_vector_average` (spatial averaging that preserves phase), `inert_band_check`
+  `complex_vector_average` (spatial averaging that preserves phase),
+  `spatial_consistency` (its magnitude-only sibling — needs only SPL per
+  position, no phase capture — turns 3-7 mic-position sweeps into a
+  per-frequency `mask`/`conf` that separates a real driver/room feature
+  (holds at every position) from a position-specific comb-filter null
+  (shifts or vanishes a few inches away), feeds straight into `fit_peq`),
+  `inert_band_check`
   / `reaches_target_after_boost` (sanity checks before trusting a proposed EQ band),
   `fit_peq`'s `null_boost_penalty` (actively penalizes a candidate band spilling
   boost into a masked null, not just excluding the null from the fit error),
