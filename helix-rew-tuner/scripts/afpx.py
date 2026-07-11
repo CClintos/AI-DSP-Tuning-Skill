@@ -171,6 +171,80 @@ def semantic_xover_key(xml):
                   for f in filters(xml) if attrs(f).get('T') in ('15', '16'))
 
 
+# ---------------------------------------------------------------- delay write
+# WRITE_DELAY_SAMPLES is a real, verified capability -- but this does NOT
+# change the project's standing rule (helix_hardware.md, SKILL.md): delay
+# writes are USER-INITIATED and EXPLICITLY CONFIRMED only, never applied
+# automatically from an analysis result. This function makes the write
+# possible and safe (touches only the one intended T= value; verify_
+# delay_write proves nothing else moved); it does not authorize when to call
+# it. Only writes the T= (samples) attribute -- never PM/P, which are NOT
+# confirmed to mean polarity (see afpx_format.md) and are left untouched.
+def write_delay_samples(xml, channel_index, samples):
+    """Write ONLY the T= (delay, in samples) attribute on the delay tag for
+    channel_index -- every other attribute on that tag (PM, P, ...) stays
+    byte-identical, and every other channel's delay tag is untouched.
+    channel_index is position-matched to channel_blocks()/channels() order,
+    the same convention already used for reading. samples must be a
+    non-negative integer (the DSP's actual internal rate determines what
+    physical delay that represents -- convert with tunelib.ms_to_samples
+    using the CONFIRMED rate for this unit, never assume 96 kHz)."""
+    samples = int(round(samples))
+    if samples < 0:
+        raise ValueError('delay samples must be non-negative: %d' % samples)
+    matches = list(re.finditer(r'<T [^>]*/?>', xml))
+    if channel_index < 0 or channel_index >= len(matches):
+        raise ValueError('channel_index %d out of range (%d delay tags found)'
+                         % (channel_index, len(matches)))
+    m = matches[channel_index]
+    old_tag = m.group(0)
+    if not re.search(r'(?<![A-Za-z])T="[^"]*"', old_tag):
+        raise ValueError('could not find a T= attribute in tag: %s' % old_tag)
+    new_tag = re.sub(r'(?<![A-Za-z])T="[^"]*"', 'T="%d"' % samples, old_tag, count=1)
+    return xml[:m.start()] + new_tag + xml[m.end():]
+
+
+def verify_delay_write(old_xml, new_xml, channel_index, expected_samples):
+    """Strong, SPECIFIC verification for a delay write -- deliberately stronger
+    than roundtrip_lint(allow_delay=True), which only checks THAT delay tags
+    changed, not WHAT changed or whether anything else moved too. Confirms:
+      - channel_index's new T is exactly expected_samples;
+      - channel_index's other delay-tag attributes (PM, P, ...) are BYTE-
+        IDENTICAL to before -- only T should have moved;
+      - every OTHER channel's delay tag is completely unchanged;
+      - every <OC> block's content (filters, CINV/polarity, etc.) is
+        completely unchanged -- confirms the write really touched nothing
+        else in the whole file.
+    Returns {'pass': bool, 'errors': [...]}."""
+    old_delays = [attrs(t) for t in delay_tags(old_xml)]
+    new_delays = [attrs(t) for t in delay_tags(new_xml)]
+    errors = []
+    if len(old_delays) != len(new_delays):
+        return {'pass': False,
+                'errors': ['delay tag count changed (%d -> %d)' % (len(old_delays), len(new_delays))]}
+    expected_str = str(int(round(expected_samples)))
+    for i, (o, n) in enumerate(zip(old_delays, new_delays)):
+        if i == channel_index:
+            if n.get('T') != expected_str:
+                errors.append('ch%d: T is %r, expected %r' % (i, n.get('T'), expected_str))
+            other_old = {k: v for k, v in o.items() if k != 'T'}
+            other_new = {k: v for k, v in n.items() if k != 'T'}
+            if other_old != other_new:
+                errors.append('ch%d: attributes other than T changed (old=%r new=%r)'
+                              % (i, other_old, other_new))
+        elif o != n:
+            errors.append('ch%d: delay tag changed unexpectedly (old=%r new=%r)' % (i, o, n))
+    old_blocks, new_blocks = channel_blocks(old_xml), channel_blocks(new_xml)
+    if len(old_blocks) != len(new_blocks):
+        errors.append('channel count changed unexpectedly')
+    else:
+        for i, (ob, nb) in enumerate(zip(old_blocks, new_blocks)):
+            if ob != nb:
+                errors.append('ch%d: <OC> block content changed unexpectedly '
+                              '(only the delay tag should differ)' % i)
+    return {'pass': not errors, 'errors': errors}
+
+
 def roundtrip_lint(old_xml, new_xml, expect_changed=None,
                    allow_delay=False, allow_xover=False):
     """Verify a write: delays + crossovers preserved (semantically), header
@@ -209,12 +283,55 @@ def _fmt_ch(c):
     return line + '   [' + ' | '.join(extra) + ']'
 
 
+def _selftest():
+    """Synthetic-XML self-test for write_delay_samples/verify_delay_write --
+    the write path with real hardware-timing consequences, so it gets a real
+    test, not just manual scratch verification. No real .afpx sample files
+    needed or used."""
+    xml = ('<ATF><OC ON="0" CINV="0"><Fil T="1"/></OC>'
+           '<OC ON="1" CINV="1"><Fil T="17" F="100" G="-2" Q="1"/></OC></ATF>'
+           '<T PM="1" P="0" T="0"/><T PM="2" P="0" T="91"/>')
+
+    new_xml = write_delay_samples(xml, 1, 216)
+    v = verify_delay_write(xml, new_xml, 1, 216)
+    assert v['pass'], 'positive case should pass: %r' % v['errors']
+    assert delay_tags(new_xml)[0] == delay_tags(xml)[0], 'untouched channel must be byte-identical'
+    print('afpx selftest: positive write+verify OK')
+
+    same_xml = write_delay_samples(xml, 0, 0)
+    v2 = verify_delay_write(xml, same_xml, 0, 0)
+    assert v2['pass'], 'same-value write should still pass: %r' % v2['errors']
+    print('afpx selftest: same-value edge case OK')
+
+    corrupted = new_xml.replace('CINV="0"', 'CINV="1"')
+    v3 = verify_delay_write(xml, corrupted, 1, 216)
+    assert not v3['pass'], 'must catch an unrelated OC change'
+    print('afpx selftest: unrelated-corruption detection OK')
+
+    tampered = new_xml.replace('PM="2"', 'PM="9"')
+    v4 = verify_delay_write(xml, tampered, 1, 216)
+    assert not v4['pass'], 'must catch PM/P being disturbed on the written tag'
+    print('afpx selftest: PM/P-disturbed detection OK')
+
+    try:
+        write_delay_samples(xml, 99, 100)
+        raise AssertionError('out-of-range channel_index should have raised')
+    except ValueError:
+        pass
+    print('afpx selftest: out-of-range channel_index correctly raises')
+
+    print('\nALL AFPX SELFTESTS PASSED')
+
+
 def main():
     ap = argparse.ArgumentParser(description='Inspect / analyze a Helix .afpx file.')
-    ap.add_argument('cmd', choices=['inspect', 'channels'])
-    ap.add_argument('file')
+    ap.add_argument('cmd', choices=['inspect', 'channels', 'selftest'])
+    ap.add_argument('file', nargs='?')
     ap.add_argument('--json', action='store_true')
     a = ap.parse_args()
+    if a.cmd == 'selftest':
+        _selftest()
+        return
     xml = decode(a.file)
     chans = channels(xml)
     if a.json:

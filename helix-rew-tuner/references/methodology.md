@@ -206,13 +206,30 @@ it):
 
 1. **Polarity** (free, binary).
 2. **Delay** (cheap, no group-delay cost). `tunelib.polarity_delay_search` searches
-   both together from complex solos.
+   both together from complex solos. It also cross-checks itself against
+   `tunelib.estimate_delay_xcorr` (a generalized cross-correlation estimate,
+   `cross_check=True` by default) — a second, differently-computed delay
+   estimate. **If `xcorr_agrees` is False, treat the delay result as
+   untrustworthy regardless of how confident the grid search looks** — this
+   is the situation the whole timing-chirp saga proved is real: per-frequency
+   phase can be corrupted unevenly (clock drift) in a way a single method
+   won't catch on its own, but two independently-computed estimates
+   disagreeing will.
 3. **All-pass** (adds group delay — only if polarity/delay leave a residual phase
    problem). `tunelib.optimize_allpass` searches F/Q against the summation.
 
 Only after those, consider EQ — and only if the *solo* response justifies it.
 `polarity_delay_search` returns `residual_needs_apf` to tell you whether step 3 is
 even warranted.
+
+**A found delay can now be written directly** (`afpx.write_delay_samples`,
+verified by `afpx.verify_delay_write`) instead of only ever being a
+recommendation for the user to enter in PC-Tool by hand. This does not lower
+the bar for *when* to write one: present the specific found delay (in both ms
+and samples, at the unit's confirmed sample rate — never assumed) and get
+explicit confirmation for that number before writing, exactly as for any
+other write. The write itself is safe and verified; the decision to make it
+still isn't automatic.
 
 ## Shelf cookbook (broad tonal balance only)
 

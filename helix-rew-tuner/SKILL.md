@@ -41,8 +41,10 @@ Run these with the user's files; they are the deterministic layer.
 - **`tunelib.py`** — the verified analysis + DSP core (import it). Biquad/shelf/
   all-pass math, `voice_target`/`measure_tilt` (the VOICING layer — adjust the
   target's overall tonal tilt/bass/presence/air, the most audible single lever;
-  see workflow step 3b), `interference_audit`, `polarity_delay_search`,
-  `optimize_allpass`,
+  see workflow step 3b), `interference_audit`, `polarity_delay_search`
+  (auto cross-checks itself against `estimate_delay_xcorr`, a second,
+  independently-computed delay estimate — trust the result less if they
+  disagree), `optimize_allpass`,
   `prediction_confidence`, `tune_scorecard`, `headroom_report`, `compression_check`,
   `hpf_excursion_risk` (optional driver-safety check), `ms_to_samples`/`samples_to_ms`
   (sample-rate-aware delay conversion — never hardcode a rate), `calibrate_solo_levels`
@@ -63,6 +65,11 @@ Run these with the user's files; they are the deterministic layer.
   (prints ALL TESTS PASSED).
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
+  `write_delay_samples`/`verify_delay_write` can write a confirmed delay
+  directly — a real, tested capability, but it does NOT change the standing
+  rule that delay writes need explicit per-change user confirmation first
+  (see workflow step 5 and `helix_hardware.md`). `python afpx.py selftest`
+  self-tests the write path on synthetic XML.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
   resample onto a common grid, load target curves.
 - **`pct6.py`** — **BETA, personal-use only** — decode/encode `.pct6` (DSP
@@ -215,6 +222,20 @@ car.
   PC-Tool attribute reordering).
 - After writing, decode the new file back and confirm: header valid, delays +
   crossovers unchanged, only the intended slots changed, all gains within limits.
+- **Writing a delay is allowed, but only under all of these conditions —
+  `afpx.write_delay_samples` being available doesn't lower the bar:**
+  1. A specific number came out of `polarity_delay_search` (ideally with
+     `xcorr_agrees: True` — if it disagrees with the cross-check, say so and
+     don't offer to write it) or was otherwise measured/confirmed.
+  2. The user has seen that specific number (in both ms and samples, at the
+     unit's *confirmed* sample rate) and explicitly said to apply it — not a
+     general "yes, tune it" earlier in the session. Ask again for this
+     specific change, same as any other write.
+  3. After writing, run `afpx.verify_delay_write` — not just
+     `roundtrip_lint` — since it checks the exact value landed and nothing
+     else in the file moved, which a delay write specifically needs.
+  4. The result is still a *prediction* until the user re-measures with it
+     loaded — say so plainly, especially since this is a phase-domain change.
 
 ### 6. Hand off — the real proof is the re-measure
 
