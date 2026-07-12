@@ -38,51 +38,32 @@ spending a limited filter budget where it improves the whole system.
 
 Run these with the user's files; they are the deterministic layer.
 
-- **`tunelib.py`** — the verified analysis + DSP core (import it). Biquad/shelf/
-  all-pass math, `voice_target`/`measure_tilt` (the VOICING layer — adjust the
-  target's overall tonal tilt/bass/presence/air, the most audible single lever;
-  see workflow step 3b), `interference_audit`, `polarity_delay_search`
-  (auto cross-checks itself against `estimate_delay_xcorr`, a second,
-  independently-computed delay estimate — trust the result less if they
-  disagree), `optimize_allpass`,
-  `prediction_confidence`, `tune_scorecard`, `headroom_report`, `compression_check`,
-  `hpf_excursion_risk` (optional driver-safety check), `ms_to_samples`/`samples_to_ms`
-  (sample-rate-aware delay conversion — never hardcode a rate), `calibrate_solo_levels`
-  (recover true relative level between mismatched-test-level solos before magnitude
-  analysis), `phase_linearity_residual` (quantify single-position phase reliability),
-  `complex_vector_average` (spatial averaging that preserves phase),
-  `spatial_consistency` (its magnitude-only sibling — needs only SPL per
-  position, no phase capture — turns 3-7 mic-position sweeps into a
-  per-frequency `mask`/`conf` that separates a real driver/room feature
-  (holds at every position) from a position-specific comb-filter null
-  (shifts or vanishes a few inches away), feeds straight into `fit_peq`),
-  `inert_band_check`
-  / `reaches_target_after_boost` (sanity checks before trusting a proposed EQ band),
-  `fit_peq`'s `null_boost_penalty` (actively penalizes a candidate band spilling
-  boost into a masked null, not just excluding the null from the fit error),
-  `gating_frequency_limit`/`min_gate_for_frequency`/`gating_warning` (the
-  low-frequency cost of time-domain gating a measurement — HolmImpulse-
-  verified formula), `crossover_confidence` (bundles prediction_confidence +
-  interference_audit + phase_linearity_residual into one band-limited check
-  for a SPECIFIC crossover region — always pass the crossover band, never
-  the whole trace), `lr_match_report` (Smaart discipline: interchannel
-  mismatch is more audible than absolute-curve error — flags WHERE L and R
-  diverge in the image-critical band and by how much, read-only) and
-  `fit_peq`'s `partner_target_db`/`partner_weight` (can justify a band that
-  closes an L/R gap even when it barely helps this channel's own distance to
-  target — competes against the existing boost tax by design, so
-  partner_weight needs deliberate tuning above ~1.0 to win when the fix is a
-  boost; see the docstring's "IMPORTANT ASYMMETRY" note before using it —
-  prefer fixing the worse channel directly when that's possible),
-  `predicted_vs_measured` (closes the predict → re-measure loop — see
-  workflow step 7; grades each written band `confirmed`/`diverged`/
-  `reverted_recommended`/`inconclusive` against a fresh re-measure, with
-  broadband level auto-alignment and smoothing so it isn't fooled by an
-  ordinary run-to-run playback-level or mic-position difference), perceptual
-  scoring, min-phase/excess-group-delay
-  classifier, and the verified filter writers (`allpass_fil_str`,
-  `allpass1_fil_str`, `shelf_fil_str`). Run `python tunelib.py` to self-test
-  (prints ALL TESTS PASSED).
+- **`tunelib.py`** — the verified analysis + DSP core (import it). Pure,
+  deterministic, self-tested (`python tunelib.py` → `ALL TESTS PASSED`). This
+  is a lookup table, not the rationale — each function's *why* and *when*
+  lives in `references/methodology.md` (section noted below; read that
+  before using a function you haven't used yet this session):
+
+  | Function(s) | For | Ref |
+  |---|---|---|
+  | `voice_target`, `measure_tilt` | voicing layer (tilt/bass/presence/air) | L86 |
+  | `fit_peq` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | joint PEQ optimizer, restraint & L/R matching | L375, L343 |
+  | `interference_audit` | real dip vs. destructive summation | L136 |
+  | `crossover_confidence` | one band-limited crossover go/no-go | L243 |
+  | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | L243 |
+  | `spatial_consistency`, `complex_vector_average` | multi-position averaging | L212 |
+  | `phase_linearity_residual` | single-position phase reliability | L172 |
+  | `excess_gd_mask` | minimum-phase / EQ-ability classifier | L165 |
+  | `lr_match_report` | L/R image-stability diagnostic | L343 |
+  | `predicted_vs_measured` | predict → re-measure loop (step 7) | L393 |
+  | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | L144 |
+  | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | L26 |
+  | `calibrate_solo_levels` | fix mismatched solo test levels | L26 |
+  | `tune_scorecard`, `headroom_report`, `compression_check` | scoring, clip risk, level sanity | — |
+  | `hpf_excursion_risk` | driver excursion check (needs a supplied Fs) | — |
+  | `ms_to_samples`, `samples_to_ms` | sample-rate-aware delay conversion | — |
+  | `validate_peq_band` | hardware gain/Q limits | — |
+  | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | L287, L300 |
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
   `write_delay_samples`/`verify_delay_write` can write a confirmed delay
@@ -92,22 +73,17 @@ Run these with the user's files; they are the deterministic layer.
   self-tests the write path on synthetic XML.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
   resample onto a common grid, load target curves.
-- **`pipeline.py`** — one deterministic entry point for step 2-3's analysis,
-  instead of hand-writing bespoke `python -c` each session (which drifts
-  slightly every time and burns tokens redoing the same wiring). `python
-  pipeline.py analyze --measurement <export.txt> --target <file|default>
-  [--positions ... | --solo-a/--solo-b/--together --pair-band LO HI |
-  --gate-ms N | --afpx <file> | --voice tilt=X bass=Y presence=Z air=W]`
-  emits one compact JSON report: tilt (measured + target), deviation regions
-  (smoothed, threshold-flagged, not raw per-bin arrays), spatial_consistency
-  results if `--positions` given, interference_audit/crossover_confidence if
-  the solo trio + band are given, the gating trust floor if `--gate-ms` is
-  known, and read-only `.afpx` channel context. **Reporting only — writes
-  nothing to any DSP file**, and every number in it is a thin wrapper around
-  an already-tested `tunelib.py`/`afpx.py` function, not new math. Doesn't
-  replace judgment (methodology.md) or the propose/write steps below — it
-  just makes the numbers behind them identical and cheap every session.
-  `python pipeline.py selftest` self-tests on synthetic fixtures.
+- **`pipeline.py`** — one deterministic entry point for step 2-3's analysis
+  instead of a bespoke `python -c` each session. `python pipeline.py analyze
+  --measurement <export.txt> --target <file|default> [--positions ... |
+  --solo-a/--solo-b/--together --pair-band LO HI | --gate-ms N | --afpx
+  <file> | --voice tilt=X bass=Y presence=Z air=W]` → one JSON report: tilt,
+  threshold-flagged deviation regions (not raw per-bin arrays), plus
+  `spatial_consistency`/`interference_audit`/`crossover_confidence`/gating
+  results for whichever inputs were given. **Reporting only — writes nothing
+  to any DSP file**; every number is a thin wrapper around an already-tested
+  `tunelib.py`/`afpx.py` function. `python pipeline.py selftest` self-tests
+  on synthetic fixtures.
 - **`pct6.py`** — **BETA, personal-use only** — decode/encode `.pct6` (DSP
   PC-Tool 6, no-password saves only). `decode()`/`encode()` give a byte-
   preserving (latin-1) text view safe to pass straight into `afpx.py`'s
@@ -134,6 +110,8 @@ never hand-guess `.afpx`/`.pct6` bytes or filter codes.
 - **`references/methodology.md`** — how to decide what to fix: deviation analysis,
   the interference audit, the crossover action-ladder, shelf and all-pass
   cookbooks, imaging, and the restraint rules. Read before proposing edits.
+  It's long — use its own "Contents" section (line numbers) to jump to the
+  part you need with an offset read instead of reading it whole.
 - **`references/helix_hardware.md`** — filter modes, hardware limits, model notes.
 
 ## Workflow
