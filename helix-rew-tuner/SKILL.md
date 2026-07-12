@@ -263,8 +263,10 @@ Give the user a short, specific re-measure + listening checklist.
 1. **Confirm the channel map and seat before analyzing.** Nothing is assumed.
 2. **Validate the measurement axis** before trusting a `.mdat`.
 3. **Respect hardware limits**: gain per band within the model's range (P SIX:
-   −15…+6 dB), Q within range, APF Q 0.5–2, shelf Q 0.1–2. `validate_peq_band`
-   enforces this — use it.
+   −15…+6 dB), PEQ Q 0.5–15, shelf Q 0.1–2. APF Q is NOT capped at 2 — that old
+   claim was disproven 2026-07-11 (see `helix_hardware.md`); high Q is often
+   correct for a narrow null, and its real cost is group delay, not legality.
+   `validate_peq_band` enforces the PEQ limits — use it.
 4. **Preserve crossovers and delays** unless explicitly told otherwise.
 5. **Classify before correcting.** Never boost a null or a reflection. Never EQ a
    phase problem.
