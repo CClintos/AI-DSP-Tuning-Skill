@@ -22,19 +22,41 @@ gets the right kind of fix instead of a blanket EQ pass. An interference audit s
 where two speakers are cancelling, and a minimum-phase check flags dips that EQ can't
 usefully correct.
 
+**Voices the target first — the most audible single decision.** Overall tonal tilt
+matters more than any individual filter, and matching a curve exactly isn't the same
+as sounding good (a studio-flat target reliably sounds bright and thin in a car). It
+measures where your system and your target curve currently sit, tilt-wise, against the
+typical good-in-car range, then offers to voice the target — warmer/brighter, more/less
+bass weight, more/less presence, more/less air — in listener language, before any EQ
+is proposed. Voicing is a taste layer on the goal; the correction that follows is still
+fully measurement-driven.
+
 **Corrects with the right tool.** Uses the full Helix filter set — parametric EQ,
-low/high shelves, and all-pass (phase) filters — plus delay and polarity guidance for
-crossover integration, in the order a good manual tuner works: timing first, EQ last.
-Left/right corrections stay matched for a stable centre image, and filter interaction
-and headroom are modelled so a stack of bands doesn't overshoot or clip the DSP.
+low/high shelves, and all-pass (phase) filters — plus delay and polarity, in the order
+a good manual tuner works: timing first, EQ last. A cross-correlation delay estimate
+double-checks the usual phase-based search (and flags disagreement as a "don't trust
+this" signal instead of picking one). Left/right corrections stay matched by default;
+where they need to genuinely differ, it can flag exactly where and how much the two
+sides diverge in the imaging band, and target closing that gap directly.
+
+**Separates real problems from where-you-put-the-mic.** If you give it a few
+measurements from different positions around the seat instead of just one, it tells
+real driver/room features (present everywhere) apart from position-specific
+comb-filtering (gone or shifted a few inches away) — the difference between something
+worth correcting and something that would only make one exact spot sound better.
 
 **Writes safely and verifies.** Stays inside the DSP's hardware limits, leaves your
 crossovers and delays untouched unless you ask, and decodes every file it writes back
-to confirm only the intended changes landed.
+to confirm only the intended changes landed. A delay can be written directly once
+you've confirmed a specific number — never automatically — and that write is verified
+too.
 
-**Keeps you honest.** Predictions from a single measurement aren't the final word —
-it hands back a re-measure and listening checklist, because the loaded, re-measured
-result is the real test.
+**Keeps you honest, both before and after.** Predictions from a single measurement
+aren't the final word — it hands back a re-measure and listening checklist targeting
+exactly what's still unproven. And when that re-measure comes back, it's not just
+eyeballed: each written band gets checked against what actually happened, correctly
+tolerating an ordinary run-to-run difference (playback level, mic position) rather than
+mistaking it for the correction failing.
 
 ## The tuning toolkit
 
@@ -50,7 +72,9 @@ The full Helix filter set, each used for what it's good at:
   or between left and right. Applied only where the measurement shows real
   cancellation, kept gentle, with a mono-vocal image check flagged for afterward.
 - **Delay & polarity** — tried before an all-pass, since they fix timing with no
-  tonal cost. Recommended for you to set, not silently rewritten.
+  tonal cost. A found delay can be written directly once you've seen the specific
+  number and confirmed it — never applied automatically from a search result — and
+  the write is verified to have changed only that one value.
 
 ### How it decides
 
@@ -131,11 +155,15 @@ Claude will:
 1. Inspect the `.afpx` and **auto-detect** which channel is which driver (from the
    crossovers) — then ask you to confirm.
 2. Validate the measurement data.
-3. Classify each problem region and propose a conservative, budgeted set of edits,
-   showing predicted before → after.
-4. Write a verified `.afpx` (preserving your crossovers and delays untouched).
-5. Give you a re-measure + listening checklist — because the loaded, re-measured
-   result is the only real proof.
+3. Offer to voice the target (tilt/bass/presence/air) before proposing anything —
+   the goal, not the correction, comes first.
+4. Classify each problem region and propose a conservative, budgeted set of edits,
+   showing predicted before → after with a confidence level per claim.
+5. Write a verified `.afpx` (preserving your crossovers and delays untouched).
+6. Give you a re-measure + listening checklist targeting exactly what's still
+   unproven — because the loaded, re-measured result is the only real proof.
+7. When that re-measure comes back, check each written band against it instead of
+   just eyeballing the new plot, and flag anything that didn't land as predicted.
 
 ## What's in the box
 
@@ -145,8 +173,9 @@ helix-rew-tuner/
 ├── scripts/
 │   ├── tunelib.py                    verified DSP + acoustic-analysis core (self-tests)
 │   ├── afpx.py                       decode / inspect / channel-detect / write-lint
-│   └── measure.py                    load REW exports & .mdat, validate axis, targets
-│   └── pct6.py                        BETA, personal-use-only .pct6 decode/encode
+│   ├── measure.py                    load REW exports & .mdat, validate axis, targets
+│   ├── pipeline.py                   one deterministic analysis CLI -> one JSON report
+│   └── pct6.py                       BETA, personal-use-only .pct6 decode/encode
 ├── references/
 │   ├── afpx_format.md                the .afpx binary + filter-code spec
 │   ├── pct6_format.md                the .pct6 container format + BETA caveats
@@ -156,12 +185,20 @@ helix-rew-tuner/
     └── default_incar_target.txt      a sensible default target curve (override any time)
 ```
 
-Run the core library's self-tests with `python helix-rew-tuner/scripts/tunelib.py`
-(prints `ALL TESTS PASSED`).
+Every script self-tests standalone, no real measurement/tune files needed:
+
+```
+python helix-rew-tuner/scripts/tunelib.py    # -> ALL TESTS PASSED
+python helix-rew-tuner/scripts/afpx.py selftest
+python helix-rew-tuner/scripts/pct6.py selftest
+python helix-rew-tuner/scripts/pipeline.py selftest
+```
 
 ## Safety & scope
 
-- **Crossovers and delays are never changed** unless you explicitly ask.
+- **Crossovers are never changed**, and a delay is written only after you've seen the
+  specific number and explicitly confirmed that one change — never automatically from
+  a search result.
 - All EQ is written within Helix hardware limits (P SIX: −15…+6 dB, Q 0.5–15, etc.),
   and every write is decoded back and linted to confirm only the intended slots moved.
 - Predictions from magnitude (RTA/MMM) measurements don't capture phase outcomes;
