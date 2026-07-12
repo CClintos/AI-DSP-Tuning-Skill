@@ -92,6 +92,22 @@ Run these with the user's files; they are the deterministic layer.
   self-tests the write path on synthetic XML.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
   resample onto a common grid, load target curves.
+- **`pipeline.py`** — one deterministic entry point for step 2-3's analysis,
+  instead of hand-writing bespoke `python -c` each session (which drifts
+  slightly every time and burns tokens redoing the same wiring). `python
+  pipeline.py analyze --measurement <export.txt> --target <file|default>
+  [--positions ... | --solo-a/--solo-b/--together --pair-band LO HI |
+  --gate-ms N | --afpx <file> | --voice tilt=X bass=Y presence=Z air=W]`
+  emits one compact JSON report: tilt (measured + target), deviation regions
+  (smoothed, threshold-flagged, not raw per-bin arrays), spatial_consistency
+  results if `--positions` given, interference_audit/crossover_confidence if
+  the solo trio + band are given, the gating trust floor if `--gate-ms` is
+  known, and read-only `.afpx` channel context. **Reporting only — writes
+  nothing to any DSP file**, and every number in it is a thin wrapper around
+  an already-tested `tunelib.py`/`afpx.py` function, not new math. Doesn't
+  replace judgment (methodology.md) or the propose/write steps below — it
+  just makes the numbers behind them identical and cheap every session.
+  `python pipeline.py selftest` self-tests on synthetic fixtures.
 - **`pct6.py`** — **BETA, personal-use only** — decode/encode `.pct6` (DSP
   PC-Tool 6, no-password saves only). `decode()`/`encode()` give a byte-
   preserving (latin-1) text view safe to pass straight into `afpx.py`'s
@@ -126,6 +142,29 @@ never hand-guess `.afpx`/`.pct6` bytes or filter codes.
 
 Nothing here is hardcoded. Before analyzing, confirm with the user:
 
+- **Check for a prior session file first, before asking anything else.**
+  Look for `<afpx_path>.tuner_session.json` next to the tune file (e.g.
+  `mytune.afpx.tuner_session.json`) — a small JSON record of a previous
+  session's confirmed intake answers (schema: `dsp_model`, `sample_rate_hz`,
+  `channel_map`, `listening_seat`, `drive_side`, `rear_channel_routing`,
+  `target_curve_path`, `voicing`, and `afpx_sha256` — the SHA-256 of the
+  `.afpx` at the time it was written). If it exists, hash the *current*
+  `.afpx` and compare:
+  - **Hash matches** → present the stored answers back ("here's what I have
+    on file: channel 2 = tweeter/left, driver's seat, discrete rears,
+    ResoNix target — still correct?") instead of re-deriving or re-asking
+    from scratch. The user only needs to confirm or correct deltas.
+  - **Hash differs** → the file changed since it was recorded (PC-Tool edit
+    between sessions). Say so plainly and treat anything *derived from file
+    content* — the channel map in particular, since it's partly inferred
+    from crossovers — as unconfirmed again; re-run `afpx.py inspect` rather
+    than trust the cached map. Answers that aren't derived from file bytes
+    (seat, rear routing, target choice) can still be offered back for a
+    quick "still correct?", just flag that the file itself moved.
+  - **No file** → run intake normally, then write one at the end of this
+    step (and again after step 3b if voicing changes). This is bookkeeping
+    only — it does **not** relax Non-negotiable #8: always re-decode the
+    current `.afpx` fresh before proposing edits, session file or not.
 - **File format**: if given a `.pct6` instead of `.afpx`, read
   `references/pct6_format.md` first, then decode with `pct6.decode()` and
   **verify it actually produced `<ATF ...>` XML** before doing anything else —
