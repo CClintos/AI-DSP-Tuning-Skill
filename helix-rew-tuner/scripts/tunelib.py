@@ -1146,6 +1146,19 @@ def prediction_confidence(freqs, driver_a, driver_b, measured_together_db, band)
 # 3h) TUNE SCORECARD -- one canonical scoring function so every tune comparison
 # uses identical math (yesterday's v5/v6/v7/aggressive benchmark was hand-rolled
 # three times; this ends that). Named components, not one opaque number.
+#
+# The *_balance_db fields below are a SIGNED MEDIAN -- a deliberate choice for
+# "which side is broadly louder," but it has a real blind spot: an L/R
+# difference that OSCILLATES sign across the band (comb-filtering, a driver
+# that's ahead in one sub-band and behind in another) can median out near
+# zero while the actual mismatch is large everywhere, just not consistently
+# in one direction. The matching *_balance_abs_rms_db field doesn't have that
+# blind spot -- it's the RMS of the same signed-difference curve, so opposite-
+# sign errors add instead of cancelling. Read both: signed median tells you
+# the DIRECTION (if any) worth a broad gain nudge, abs-RMS tells you the true
+# MAGNITUDE of the mismatch regardless of direction. (lr_match_report goes
+# further still -- per-frequency regions instead of one number for the whole
+# band -- use it when you need to know WHERE, not just how much.)
 def tune_scorecard(freqs, traces, target_db,
                    img_band=(200.0, 6000.0), mid_bal_band=(200.0, 2000.0),
                    tw_bal_band=(2800.0, 16000.0), inband=(60.0, 16000.0)):
@@ -1162,10 +1175,12 @@ def tune_scorecard(freqs, traces, target_db,
         b = erb_smooth(freqs, traces['FL Low'] - traces['FR Low'])
         s = (freqs >= mid_bal_band[0]) & (freqs <= mid_bal_band[1])
         out['mid_balance_db'] = round(float(np.median(b[s])), 2)
+        out['mid_balance_abs_rms_db'] = round(float(np.sqrt(np.mean(b[s] ** 2))), 2)
     if 'FL High' in traces and 'FR High' in traces:
         b = erb_smooth(freqs, traces['FL High'] - traces['FR High'])
         s = (freqs >= tw_bal_band[0]) & (freqs <= tw_bal_band[1])
         out['tweeter_balance_db'] = round(float(np.median(b[s])), 2)
+        out['tweeter_balance_abs_rms_db'] = round(float(np.sqrt(np.mean(b[s] ** 2))), 2)
     return out
 
 
@@ -1749,6 +1764,19 @@ if __name__ == '__main__':
     print('TEST15 scorecard:', sc)
     assert abs(sc['mid_balance_db'] + 3.0) < 0.1 and abs(sc['tweeter_balance_db'] - 2.0) < 0.1
     assert sc['sum_rms_db'] > 0
+    # a constant offset: signed median and abs-RMS must agree (same magnitude)
+    assert abs(sc['mid_balance_abs_rms_db'] - 3.0) < 0.1
+    assert abs(sc['tweeter_balance_abs_rms_db'] - 2.0) < 0.1
+
+    # signed-median blind spot: an L/R difference that ALTERNATES sign across
+    # the band medians out near zero while still being a real, large mismatch
+    # everywhere -- abs-RMS must catch what the median misses.
+    osc15 = 4.0 * np.sign(np.sin(2 * np.pi * np.log2(freqs / 200.0) * 1.5))
+    tr15b = {'System Sum': tgt_like, 'FL Low': tgt_like + osc15, 'FR Low': tgt_like}
+    sc15b = tune_scorecard(freqs, tr15b, tgt_like)
+    print('TEST15b oscillating L/R (median blind spot):', sc15b)
+    assert abs(sc15b['mid_balance_db']) < 0.5, 'median should read near-zero here (the blind spot)'
+    assert sc15b['mid_balance_abs_rms_db'] > 2.5, 'abs-RMS must reveal the real mismatch the median hid'
 
 
     # ---- TEST17: sample-rate-aware delay conversion --------------------------

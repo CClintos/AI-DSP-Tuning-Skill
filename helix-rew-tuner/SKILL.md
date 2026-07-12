@@ -47,23 +47,23 @@ Run these with the user's files; they are the deterministic layer.
   | Function(s) | For | Ref |
   |---|---|---|
   | `voice_target`, `measure_tilt` | voicing layer (tilt/bass/presence/air) | L86 |
-  | `fit_peq` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | joint PEQ optimizer, restraint & L/R matching | L375, L343 |
+  | `fit_peq` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | joint PEQ optimizer, restraint & L/R matching | L392, L360 |
   | `interference_audit` | real dip vs. destructive summation | L136 |
   | `crossover_confidence` | one band-limited crossover go/no-go | L243 |
   | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | L243 |
   | `spatial_consistency`, `complex_vector_average` | multi-position averaging | L212 |
   | `phase_linearity_residual` | single-position phase reliability | L172 |
   | `excess_gd_mask` | minimum-phase / EQ-ability classifier | L165 |
-  | `lr_match_report` | L/R image-stability diagnostic | L343 |
-  | `predicted_vs_measured` | predict → re-measure loop (step 7) | L393 |
+  | `lr_match_report` | L/R image-stability diagnostic | L360 |
+  | `predicted_vs_measured` | predict → re-measure loop (step 7) | L410 |
   | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | L144 |
   | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | L26 |
   | `calibrate_solo_levels` | fix mismatched solo test levels | L26 |
-  | `tune_scorecard`, `headroom_report`, `compression_check` | scoring, clip risk, level sanity | — |
+  | `tune_scorecard` (`_abs_rms_db` fields catch what a signed median can hide), `headroom_report`, `compression_check` | scoring, clip risk, level sanity | — |
   | `hpf_excursion_risk` | driver excursion check (needs a supplied Fs) | — |
   | `ms_to_samples`, `samples_to_ms` | sample-rate-aware delay conversion | — |
   | `validate_peq_band` | hardware gain/Q limits | — |
-  | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | L287, L300 |
+  | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | L304, L317 |
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
   `write_delay_samples`/`verify_delay_write` can write a confirmed delay
@@ -313,16 +313,22 @@ reverted band without telling the user why.
 4. **Preserve crossovers and delays** unless explicitly told otherwise.
 5. **Classify before correcting.** Never boost a null or a reflection. Never EQ a
    phase problem.
-6. **Restraint is a feature.** Fewer, broader filters that improve the whole-system
+6. **Never combine a phase-domain write (polarity/delay/APF) with a PEQ write in
+   the same crossover-adjacent region in the same pass.** A PEQ prediction there
+   is only valid against the *current* summed response — a phase fix changes
+   that summed response, so a PEQ fit before it is stale after it. Wait for a
+   re-measure (`predicted_vs_measured`) or say plainly the PEQ is provisional
+   pending one — see methodology.md's crossover ladder for why.
+7. **Restraint is a feature.** Fewer, broader filters that improve the whole-system
    score beat a pile of narrow fixes that flatter one trace. When unsure, do less.
-7. **Verify every write** and be honest about what is predicted vs measured.
-8. **Re-decode the current `.afpx` fresh before proposing edits — don't rely on
+8. **Verify every write** and be honest about what is predicted vs measured.
+9. **Re-decode the current `.afpx` fresh before proposing edits — don't rely on
    memory of an earlier read.** In a long session the user may have changed
    something in PC-Tool between turns; conversation memory can go stale in a way
    the file on disk never does.
-9. **Never assume the DSP's internal sample rate.** It's model-specific; confirm it
-   before any delay math (`ms_to_samples`/`samples_to_ms`), and keep proposals in
-   physical milliseconds first, converting to samples last.
-10. **State every proposed change directly in the response** — frequency, gain, Q,
+10. **Never assume the DSP's internal sample rate.** It's model-specific; confirm it
+    before any delay math (`ms_to_samples`/`samples_to_ms`), and keep proposals in
+    physical milliseconds first, converting to samples last.
+11. **State every proposed change directly in the response** — frequency, gain, Q,
     and (for delays) both milliseconds and samples — not just "I wrote the file, go
     check it." The user should be able to act on your message alone.

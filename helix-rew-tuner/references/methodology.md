@@ -17,11 +17,11 @@ to the section you need instead of reading it whole)
   - Quantify single-position phase reliability — line 172
   - Multi-position variance ("EQ what's common, ignore what moves") — line 212
 - The crossover action-ladder — line 243
-- Shelf cookbook — line 287
-- All-pass cookbook — line 300
-- Imaging — line 343
-- Restraint — line 375
-- Verification & honesty — line 393
+- Shelf cookbook — line 304
+- All-pass cookbook — line 317
+- Imaging — line 360
+- Restraint — line 392
+- Verification & honesty — line 410
 
 ## Sweep capture setup (before you have data to analyze)
 
@@ -283,6 +283,23 @@ and samples, at the unit's confirmed sample rate — never assumed) and get
 explicit confirmation for that number before writing, exactly as for any
 other write. The write itself is safe and verified; the decision to make it
 still isn't automatic.
+
+**Never combine a phase-domain write (polarity/delay/APF) with a PEQ write
+in the same crossover-adjacent region in the same pass.** A PEQ band's
+predicted effect is computed against the *currently measured* summed
+response. Once a phase fix actually changes how the two drivers sum through
+that crossover, the summed curve there changes too — a PEQ that was fit to
+the pre-fix curve is now validated against data that no longer describes the
+system. This is exactly why the ladder above is ordered polarity → delay →
+all-pass → *only then* EQ: it isn't just "cheapest fix first," it's "don't
+let a later step's math go stale out from under an earlier one still being
+decided." If a phase write is happening this turn for a crossover region,
+either leave that region's PEQ proposal for a later turn (after a
+re-measure — `predicted_vs_measured` is the tool for confirming the phase
+fix actually landed before trusting anything built on top of it), or say
+explicitly that the PEQ prediction there is provisional pending that
+re-measure. Don't write both against the same stale prediction and report
+them as equally confident — they aren't.
 
 ## Shelf cookbook (broad tonal balance only)
 
