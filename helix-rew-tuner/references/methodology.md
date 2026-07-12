@@ -4,6 +4,25 @@ This is the judgment layer. The scripts give you numbers; this tells you what th
 mean and which action type each problem calls for. The overarching bias: **classify
 before correcting, and prefer doing less.**
 
+## Contents (line numbers, for offset reads — this file is long; jump straight
+to the section you need instead of reading it whole)
+
+- Sweep capture setup — line 26
+- Deviation analysis — line 73
+- Voicing — the most audible decision — line 86
+- Classify the problem (the core skill) — line 117
+  - The interference audit — line 136
+  - Two checks before trusting a proposed EQ band — line 144
+  - Minimum-phase / EQ-ability — line 165
+  - Quantify single-position phase reliability — line 172
+  - Multi-position variance ("EQ what's common, ignore what moves") — line 212
+- The crossover action-ladder — line 243
+- Shelf cookbook — line 287
+- All-pass cookbook — line 300
+- Imaging — line 343
+- Restraint — line 375
+- Verification & honesty — line 393
+
 ## Sweep capture setup (before you have data to analyze)
 
 Bad capture produces confidently-wrong analysis no amount of downstream care can
