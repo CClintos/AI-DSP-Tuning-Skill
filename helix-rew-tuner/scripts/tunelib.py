@@ -1391,6 +1391,111 @@ def spatial_consistency(freqs, position_traces, consistent_db=1.5,
             'mask': mask, 'conf': conf}
 
 # --------------------------------------------------------------------------
+# PREDICTED vs MEASURED -- closes the predict -> re-measure loop. Everything
+# above this point in the file only ever runs FORWARD (measure -> propose ->
+# write -> "now go re-measure"); nothing consumed that re-measure. This does,
+# but deliberately NOT as a raw curve subtraction -- a bare before/after diff
+# gets swamped by exactly the confounds a real re-measure carries (different
+# playback level, mic position drift, a noisier capture that day). Three
+# guards, each reusing a discipline already built for the same underlying
+# problem elsewhere in this file, rather than inventing a fourth:
+#   1. LEVEL ALIGNMENT: a pure volume-knob difference between runs is a
+#      broadband, frequency-flat offset, not signal -- estimated ONLY from
+#      untouched regions (so it can't absorb the very change under test) via
+#      the same wide-anchor weighted-median trick target_anchor_offset uses.
+#   2. SMOOTHING: compares octave-smoothed regional averages, not raw bins --
+#      mic position drift shows up as narrow comb ripple, the same kind of
+#      noise spatial_consistency already treats as not-signal.
+#   3. CONFIDENCE GATING: low conf (e.g. from spatial_consistency or
+#      prediction_confidence on the NEW measurement) in a band's region
+#      reads as 'inconclusive', not a false confirm or false revert.
+def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
+                          conf=None, region_oct=0.3, consistent_db=2.0,
+                          min_predicted_db=0.5):
+    """freqs, before_db: the ORIGINAL pre-write measurement (what the
+    correction was actually proposed against). remeasured_after_db: the new
+    measurement taken after loading the write. bands: the (F, Q, G) list
+    that was ACTUALLY written -- not a separately-tracked prediction, so this
+    can't drift out of sync with what's really in the file; predicted_after
+    is computed as before_db + cascade_db(freqs, bands). conf: optional 0..1
+    per-freq confidence on the NEW measurement (spatial_consistency's 'conf'
+    if you have multi-position re-measures, prediction_confidence otherwise).
+
+    region_oct: +/- octaves around each band's F judged as "this band's
+    region" -- deliberately NOT derived from Q; the question is whether the
+    local shape near F tracked prediction, not a precise filter-theory
+    bandwidth. consistent_db: tolerance below which actual is considered to
+    have tracked predicted -- widen it if your re-measure discipline is
+    looser (single position, different day, hand-held mic) than a tight
+    tolerance would assume; this is a crude directional check, not a
+    precision instrument. min_predicted_db: bands whose own predicted local
+    change is smaller than this can't meaningfully fail the check (nothing
+    to track) and always grade 'confirmed'.
+
+    Returns {'level_offset_db': ..., 'bands': [...]} -- level_offset_db is
+    the broadband correction actually applied before comparing (report it;
+    a large value usually just means "quieter/louder playback that day," not
+    a tuning result). Each band entry carries predicted_change_db,
+    actual_change_db, error_db, confidence, and verdict in {'confirmed',
+    'diverged', 'reverted_recommended', 'inconclusive'}. 'reverted_recommended'
+    is the actionable one -- actual moved the wrong way or barely moved at
+    all despite a real predicted change, the same signature
+    reaches_target_after_boost already treats as "phase is eating this, not
+    an EQ problem" -- reconsider or remove that band rather than trusting
+    the original one-shot prediction forever."""
+    freqs = np.asarray(freqs, dtype=float)
+    before_db = np.asarray(before_db, dtype=float)
+    remeasured_after_db = np.asarray(remeasured_after_db, dtype=float)
+    predicted_after_db = before_db + cascade_db(freqs, bands)
+
+    touched = np.zeros_like(freqs, dtype=bool)
+    for F, Q, G in bands:
+        touched |= (freqs >= F / 2 ** region_oct) & (freqs <= F * 2 ** region_oct)
+    untouched = ~touched
+
+    if np.count_nonzero(untouched) >= 12:
+        level_offset_db = target_anchor_offset(
+            freqs[untouched], remeasured_after_db[untouched],
+            predicted_after_db[untouched],
+            confidence=(conf[untouched] if conf is not None else None))
+    else:
+        level_offset_db = 0.0    # too much of the spectrum touched to anchor safely
+    aligned_after_db = remeasured_after_db - level_offset_db
+
+    pred_delta = erb_smooth(freqs, predicted_after_db - before_db)
+    act_delta = erb_smooth(freqs, aligned_after_db - before_db)
+
+    reports = []
+    for F, Q, G in bands:
+        region = (freqs >= F / 2 ** region_oct) & (freqs <= F * 2 ** region_oct)
+        if not np.any(region):
+            continue
+        w = audibility_weight(freqs[region])
+        predicted_change = float(np.average(pred_delta[region], weights=w))
+        actual_change = float(np.average(act_delta[region], weights=w))
+        error = actual_change - predicted_change
+        region_conf = float(np.mean(conf[region])) if conf is not None else 1.0
+
+        if region_conf < 0.3:
+            verdict = 'inconclusive'
+        elif abs(predicted_change) < min_predicted_db or abs(error) <= consistent_db:
+            verdict = 'confirmed'
+        elif (np.sign(actual_change) != np.sign(predicted_change)
+              or abs(actual_change) < 0.3 * abs(predicted_change)):
+            verdict = 'reverted_recommended'
+        else:
+            verdict = 'diverged'
+
+        reports.append({'F': F, 'Q': Q, 'G': G,
+                        'predicted_change_db': round(predicted_change, 2),
+                        'actual_change_db': round(actual_change, 2),
+                        'error_db': round(error, 2),
+                        'confidence': round(region_conf, 2),
+                        'verdict': verdict})
+
+    return {'level_offset_db': round(float(level_offset_db), 2), 'bands': reports}
+
+# --------------------------------------------------------------------------
 # "INERT BAND" CHECK -- before trusting a proposed (or externally-supplied) EQ
 # band, confirm the target driver actually has enough LEVEL at that frequency
 # to matter in the sum. A cut/boost on a driver that's already >~6 dB below
@@ -1926,5 +2031,40 @@ if __name__ == '__main__':
     except ValueError:
         pass
     print('  <3 positions correctly rejected')
+
+    # ---- TEST36: predicted_vs_measured closes the predict -> re-measure loop,
+    # correctly tolerating a broadband level offset (different playback volume)
+    # rather than mistaking it for a tuning result -------------------------------
+    rng36 = np.random.RandomState(3)
+
+    # a real, fillable dip: corrected, re-measured 1.5dB quieter + small noise
+    before36a = peaking_db(freqs, 300.0, 2.0, -6.0)
+    band36a = [(300.0, 2.0, 6.0)]
+    after36a = (before36a + cascade_db(freqs, band36a) - 1.5 +
+               rng36.normal(0, 0.3, len(freqs)))
+
+    # an interference null 'corrected' with a boost that never lands
+    # acoustically (measured stays ~unchanged despite the predicted lift)
+    before36b = peaking_db(freqs, 415.0, 6.0, -8.0)
+    band36b = [(415.0, 6.0, 5.0)]
+    after36b = before36b - 1.5 + rng36.normal(0, 0.3, len(freqs))
+
+    r36a = predicted_vs_measured(freqs, before36a, after36a, band36a)
+    r36b = predicted_vs_measured(freqs, before36b, after36b, band36b)
+    print('\nTEST36 predicted_vs_measured:')
+    print('  real dip, -1.5dB quieter re-measure:', r36a['level_offset_db'], r36a['bands'])
+    print('  interference null, boost never lands:', r36b['level_offset_db'], r36b['bands'])
+    assert abs(r36a['level_offset_db'] - (-1.5)) < 0.3, 'should recover the injected level offset'
+    assert r36a['bands'][0]['verdict'] == 'confirmed', \
+        'a real correction should be confirmed despite the level offset, not flagged'
+    assert r36b['bands'][0]['verdict'] == 'reverted_recommended', \
+        'a boost that never landed acoustically should be flagged for reconsideration'
+
+    # low confidence in the region must override to inconclusive even when the
+    # numbers alone would otherwise say "confirmed"
+    conf36 = np.full_like(freqs, 0.05)
+    r36c = predicted_vs_measured(freqs, before36a, after36a, band36a, conf=conf36)
+    assert r36c['bands'][0]['verdict'] == 'inconclusive'
+    print('  low-confidence region correctly overridden to inconclusive')
 
     print('\nALL TESTS PASSED')

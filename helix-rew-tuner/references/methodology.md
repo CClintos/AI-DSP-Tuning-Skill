@@ -378,6 +378,27 @@ by telling the user which claims are *predicted* vs *measured*, and give a speci
 re-measure + listening checklist — the loaded-and-re-measured result is the only
 real proof.
 
+**When that re-measure actually comes back, use it — don't just eyeball the new
+plot.** `tunelib.predicted_vs_measured(freqs, before_db, remeasured_after_db,
+bands)` grades every written band against the fresh measurement instead of
+trusting the one-shot prediction forever. The reason this needs its own
+function rather than a plain subtraction: two real measurement runs never
+match exactly, even with nothing wrong — a different playback level, a mic
+that landed slightly differently, more road/engine noise that day. A naive
+diff can't tell "the correction failed" apart from "I played it 2dB quieter
+this time," and would produce false verdicts either direction. So it doesn't
+diff raw curves — it estimates a broadband level offset from the *untouched*
+frequencies only (so the alignment step can't quietly absorb the very change
+being tested), compares octave-smoothed regions around each band's center
+(so ordinary mic-position comb ripple doesn't read as failure), and drops to
+`'inconclusive'` wherever confidence in that region is low rather than
+forcing a verdict either way. Treat a `'reverted_recommended'` result the
+same as a `interference_audit`/`reaches_target_after_boost` finding pre-write
+— it means the predicted change didn't actually show up, which is usually
+the same "phase/interference is eating this" signature, just caught after
+the fact instead of before. Pull or reconsider that band rather than leaving
+it in the file on the strength of a prediction that turned out wrong.
+
 **Extend the same skepticism to a candidate you didn't produce yourself.** This
 applies "re-decode fresh, don't trust memory" (see SKILL.md's non-negotiables) to
 external candidates too: when another AI, an optimizer, or an earlier session hands

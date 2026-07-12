@@ -73,7 +73,12 @@ Run these with the user's files; they are the deterministic layer.
   target — competes against the existing boost tax by design, so
   partner_weight needs deliberate tuning above ~1.0 to win when the fix is a
   boost; see the docstring's "IMPORTANT ASYMMETRY" note before using it —
-  prefer fixing the worse channel directly when that's possible), perceptual
+  prefer fixing the worse channel directly when that's possible),
+  `predicted_vs_measured` (closes the predict → re-measure loop — see
+  workflow step 7; grades each written band `confirmed`/`diverged`/
+  `reverted_recommended`/`inconclusive` against a fresh re-measure, with
+  broadband level auto-alignment and smoothing so it isn't fooled by an
+  ordinary run-to-run playback-level or mic-position difference), perceptual
   scoring, min-phase/excess-group-delay
   classifier, and the verified filter writers (`allpass_fil_str`,
   `allpass1_fil_str`, `shelf_fil_str`). Run `python tunelib.py` to self-test
@@ -256,7 +261,28 @@ car.
 
 State plainly that predictions are from magnitude data; phase edits (APF, delay)
 and the final result must be confirmed by re-measuring with the new tune loaded.
-Give the user a short, specific re-measure + listening checklist.
+Give the user a short, specific re-measure + listening checklist naming exactly
+which claims from step 4's confidence table are still unproven — that's what the
+re-measure should target.
+
+### 7. When a re-measure comes back — close the loop, don't just eyeball it
+
+If the user returns with a fresh measurement after loading the write, run
+`tunelib.predicted_vs_measured(freqs, before_db, remeasured_after_db, bands)`
+instead of just glancing at the new plot. A raw before/after diff would get
+swamped by exactly the things that differ between two real measurement runs
+(playback level, mic position, capture noise) — this function is built to not
+be fooled by those: it auto-aligns a broadband level offset using only the
+*untouched* frequencies (so a quieter re-measure doesn't read as "the EQ
+failed"), compares octave-smoothed regions (so ordinary mic-position comb
+ripple doesn't either), and downgrades to `'inconclusive'` wherever confidence
+is low rather than forcing a verdict. Each written band comes back graded
+`confirmed` / `diverged` / `reverted_recommended` / `inconclusive`. Treat
+`reverted_recommended` as an instruction to reconsider or pull that band, not
+a suggestion — it means the predicted change didn't show up, the same
+"phase is eating this" signature `reaches_target_after_boost` already flags
+before a write. Report the verdicts plainly; don't silently re-tune around a
+reverted band without telling the user why.
 
 ## Non-negotiables
 
