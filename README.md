@@ -43,7 +43,13 @@ sides diverge in the imaging band, and target closing that gap directly.
 measurements from different positions around the seat instead of just one, it tells
 real driver/room features (present everywhere) apart from position-specific
 comb-filtering (gone or shifted a few inches away) — the difference between something
-worth correcting and something that would only make one exact spot sound better.
+worth correcting and something that would only make one exact spot sound better. A
+Moving Mic Method (MMM/RTA) capture — mic swept around the head during the
+measurement — is the continuous version of the same idea, and is the **preferred**
+source for tonal/EQ decisions when you have it (fixed sweeps stay the only valid tool
+for anything phase-domain). The one thing to get right when capturing it: **engine
+off** — RTA has no noise rejection the way a sweep's deconvolution does, so a real dip
+can otherwise read as falsely filled by cabin noise.
 
 **Writes safely and verifies.** Stays inside the DSP's hardware limits, leaves your
 crossovers and delays untouched unless you ask, and decodes every file it writes back
@@ -80,9 +86,14 @@ The full Helix filter set, each used for what it's good at:
 
 - **Perceptual weighting** — ear-based smoothing (broad at low frequencies, finer up
   high), peaks weighted over dips, the presence region prioritised.
-- **Whole car, not one mic** — left/right and multi-position measurements separate
-  stable problems from single-point artefacts; left/right stays matched unless the
-  data shows the sides genuinely differ.
+- **Whole car, not one mic** — left/right and multi-position measurements (fixed or
+  swept/MMM) separate stable problems from single-point artefacts; left/right stays
+  matched unless the data shows the sides genuinely differ.
+- **Timing before tone, and never both at once on the same guess** — a phase fix
+  (polarity/delay/all-pass) and an EQ band in the same crossover-adjacent region are
+  never proposed together against the same unconfirmed data: the EQ prediction goes
+  stale the moment the phase fix changes what it was measured against, so one waits
+  for a re-measure before the other is trusted.
 - **Shape-anchored level** — it matches the shape of your target and lets overall
   level float, so swapping in a different curve changes the voicing, not the tune.
 - **Within limits, verified** — every gain respects the DSP's hardware limits,
@@ -201,8 +212,10 @@ python helix-rew-tuner/scripts/pipeline.py selftest
   a search result.
 - All EQ is written within Helix hardware limits (P SIX: −15…+6 dB, Q 0.5–15, etc.),
   and every write is decoded back and linted to confirm only the intended slots moved.
-- Predictions from magnitude (RTA/MMM) measurements don't capture phase outcomes;
-  all-pass and delay work must be confirmed by re-measuring with the tune loaded.
+- Magnitude-only measurements (RTA/MMM) are the **preferred** source for tonal/EQ
+  decisions — capture with the engine off, since RTA has no noise rejection — but
+  can't capture phase outcomes; all-pass and delay work still needs a fixed,
+  phase-valid sweep, and must be confirmed by re-measuring with the tune loaded.
 
 ## Model caveat
 
