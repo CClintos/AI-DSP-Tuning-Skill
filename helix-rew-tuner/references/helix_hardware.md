@@ -85,6 +85,23 @@ the user actually supplies one.
 
 ## Measurement setup gotchas (found during real tuning sessions)
 
+**Moving Mic Method (MMM) / RTA captures have no noise rejection — a real dip
+can read as falsely filled.** A fixed sweep's deconvolution rejects steady
+background noise; a plain RTA/MMM capture just sums whatever's present at
+each frequency, cabin noise included. **Confirmed as a real failure on a live
+project, not a hypothetical**: a genuine ~8-13 dB electrical PEQ cut read as a
+flat, unremarkable response on an engine-running MMM capture, and was only
+caught because a later engine-off sweep of the same tune showed the true
+depth. **Capture MMM intended for tonal/EQ decisions with the engine off**
+(and as quiet a cabin as practical) — there's no way to retroactively tell a
+real dip from a noise-masked one from the trace alone, so this is a capture-
+time discipline, not a post-hoc fix (same reason `gating_warning` is a
+capture-time check rather than a correction). See `methodology.md`'s
+"Measurement method selection" section for the fuller sweep-vs-MMM picture —
+MMM is still the *preferred* source for tonal/EQ conclusions when captured
+correctly, this gotcha is about how to capture it correctly, not a reason to
+avoid it.
+
 **Digital Input Activation race condition.** If the DSP's input activation is set
 to "Automatic via Signal Detection," the first chirp of an acoustic-timing-reference
 measurement can get eaten mid-switchover — the input hasn't finished waking up yet
