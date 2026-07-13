@@ -7,21 +7,91 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Sweep capture setup — line 26
-- Deviation analysis — line 73
-- Voicing — the most audible decision — line 86
-- Classify the problem (the core skill) — line 117
-  - The interference audit — line 136
-  - Two checks before trusting a proposed EQ band — line 144
-  - Minimum-phase / EQ-ability — line 165
-  - Quantify single-position phase reliability — line 172
-  - Multi-position variance ("EQ what's common, ignore what moves") — line 212
-- The crossover action-ladder — line 243
-- Shelf cookbook — line 304
-- All-pass cookbook — line 317
-- Imaging — line 360
-- Restraint — line 392
-- Verification & honesty — line 410
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 27
+- Sweep capture setup — line 96
+- Deviation analysis — line 143
+- Voicing — the most audible decision — line 156
+- Classify the problem (the core skill) — line 187
+  - The interference audit — line 206
+  - Two checks before trusting a proposed EQ band — line 214
+  - Minimum-phase / EQ-ability — line 235
+  - Quantify single-position phase reliability — line 242
+  - Multi-position variance ("EQ what's common, ignore what moves") — line 282
+- The crossover action-ladder — line 320
+- Shelf cookbook — line 381
+- All-pass cookbook — line 394
+- Imaging — line 437
+- Restraint — line 469
+- Verification & honesty — line 487
+
+## Measurement method selection — sweep vs Moving Mic (MMM)
+
+**Not "one is better" — they answer different questions, and a full tune needs
+both.** Established from a real project session (2026-07-14) that hit this
+distinction the hard way; sourced against the actual tuning-hardware vendors'
+own guidance, not just general acoustics theory:
+- miniDSP, "Microphone Techniques for Measurements in Car Cabins" and
+  "Measurement Approaches in Car Cabins" (car-audio near-field guidance).
+- Audiotec Fischer's own DSP Setup Guide — PC-Tool's built-in TuneEQ /
+  TuneToTarget algorithms use a moving-mic-at-listening-position technique
+  internally, not a fixed single point.
+
+**Fixed-position sweep (log sine, ideally with an acoustic timing
+reference)** is the only valid tool for anything phase-domain — delay,
+polarity, crossover summation/interference audits, all-pass design (this
+matches everything already established elsewhere in this file). Strong noise
+rejection via deconvolution, fine spectral resolution. Its weakness: in a
+car's near field, a single fixed mic point can show position-specific comb-
+filtering/standing-wave structure that doesn't represent what's heard across
+the volume a real head occupies. 2-3 fixed positions (centre/left-ear/
+right-ear) mitigate this — confirms a feature is position-*stable*, which is
+exactly what `spatial_consistency` (line 212) is built to check — but a
+handful of discrete points still isn't true spatial averaging.
+
+**Moving Mic Method (MMM)** — mic physically swept around the head at the
+listening position during capture, analyzed via RTA — **is the preferred
+primary source for frequency-response/EQ decisions when both are
+available**, including voicing-layer work (`voice_target`/`measure_tilt`).
+It's the continuous, mechanically-averaged version of the same idea
+`spatial_consistency` implements with discrete positions — both exist to stop
+a single fixed point from being mistaken for what's actually heard. Two real
+weaknesses to guard against, not reasons to avoid it:
+1. **Magnitude only, no phase** — same rule as any other magnitude-only
+   capture: never use it for delay/crossover/polarity/APF decisions.
+2. **No noise rejection.** A sweep's deconvolution rejects steady background
+   noise; plain RTA/MMM sums everything at each frequency, including it. A
+   real dip in a band where cabin noise (engine/HVAC/road) has energy can
+   read as falsely filled — **confirmed as a real, non-hypothetical failure
+   on a live project**: a genuine ~8-13 dB electrical PEQ cut read as a flat,
+   unremarkable response on an engine-running MMM capture, and was only
+   caught because a later engine-off sweep of the same tune showed the true
+   depth. **Capture MMM intended for EQ decisions with the engine off** (and
+   as quiet a cabin as practical) — this is a capture-time discipline, not
+   something fixable after the fact from the trace alone (the same reason
+   `gating_warning` exists as a capture-time check rather than a post-hoc
+   correction).
+
+**Playback level must be controlled, not just anchored.** `target_anchor_offset`
+and `calibrate_solo_levels` both assume shape is level-independent — measure
+at any level, then anchor the overall level and compare shape. That
+assumption breaks if the OS/driver audio path has a loudness-contour
+enhancement active (e.g. Windows "Loudness Equalization") — those reshape
+frequency response as a function of volume, so two captures at different
+levels aren't simply level-shifted versions of each other anymore. Confirm
+no such enhancement is active before trusting a shape comparison across
+sessions taken at different volumes, and where practical, measure at the
+level the user actually listens at — equal-loudness (Fletcher-Munson)
+perception is itself level-dependent, so tonal balance judged at one SPL
+doesn't necessarily hold at another.
+
+**Default protocol:** sweeps (with acoustic timing reference) for all
+delay/polarity/crossover/APF work. MMM — engine off, at or near the user's
+real listening volume, confirmed no loudness-contour enhancement active — as
+the primary dataset for PEQ/tonal/voicing decisions. Where both exist for
+the same tune, a large disagreement between them in a given band is itself
+diagnostic: check for ambient masking in the MMM capture and whether the
+sweep-only feature is position-stable (2-3 positions) or a likely near-field
+artifact, before trusting either one in isolation.
 
 ## Sweep capture setup (before you have data to analyze)
 
@@ -226,6 +296,13 @@ signature of the "Modal / reflection / spatial null" category above — feed it
 straight into `fit_peq(freqs, dev_db, band, mask=sc['mask'], conf=sc['conf'])`
 so the optimizer never spends a band on a dip that only exists at one seat
 position.
+
+**A Moving Mic Method (MMM) capture is the continuous, mechanically-averaged
+version of this same idea** — sweeping the mic around the head during
+capture instead of comparing discrete fixed positions afterward. See
+"Measurement method selection" (line 27) for the fuller sweep-vs-MMM
+picture, including why MMM is the *preferred* source for tonal/EQ decisions
+when available, and the engine-noise-floor caveat that comes with it.
 
 **This is also the honest, data-driven answer to "is this dip safe to boost,"
 sharper than a single-position minimum-phase check alone can give.**

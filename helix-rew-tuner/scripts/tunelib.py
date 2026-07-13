@@ -571,7 +571,16 @@ def weighted_median(values, weights=None):
 def target_anchor_offset(freqs, measured_db, target_db, confidence=None,
                          anchor_bands=((300.0, 3000.0), (120.0, 1000.0), (1000.0, 6000.0)),
                          min_bins=12):
-    """Wide, confidence-weighted median target anchor with fallbacks."""
+    """Wide, confidence-weighted median target anchor with fallbacks.
+
+    Assumes SHAPE is level-independent -- anchor the overall level, then
+    compare shape. That assumption breaks if the playback chain has a
+    loudness-contour enhancement active (e.g. Windows "Loudness
+    Equalization"): those reshape frequency response as a function of
+    volume, so two captures at different levels aren't just level-shifted
+    versions of each other anymore. Confirm no such enhancement is active
+    before anchoring across measurements taken at different playback
+    levels (see methodology.md's "Measurement method selection" section)."""
     freqs = np.asarray(freqs, dtype=float)
     dev = np.asarray(measured_db, dtype=float) - np.asarray(target_db, dtype=float)
     if confidence is None:
@@ -1260,7 +1269,11 @@ def calibrate_solo_levels(freqs, solo_db, together_db, band):
     """Fit a scalar dB offset to solo_db so that its incoherent contribution best
     explains together_db over `band` (least-squares on a log scale). Returns the
     fitted offset (add to solo_db) and the residual rms (post-calibration --
-    use THIS as the real confidence number, not the raw pre-fit deviation)."""
+    use THIS as the real confidence number, not the raw pre-fit deviation).
+
+    Same level-independent-shape assumption as target_anchor_offset -- see
+    that function's docstring for the loudness-contour caveat if solo and
+    together were captured at meaningfully different playback levels."""
     sel = (freqs >= band[0]) & (freqs <= band[1])
     if not np.any(sel):
         raise ValueError('band does not overlap axis')

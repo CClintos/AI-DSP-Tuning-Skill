@@ -46,24 +46,24 @@ Run these with the user's files; they are the deterministic layer.
 
   | Function(s) | For | Ref |
   |---|---|---|
-  | `voice_target`, `measure_tilt` | voicing layer (tilt/bass/presence/air) | L86 |
-  | `fit_peq` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | joint PEQ optimizer, restraint & L/R matching | L392, L360 |
-  | `interference_audit` | real dip vs. destructive summation | L136 |
-  | `crossover_confidence` | one band-limited crossover go/no-go | L243 |
-  | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | L243 |
-  | `spatial_consistency`, `complex_vector_average` | multi-position averaging | L212 |
-  | `phase_linearity_residual` | single-position phase reliability | L172 |
-  | `excess_gd_mask` | minimum-phase / EQ-ability classifier | L165 |
-  | `lr_match_report` | L/R image-stability diagnostic | L360 |
-  | `predicted_vs_measured` | predict → re-measure loop (step 7) | L410 |
-  | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | L144 |
-  | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | L26 |
-  | `calibrate_solo_levels` | fix mismatched solo test levels | L26 |
+  | `voice_target`, `measure_tilt` | voicing layer (tilt/bass/presence/air) | L156 |
+  | `fit_peq` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | joint PEQ optimizer, restraint & L/R matching | L469, L437 |
+  | `interference_audit` | real dip vs. destructive summation | L206 |
+  | `crossover_confidence` | one band-limited crossover go/no-go | L320 |
+  | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | L320 |
+  | `spatial_consistency`, `complex_vector_average` | multi-position averaging | L282 |
+  | `phase_linearity_residual` | single-position phase reliability | L242 |
+  | `excess_gd_mask` | minimum-phase / EQ-ability classifier | L235 |
+  | `lr_match_report` | L/R image-stability diagnostic | L437 |
+  | `predicted_vs_measured` | predict → re-measure loop (step 7) | L487 |
+  | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | L214 |
+  | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | L96 |
+  | `calibrate_solo_levels` | fix mismatched solo test levels | L96 |
   | `tune_scorecard` (`_abs_rms_db` fields catch what a signed median can hide), `headroom_report`, `compression_check` | scoring, clip risk, level sanity | — |
   | `hpf_excursion_risk` | driver excursion check (needs a supplied Fs) | — |
   | `ms_to_samples`, `samples_to_ms` | sample-rate-aware delay conversion | — |
   | `validate_peq_band` | hardware gain/Q limits | — |
-  | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | L304, L317 |
+  | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | L381, L394 |
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
   `write_delay_samples`/`verify_delay_write` can write a confirmed delay
@@ -165,8 +165,18 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
 - **Listening seat / drive side** (LHD/RHD or "which seat did you measure"): needed
   to interpret near vs far speaker for imaging — never assume it.
 - **Measurement method**: fixed-position sweep (phase-valid → usable for timing/APF)
-  vs moving-mic/RTA average (magnitude-only → tonal balance only, NOT phase). This
-  distinction gates which corrections are allowed (see methodology).
+  vs Moving Mic Method/RTA average (magnitude-only → tonal balance only, NOT
+  phase). This distinction gates which corrections are allowed — but they aren't
+  interchangeable-when-both-are-valid either: **when both exist, MMM is the
+  preferred source for tonal/EQ/voicing conclusions**, not the fixed sweep — a
+  single fixed point in a car's near field can show position-specific comb-
+  filtering that MMM's spatial averaging (and `spatial_consistency`'s discrete
+  version of the same idea) doesn't. If offered MMM data, ask whether it was
+  captured **engine off** (RTA has no noise rejection — a real dip can read as
+  falsely filled) and whether any OS/driver **loudness-contour enhancement**
+  (e.g. Windows Loudness Equalization) was active (breaks the level-anchor-then-
+  compare-shape assumption `target_anchor_offset` relies on). See
+  `references/methodology.md`'s "Measurement method selection" section.
 - **Rear-channel routing** (if rear channels exist): ask whether they're a discrete
   feed or a **stereo-difference matrix** (e.g. Rear L = 0.5×FL − 0.5×FR). This isn't
   detectable from crossovers, so it's a separate question from the channel map
