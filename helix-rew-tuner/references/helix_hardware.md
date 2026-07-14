@@ -89,9 +89,10 @@ the user actually supplies one.
 can read as falsely filled.** A fixed sweep's deconvolution rejects steady
 background noise; a plain RTA/MMM capture just sums whatever's present at
 each frequency, cabin noise included. **Confirmed as a real failure on a live
-project, not a hypothetical**: a genuine ~8-13 dB electrical PEQ cut read as a
-flat, unremarkable response on an engine-running MMM capture, and was only
-caught because a later engine-off sweep of the same tune showed the true
+project, not a hypothetical, and independently reconfirmed the same way in a
+second live session on the same tune**: a genuine ~8-13 dB electrical PEQ cut
+read as a flat, unremarkable response on an engine-running MMM capture, and was
+only caught because a later engine-off sweep of the same tune showed the true
 depth. **Capture MMM intended for tonal/EQ decisions with the engine off**
 (and as quiet a cabin as practical) — there's no way to retroactively tell a
 real dip from a noise-masked one from the trace alone, so this is a capture-

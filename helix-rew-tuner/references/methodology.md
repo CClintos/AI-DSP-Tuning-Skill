@@ -7,29 +7,33 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 27
-- Sweep capture setup — line 96
-- Deviation analysis — line 143
-- Voicing — the most audible decision — line 156
-- Classify the problem (the core skill) — line 187
-  - The interference audit — line 206
-  - Two checks before trusting a proposed EQ band — line 214
-  - Minimum-phase / EQ-ability — line 235
-  - Quantify single-position phase reliability — line 242
-  - Multi-position variance ("EQ what's common, ignore what moves") — line 282
-- The crossover action-ladder — line 320
-- Shelf cookbook — line 381
-- All-pass cookbook — line 394
-- Imaging — line 437
-- Restraint — line 469
-- Verification & honesty — line 487
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 28
+- Sweep capture setup — line 100
+- Deviation analysis — line 147
+- Analysis traps (anchoring, sum-vs-solo, imaging, sub coupling, ties) — line 175
+- Voicing — the most audible decision — line 235
+- Classify the problem (the core skill) — line 266
+  - The interference audit — line 285
+  - Two checks before trusting a proposed EQ band — line 293
+  - Minimum-phase / EQ-ability — line 314
+  - Quantify single-position phase reliability — line 321
+  - Multi-position variance ("EQ what's common, ignore what moves") — line 361
+- The crossover action-ladder — line 399
+- Shelf cookbook — line 460
+- All-pass cookbook — line 473
+- Imaging — line 516
+- Restraint — line 548
+- Verification & honesty — line 566
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
 **Not "one is better" — they answer different questions, and a full tune needs
 both.** Established from a real project session (2026-07-14) that hit this
-distinction the hard way; sourced against the actual tuning-hardware vendors'
-own guidance, not just general acoustics theory:
+distinction the hard way, and independently reconfirmed the same day in a second
+live session on the same tune (same conclusion, same ~8dB-cut-read-as-flat
+failure signature) — see "Analysis traps" (below) for that session's other
+findings. Sourced against the actual tuning-hardware vendors' own guidance, not
+just general acoustics theory:
 - miniDSP, "Microphone Techniques for Measurements in Car Cabins" and
   "Measurement Approaches in Car Cabins" (car-audio near-field guidance).
 - Audiotec Fischer's own DSP Setup Guide — PC-Tool's built-in TuneEQ /
@@ -152,6 +156,81 @@ fix. A few things to get right before trusting a measurement:
 3. Below the cabin's modal transition (~200–400 Hz), narrow peaks can be real and
    EQ-able. Above it, only broad trends are reliable — reflections dominate the fine
    structure and move with the mic.
+
+**The anchoring trap — the most dangerous error in step 1, VERIFIED live
+(2026-07-14).** When comparing several candidate tunes' before/after, never
+re-anchor each version to its own median independently. If an edit changes energy
+inside the anchor band itself (e.g. a low-mid cut), the anchor shifts, and the
+*relative* deviation numbers move for reasons that have nothing to do with the
+actual filter change — manufacturing a false "it went flat" result. A real case: a
+re-anchored comparison showed a 600 Hz bump "corrected to +0.8 dB" when the true
+change was only −1.1 dB (it stayed hot at +3.6 dB) — the anchor itself had silently
+shifted between versions. **Hold ONE fixed anchor (the baseline's) across every
+version being compared**, and always sanity-check against the raw, anchor-free
+delta `after(f) − before(f)` at the frequencies that matter — that number is
+anchor-independent and cannot be fooled this way. If a claimed deviation change is
+bigger than the raw component delta can produce, the anchoring is wrong, not the
+physics.
+
+## Analysis traps — conclusions that are confidently wrong, not just imprecise
+
+Five more failure modes caught live (2026-07-14) alongside the anchoring trap
+above. Each produced a plausible, structured-looking answer that was still wrong —
+that's what makes this class of error dangerous: nothing about the *output* looks
+broken, only the number underneath it.
+
+**A single-channel cut changes the L+R SUM by only about half its own value.**
+Cutting one mid channel by −2 dB drops the summed pair by roughly −1 dB, not −2 —
+the other, unchanged channel still contributes to the power sum
+(`10*log10(10**(La/10)+10**(Lb/10))`). Never predict a combined-response change
+equal to a one-sided filter's own gain. This is also why a one-sided excess (one
+channel hot at some frequency) can't be fully flattened in the sum without
+over-cutting that channel and wrecking L/R balance — the honest trade is to correct
+imaging and accept a partially-reduced sum bump, not chase the sum to zero with an
+asymmetric cut.
+
+**Fix the SUM where the sum is wrong, not where a single channel's solo dips.** A
+per-channel solo can dip at a frequency where the *summed* response is already
+flat, because the other channel fills it. "Fixing" that solo's dip with a boost
+then pushes the SUM into a shoulder peak it didn't have before. A real case:
+lifting one channel at 1150–1300 Hz (where that channel's own solo dipped) created
++2 dB sum shoulders, because the sum there was already flat — the dip was real but
+irrelevant to what's actually heard. Decide tonal corrections from the summed
+response; use a per-channel solo only for imaging/imbalance calls, never as the
+thing you're flattening.
+
+**For L/R balance, compare ABSOLUTE inter-channel level — never each side
+self-normalized against its own reference.** Normalizing each channel to its own
+target/baseline before comparing "how scooped is each side" can hide or invert the
+real difference — this is a distinct trap from the signed-median blind spot
+`tune_scorecard`'s `_abs_rms_db` fields catch (Verification & honesty, below); this
+one is about which TWO things you're differencing, not how you summarize the
+difference. A real case: an own-reference-normalized comparison said one side
+needed MORE presence lift; the absolute FR−FL difference showed that side was
+already the louder one at 1 kHz, so the proposed lift would have pushed the image
+further off-center, not fixed it. `lr_match_report` (Imaging, below) already does
+this correctly — raw FR−FL, not two independently-normalized shapes — use it
+rather than reconstructing the comparison by hand.
+
+**Sub level couples to the low-mid correction — don't set it from the sub solo in
+isolation.** The sub's needed gain depends on the mid/low-mid level it sums against
+at the crossover. After cutting a low-mid excess, the sub needs LESS boost to stay
+balanced than it did before that cut. Two otherwise-careful analyses of the same
+tune disagreed by 1.5 dB on sub gain purely because one measured relative to the
+mids before the low-mid cut and one after — both were internally consistent, only
+one matched the tune actually being proposed. Model sub and mids together against
+the same proposed state, and treat the final half-a-dB or so as a by-ear voicing
+call, not a number precise enough to compute past that point.
+
+**A score gap smaller than measurement repeatability is a tie, not a ranking.**
+Two candidates differing by a few tenths of a dB in the summed response, built from
+a single MMM run each, are within the run-to-run measurement noise of that capture
+method — the "winner" won't survive a re-measure and the gap isn't real signal.
+Report a difference that small as a tie and say why, rather than optimizing past
+the noise floor or presenting three-decimal scores as if they were decisive. Same
+discipline `predicted_vs_measured`'s `consistent_db` tolerance already applies to
+the predict-vs-remeasure comparison — crude and directional on purpose, not a
+precision instrument.
 
 ## Voicing — the most audible decision, and it's about the target, not the filters
 
