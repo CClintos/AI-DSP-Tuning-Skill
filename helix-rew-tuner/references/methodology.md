@@ -222,6 +222,31 @@ one matched the tune actually being proposed. Model sub and mids together agains
 the same proposed state, and treat the final half-a-dB or so as a by-ear voicing
 call, not a number precise enough to compute past that point.
 
+**When two models disagree about deviation-from-target, arbitrate with an
+anchor-independent SHAPE test.** Absolute deviation numbers depend on each model's
+normalization/anchor choice, so two internally-correct models can report
+contradictory deviations indefinitely. Local shape cannot: reference every value
+to a nearby in-band frequency — `delta(f) − delta(f_ref)`, e.g. f_ref = 1300 Hz
+for a presence-region dispute — for BOTH the required target delta and each
+candidate tune's delivered change. Any model must agree on those numbers, so the
+disagreement collapses to checkable arithmetic. A real case (2026-07-17): two
+analyses deadlocked over a Harman re-voicing ("your file overshoots +2.9 dB" vs
+"yours delivers zero of the required rise") until the shape test showed one file
+delivered +4.1 of a required +5.8 dB local rise and the other +0.0 — resolved in
+one round, and the overshoot claim traced to a different effective target anchor,
+not a real acoustic difference.
+
+**A tune comparison must score the FULL channel state — including output level
+(Vol) — not the PEQ set alone.** A file with baked level trims is acoustically
+different from one without, even with identical filters; a scorer that reads only
+PEQ misjudges headroom, sub/front balance, and target fit. A real cross-audit got
+its verdict exactly backwards this way — it ignored `<Vol>` tags and so missed
+−1 dB front trims that were the point of the file. Related: keep optimizer
+*guardrail* penalties separate from *acoustic* error when comparing candidates
+from different systems — a guardrail term can dominate the composite and invert
+the acoustic verdict, and different systems' guardrails are not comparable
+(one system's guardrail scored 10 of a 17-point total in that same audit).
+
 **A score gap smaller than measurement repeatability is a tie, not a ranking.**
 Two candidates differing by a few tenths of a dB in the summed response, built from
 a single MMM run each, are within the run-to-run measurement noise of that capture
