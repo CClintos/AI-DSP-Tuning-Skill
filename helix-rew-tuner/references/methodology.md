@@ -172,6 +172,18 @@ anchor-independent and cannot be fooled this way. If a claimed deviation change 
 bigger than the raw component delta can produce, the anchoring is wrong, not the
 physics.
 
+**The same trap re-appears when grading a re-measure, not just when comparing
+candidates.** Scoring a before/after pair with a median anchor taken from a band
+that a write actually touched will misattribute the anchor's own shift to every
+OTHER frequency — including ones nothing was done to. A real case (2026-07-29):
+grading a re-measure showed treble reading "worse" after a tune change that never
+touched a single tweeter band — impossible on its face. Cause: the write cut two
+bands sitting inside the 300–1000 Hz anchor window, so the anchor moved and every
+untouched frequency inherited that shift. **When scoring a re-measure, align
+levels using frequencies the write did NOT touch** (here, a clean 2–10 kHz region),
+not the same fixed mid-band used for target-deviation anchoring — those are two
+different jobs and can need two different anchor choices.
+
 ## Analysis traps — conclusions that are confidently wrong, not just imprecise
 
 Five more failure modes caught live (2026-07-14) alongside the anchoring trap
@@ -246,6 +258,43 @@ its verdict exactly backwards this way — it ignored `<Vol>` tags and so missed
 from different systems — a guardrail term can dominate the composite and invert
 the acoustic verdict, and different systems' guardrails are not comparable
 (one system's guardrail scored 10 of a 17-point total in that same audit).
+
+**A magnitude null found in measurement data is not automatically the same
+physical thing as a resonance/rattle the user reports by ear or by hand.** Both
+can be real, narrow, and centered near the same rough region without being the
+same phenomenon — one can be an absorption dip (energy leaving via a mechanically
+damped panel) and the other a genuine resonant peak (energy being added by a
+vibrating mass), a few tens of Hz apart. Building a correction around the
+measured null without confirming its frequency against the user's own independent
+evidence (can they reproduce/shift it by touching a specific component? does it
+occur without the audio system driving it at all, e.g. from road input alone?)
+risks aiming at the wrong target. A real case: a −4 dB EQ cut was built around a
+notch found at ~155 Hz; the user later pinned the actual resonance, by manually
+manipulating the suspect part, at ~190 Hz — and the tune's *compensating boost*
+for the (mistaken) null had been landing almost exactly on the real resonance the
+whole time, feeding it. Once independent physical evidence exists, trust it over
+the measurement-only guess and re-derive from the confirmed frequency.
+
+**Synthesizing a "what if this physical defect were fixed" response: use
+excess-over-broad-trend, not point-to-point interpolation across the feature.**
+When modeling a hypothetical future measurement (a resonance eliminated, a
+rattle fixed) from today's data, a naive fix — interpolate a smooth curve
+between two reference points flanking the defect — is fragile if either
+reference point is itself inside another nearby feature (a null, a second
+resonance edge); the interpolation inherits that contamination and over- or
+under-estimates the effect. More robust: take the raw trace, compute a heavily
+smoothed (~1/2-octave) version of the SAME trace as the local "trend," define
+excess as raw-minus-trend, and remove only the POSITIVE part of that excess in
+the defect's band — since a resonance is fundamentally added energy on top of
+the driver's own baseline, not a re-definition of what the baseline is. A real
+case: the interpolation-across-two-points method put a resonance's contribution
+at 3–4 dB; redone with the excess-over-broad-trend method (same underlying
+data) it was 1.6–2.4 dB — enough to flip the right correction from "remove the
+existing compensating cut" to "remove it, and the case for adding a small boost
+on top is much weaker than it first looked." Bias any decision built on a
+synthetic (not yet re-measured) state toward removal/neutral over new boosts —
+the smaller the assumed effect, the less a boost's benefit clears the bar of
+being worth a write with no confirming measurement behind it yet.
 
 **A score gap smaller than measurement repeatability is a tie, not a ranking.**
 Two candidates differing by a few tenths of a dB in the summed response, built from
@@ -569,6 +618,17 @@ boost that only helps matching and does nothing for the channel's own target
 accuracy should have to earn its place. Raise the weight (2–4+) once you've
 actually decided the image-stability payoff is worth it for that specific
 region; don't reach for it as a default.
+
+**A cheap, high-confidence signal for when a one-sided cut is the right move (not
+just legal): scan for frequencies where the whole-system deviation-from-target
+AND the raw L/R imbalance both flag the SAME side as hot at the SAME frequency.**
+When they align, a single cut on that one channel fixes both problems in one
+move — the tonal excess and the imaging error were the same root cause, not two
+separate ones needing separate fixes. This is a stronger, more specific case than
+the general "fix the worse channel" rule above: it's not just permission to touch
+one side, it's a positive search — look across the band for spots where sum-error
+and imbalance-direction agree, and treat those as the free wins to take first,
+before spending budget on anything symmetric in the same region.
 
 ## Restraint (the thing that beats aggressive auto-EQ)
 
