@@ -245,6 +245,143 @@ def verify_delay_write(old_xml, new_xml, channel_index, expected_samples):
     return {'pass': not errors, 'errors': errors}
 
 
+# ---------------------------------------------------------------- output trim
+# tunelib.headroom_report already COMPUTES recommended_trim_db when a boost
+# stack risks clipping -- but until now there was no way to APPLY it, so the
+# recommendation just sat in a report and the user had to find the output
+# level control in PC-Tool by hand. This closes that loop.
+#
+# The output level lives in a <Vol L="..."/> tag inside each <OC> block, where
+# L is LINEAR amplitude (dB = 20*log10(L)) -- VERIFIED 2026-07-14 by reading
+# real files: a mid channel at L="0.7286181745132278" = -2.75 dB matched its
+# PC-Tool output trim, and that trim was exactly what offset a +2.7 dB PEQ
+# cascade peak (which is why headroom_report's clip_risk on that channel was
+# a false alarm -- it only sees the PEQ stage, not the output trim).
+#
+# GOTCHA THAT WOULD SILENTLY CORRUPT A WRITE: there are FEWER <Vol> tags than
+# channels -- unused/empty output channels have no <Vol> tag at all (a real
+# 10-channel file had Vol in ch0-ch7 only). So the Nth <Vol> tag in the file
+# is NOT channel N. These functions map each Vol tag to its containing <OC>
+# block and index by CHANNEL, matching channels()/channel_blocks() order like
+# every other function here. Never index Vol tags positionally.
+#
+# SAFETY BY CONSTRUCTION, not just by convention: trim_db must be <= 0 and
+# >= min_trim_db (default -6). This can only ever ATTENUATE. Unlike the delay
+# write (which is gated by user confirmation but could be given a bad number),
+# a trim write is structurally incapable of raising output level or pushing a
+# channel further into clipping. It still follows the same standing rule --
+# user-initiated, explicitly confirmed for that specific change, verified
+# after -- because it IS an audible level change to their tune.
+def _vol_spans(xml):
+    """[(channel_index, match)] for every <Vol> tag, mapped to the <OC> block
+    it lives inside. Channels with no <Vol> tag are simply absent."""
+    out = []
+    for i, m in enumerate(re.finditer(r'<OC\b.*?</OC>', xml, re.S)):
+        block, base = m.group(0), m.start()
+        v = re.search(r'<Vol\b[^>]*/?>', block)
+        if v:
+            out.append((i, base + v.start(), base + v.end(), v.group(0)))
+    return out
+
+
+def read_output_levels(xml):
+    """{channel_index: {'L': float, 'db': float, 'tag': str}} for channels that
+    have a <Vol> tag. dB = 20*log10(L); L=1.0 is unity (0 dB)."""
+    import math
+    out = {}
+    for ci, s, e, tag in _vol_spans(xml):
+        a = attrs(tag)
+        if 'L' not in a:
+            continue
+        L = float(a['L'])
+        out[ci] = {'L': L, 'db': (20.0 * math.log10(L) if L > 0 else float('-inf')),
+                   'tag': tag}
+    return out
+
+
+def write_output_trim(xml, trims_db, min_trim_db=-6.0):
+    """Apply protective output attenuation. trims_db: {channel_index: dB},
+    every value <= 0 (attenuation only) and >= min_trim_db. The trim is
+    RELATIVE to the channel's existing level -- new_L = old_L * 10**(dB/20) --
+    so it composes with whatever trim the user already had rather than
+    replacing it. Only the L= attribute moves; T=/i= and every other tag in
+    the file stay byte-identical. Returns the new XML.
+
+    Use tunelib.headroom_report(...)['recommended_trim_db'] to source the
+    number, but read the channel's CURRENT level first (read_output_levels)
+    and tell the user both the current and resulting dB -- an existing trim
+    may already cover the risk (see the false-alarm note above)."""
+    if not trims_db:
+        raise ValueError('trims_db is empty -- nothing to write')
+    spans = {ci: (s, e, tag) for ci, s, e, tag in _vol_spans(xml)}
+    for ci, db in sorted(trims_db.items()):
+        if db > 0:
+            raise ValueError('ch%d: trim must be <= 0 dB (attenuation only), got %+.2f'
+                             % (ci, db))
+        if db < min_trim_db:
+            raise ValueError('ch%d: trim %+.2f dB exceeds the %+.1f dB safety floor'
+                             % (ci, db, min_trim_db))
+        if ci not in spans:
+            raise ValueError('ch%d has no <Vol> tag (unused channel?) -- channels '
+                             'with a Vol tag: %s' % (ci, sorted(spans)))
+    # apply right-to-left so earlier offsets stay valid
+    new_xml = xml
+    for ci in sorted(trims_db, key=lambda c: spans[c][0], reverse=True):
+        s, e, tag = spans[ci]
+        a = attrs(tag)
+        if 'L' not in a:
+            raise ValueError('ch%d: <Vol> tag has no L= attribute: %s' % (ci, tag))
+        new_L = float(a['L']) * (10.0 ** (trims_db[ci] / 20.0))
+        new_tag = re.sub(r'(?<![A-Za-z])L="[^"]*"', 'L="%r"' % new_L, tag, count=1)
+        new_xml = new_xml[:s] + new_tag + new_xml[e:]
+    return new_xml
+
+
+def verify_output_trim_write(old_xml, new_xml, trims_db, tol_db=0.01):
+    """Strong verification for a trim write. Confirms:
+      - each trimmed channel's new level is old + trim_db (within tol_db);
+      - the change is ATTENUATION (new level strictly <= old, per channel);
+      - every other channel's <Vol> tag is BYTE-IDENTICAL;
+      - the trimmed tags' other attributes (T=, i=) are unchanged;
+      - delays are semantically equal and every <OC> block differs ONLY by
+        its <Vol> tag (so no filter/polarity/crossover moved).
+    Returns {'pass': bool, 'errors': [...]}."""
+    errors = []
+    old_lv, new_lv = read_output_levels(old_xml), read_output_levels(new_xml)
+    if sorted(old_lv) != sorted(new_lv):
+        return {'pass': False, 'errors': ['set of channels with a <Vol> tag changed '
+                                          '(%s -> %s)' % (sorted(old_lv), sorted(new_lv))]}
+    for ci in sorted(old_lv):
+        o, n = old_lv[ci], new_lv[ci]
+        if ci in trims_db:
+            want = o['db'] + trims_db[ci]
+            if abs(n['db'] - want) > tol_db:
+                errors.append('ch%d: level is %+.3f dB, expected %+.3f dB'
+                              % (ci, n['db'], want))
+            if n['L'] > o['L'] + 1e-12:
+                errors.append('ch%d: level INCREASED (%.4f -> %.4f) -- trim must only '
+                              'attenuate' % (ci, o['L'], n['L']))
+            oa = {k: v for k, v in attrs(o['tag']).items() if k != 'L'}
+            na = {k: v for k, v in attrs(n['tag']).items() if k != 'L'}
+            if oa != na:
+                errors.append('ch%d: <Vol> attributes other than L changed (%r -> %r)'
+                              % (ci, oa, na))
+        elif o['tag'] != n['tag']:
+            errors.append('ch%d: untrimmed channel\'s <Vol> tag changed (%s -> %s)'
+                          % (ci, o['tag'], n['tag']))
+    if semantic_delay_key(old_xml) != semantic_delay_key(new_xml):
+        errors.append('delays changed -- a trim write must not touch timing')
+    ob, nb = channel_blocks(old_xml), channel_blocks(new_xml)
+    if len(ob) != len(nb):
+        errors.append('channel count changed')
+    else:
+        strip = lambda b: re.sub(r'<Vol\b[^>]*/?>', '<Vol/>', b)
+        for i, (a, b) in enumerate(zip(ob, nb)):
+            if strip(a) != strip(b):
+                errors.append('ch%d: <OC> content other than <Vol> changed' % i)
+    return {'pass': not errors, 'errors': errors}
+
+
 def roundtrip_lint(old_xml, new_xml, expect_changed=None,
                    allow_delay=False, allow_xover=False):
     """Verify a write: delays + crossovers preserved (semantically), header
@@ -319,6 +456,59 @@ def _selftest():
     except ValueError:
         pass
     print('afpx selftest: out-of-range channel_index correctly raises')
+
+    # ---- output trim -------------------------------------------------------
+    # NOTE ch1 deliberately has NO <Vol> tag, and ch2 does -- this reproduces
+    # the real-file gotcha (fewer Vol tags than channels, so the Nth Vol tag
+    # is NOT channel N). If the mapping were positional, the ch2 write below
+    # would silently land on ch1's tag and the byte-identical check would fail.
+    vxml = ('<ATF>'
+            '<OC ON="0" CINV="0"><Vol T="15" L="0.5" i="0"/><Fil T="1"/></OC>'
+            '<OC ON="1" CINV="0"><Fil T="17" F="100" G="-2" Q="1"/></OC>'
+            '<OC ON="2" CINV="0"><Vol T="15" L="1.0" i="0"/><Fil T="1"/></OC>'
+            '</ATF><T PM="1" P="0" T="0"/><T PM="1" P="0" T="5"/><T PM="1" P="0" T="9"/>')
+
+    lv = read_output_levels(vxml)
+    assert sorted(lv) == [0, 2], 'Vol tags must map to channels 0 and 2, got %s' % sorted(lv)
+    assert abs(lv[0]['db'] - (-6.0206)) < 0.01 and abs(lv[2]['db'] - 0.0) < 1e-9
+    print('afpx selftest: read_output_levels maps Vol->channel (skips ch1, no Vol) OK')
+
+    t = write_output_trim(vxml, {2: -3.0})
+    v = verify_output_trim_write(vxml, t, {2: -3.0})
+    assert v['pass'], 'positive trim case should pass: %r' % v['errors']
+    assert abs(read_output_levels(t)[2]['db'] - (-3.0)) < 0.01
+    assert read_output_levels(t)[0]['tag'] == lv[0]['tag'], 'ch0 Vol must be byte-identical'
+    print('afpx selftest: trim write on the correct channel + verify OK')
+
+    # relative composition: trimming an already-trimmed channel stacks
+    t2 = write_output_trim(vxml, {0: -2.0})
+    assert abs(read_output_levels(t2)[0]['db'] - (-8.0206)) < 0.01, 'trim must be relative'
+    assert verify_output_trim_write(vxml, t2, {0: -2.0})['pass']
+    print('afpx selftest: trim is relative to existing level OK')
+
+    for bad, why in [({2: +1.0}, 'positive gain'), ({2: -99.0}, 'below safety floor'),
+                     ({1: -3.0}, 'channel with no Vol tag'), ({}, 'empty dict')]:
+        try:
+            write_output_trim(vxml, bad)
+            raise AssertionError('%s should have raised' % why)
+        except ValueError:
+            pass
+    print('afpx selftest: rejects boost / over-floor / no-Vol-channel / empty OK')
+
+    # a boost smuggled past the writer must still be caught by verification.
+    # Derive the written L from the file rather than hardcoding it -- a stale
+    # literal here would silently make this a no-op test that always passes.
+    trimmed = write_output_trim(vxml, {2: -3.0})
+    written_L = attrs(read_output_levels(trimmed)[2]['tag'])['L']
+    sneaky = trimmed.replace('L="%s"' % written_L, 'L="2.0"')
+    assert sneaky != trimmed, 'sneaky-edit fixture failed to apply'
+    assert not verify_output_trim_write(vxml, sneaky, {2: -3.0})['pass'], \
+        'verification must catch a level INCREASE'
+    # and an unrelated filter change must be caught too
+    tampered = write_output_trim(vxml, {2: -3.0}).replace('G="-2"', 'G="-5"')
+    assert not verify_output_trim_write(vxml, tampered, {2: -3.0})['pass'], \
+        'verification must catch an unrelated filter change'
+    print('afpx selftest: verification catches level increase + unrelated edits OK')
 
     print('\nALL AFPX SELFTESTS PASSED')
 
