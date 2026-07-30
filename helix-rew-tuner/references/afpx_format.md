@@ -80,6 +80,39 @@ Notes that have burned people:
 - **Only write `T="17"` for ordinary EQ.** Never place a shelf/all-pass code in an
   arbitrary slot — those pin to fixed slots and don't AutoSort.
 
+## Output level (`<Vol>`) — VERIFIED 2026-07-14
+
+`<Vol T="15" L="0.7286181745132278" i="0"/>`, **one per channel, inside that
+channel's `<OC>` block.** `L` is **LINEAR amplitude**, so `dB = 20*log10(L)`
+(`L="1.0"` = unity/0 dB). Verified by reading real files: `L="0.7286…"` =
+−2.75 dB matched the channel's PC-Tool output trim.
+
+**GOTCHA — there are FEWER `<Vol>` tags than channels.** Unused/empty output
+channels have **no `<Vol>` tag at all** (a real 10-channel file had them only on
+ch0–ch7; ch8/ch9 had none). So **the Nth `<Vol>` tag in the file is NOT
+channel N** — a positional index silently writes to the wrong channel.
+`afpx.read_output_levels` / `write_output_trim` / `verify_output_trim_write` map
+each tag to its containing `<OC>` block and key by channel index (same
+convention as `channels()`); the selftest deliberately includes a
+missing-`<Vol>` channel so a regression to positional indexing fails loudly.
+
+**Why this matters beyond writes:** `tunelib.headroom_report`'s `clip_risk`
+only sees the PEQ stage and is frequently a **false alarm** — the channel's
+output trim usually already offsets the boost. Verified real case: a +2.7 dB
+PEQ cascade peak on a channel sitting at −2.75 dB output = ~0 dB net, not
+clipping. **Always read the actual output level before reporting a clip risk.**
+
+**Writing a trim** (`afpx.write_output_trim`) is **attenuation-only by
+construction** — values must be ≤ 0 dB and ≥ −6 dB (configurable floor), and
+the trim is *relative* to the existing level, so it composes with a trim the
+user already set rather than replacing it. That structural guarantee (it cannot
+raise level, so it cannot create a clipping risk) makes it safer than the delay
+write, but it is still an audible change to the user's tune: same standing rule
+— user-initiated, explicitly confirmed for that specific change, and verified
+after with `verify_output_trim_write` (which checks the exact resulting dB,
+that level went *down*, that other channels' `<Vol>` tags are byte-identical,
+and that nothing outside `<Vol>` moved).
+
 ## Delay / polarity
 
 `<T T="samples" PM="..." P="..." .../>` per channel, with delay in samples at the

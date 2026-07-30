@@ -59,7 +59,7 @@ Run these with the user's files; they are the deterministic layer.
   | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | L293 |
   | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | L100 |
   | `calibrate_solo_levels` | fix mismatched solo test levels | L100 |
-  | `tune_scorecard` (`_abs_rms_db` fields catch what a signed median can hide), `headroom_report`, `compression_check` | scoring, clip risk, level sanity | — |
+  | `tune_scorecard` (`_abs_rms_db` fields catch what a signed median can hide), `headroom_report` (clip_risk is PEQ-only — check the real output level, it's often a false alarm), `compression_check` | scoring, clip risk, level sanity | — |
   | `hpf_excursion_risk` | driver excursion check (needs a supplied Fs) | — |
   | `ms_to_samples`, `samples_to_ms` | sample-rate-aware delay conversion | — |
   | `validate_peq_band` | hardware gain/Q limits | — |
@@ -69,8 +69,15 @@ Run these with the user's files; they are the deterministic layer.
   `write_delay_samples`/`verify_delay_write` can write a confirmed delay
   directly — a real, tested capability, but it does NOT change the standing
   rule that delay writes need explicit per-change user confirmation first
-  (see workflow step 5 and `helix_hardware.md`). `python afpx.py selftest`
-  self-tests the write path on synthetic XML.
+  (see workflow step 5 and `helix_hardware.md`).
+  `read_output_levels`/`write_output_trim`/`verify_output_trim_write` handle
+  per-channel **output level** (`<Vol>`, linear amplitude — read
+  `afpx_format.md` for the fewer-Vol-tags-than-channels gotcha). Reading it is
+  mandatory before reporting any `headroom_report` clip risk (that flag is
+  PEQ-only and usually a false alarm once the existing trim is counted);
+  writing is attenuation-only by construction (≤0 dB, ≥−6 dB, relative to
+  current) and still needs per-change confirmation. `python afpx.py selftest`
+  self-tests both write paths on synthetic XML.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
   resample onto a common grid, load target curves.
 - **`pipeline.py`** — one deterministic entry point for step 2-3's analysis
@@ -238,7 +245,12 @@ car.
   writing (bands within an octave interact — never set gain = −deviation naively).
 - Prefer few, broad, low-Q moves. Peaks cost more than dips. Do not fill narrow
   dips. Keep L/R corrections matched unless solos prove the sides genuinely differ.
-- Run `headroom_report`; if a boost stack risks clipping, recommend an output trim.
+- Run `headroom_report` — but **`clip_risk` alone is not a finding.** It sees only
+  the PEQ stage; read the channel's actual output level (`afpx.read_output_levels`)
+  and report the NET number. A channel at −2.75 dB output with a +2.7 dB cascade
+  peak is fine, and calling that a clipping risk is a false alarm. If a real net
+  risk remains, propose the specific trim (`recommended_trim_db`) as its own
+  confirmed change.
 - Present the plan (what, where, why, predicted before→after) before writing.
 - **State confidence per claim, not just "objective improved."** A single
   aggregate score hides exactly the judgment calls that matter — whether a
@@ -283,6 +295,14 @@ car.
      else in the file moved, which a delay write specifically needs.
   4. The result is still a *prediction* until the user re-measures with it
      loaded — say so plainly, especially since this is a phase-domain change.
+- **An output trim (`afpx.write_output_trim`) is the one write that can't make
+  things worse level-wise** — it's attenuation-only by construction (≤0 dB,
+  ≥−6 dB, relative to the channel's current level). That lowers the *risk*, not
+  the *bar*: it's still an audible change to their tune, so it needs the same
+  per-change confirmation, and you must show the current and resulting dB for
+  each channel (not just the trim amount) so the user can see where it lands.
+  Verify with `afpx.verify_output_trim_write` afterwards. Never trim to "fix" a
+  `clip_risk` flag you haven't checked against the real output level first.
 
 ### 6. Hand off — the real proof is the re-measure
 

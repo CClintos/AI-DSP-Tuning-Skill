@@ -537,7 +537,19 @@ def headroom_report(freqs, bands, xover_lo=None, xover_hi=None):
     """Given a channel's full PEQ set, report the worst-case positive gain the
     EQ cascade produces (that's what eats digital headroom / clips). Every tune
     must print this per channel. `xover_*` optionally bounds the summed-boost
-    check to the driver's passband. Returns a dict."""
+    check to the driver's passband. Returns a dict.
+
+    IMPORTANT -- `clip_risk` here sees ONLY the PEQ stage, so it is often a
+    FALSE ALARM on a well-set-up tune. It does not know the channel's OUTPUT
+    TRIM, which usually already offsets the boost. VERIFIED on a real file
+    (2026-07-14): a mid channel flagged clip_risk=True for a +2.7 dB cascade
+    peak while its output level sat at -2.75 dB, so net at the DAC was ~0 dB
+    and nothing was actually clipping. **Before reporting a clip risk to the
+    user, read the channel's actual output level (`afpx.read_output_levels`)
+    and compare** -- report the NET figure, not the PEQ-only one. If a real
+    net risk remains, `recommended_trim_db` is the number to apply, via
+    `afpx.write_output_trim` (attenuation-only by construction) under the same
+    confirm-then-verify rule as any other write."""
     g = cascade_db(freqs, bands)
     sel = np.ones_like(freqs, dtype=bool)
     if xover_lo is not None: sel &= freqs >= xover_lo
