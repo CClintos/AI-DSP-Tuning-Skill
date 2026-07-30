@@ -7,24 +7,25 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 29
-- Sweep capture setup — line 101
-- Beyond magnitude — decay (time-domain) and distortion axes — line 148
-- Deviation analysis — line 228
-- Analysis traps (anchoring, sum-vs-solo, imaging, sub coupling, ties) — line 268
-- Voicing — the most audible decision — line 425
-- Classify the problem (the core skill) — line 456
-  - The interference audit — line 475
-  - Two checks before trusting a proposed EQ band — line 483
-  - Minimum-phase / EQ-ability — line 504
-  - Quantify single-position phase reliability — line 511
-  - Multi-position variance — line 551
-- The crossover action-ladder — line 589
-- Shelf cookbook — line 650
-- All-pass cookbook — line 663
-- Imaging — line 706
-- Restraint — line 749
-- Verification & honesty — line 767
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 30
+- Sweep capture setup — line 102
+- Beyond magnitude — decay (time-domain) and distortion axes — line 149
+- Deviation analysis — line 229
+- Analysis traps (anchoring, sum-vs-solo, imaging, sub coupling, ties) — line 269
+- When the answer is physical, not electrical — line 426
+- Voicing — the most audible decision — line 485
+- Classify the problem (the core skill) — line 516
+  - The interference audit — line 535
+  - Two checks before trusting a proposed EQ band — line 543
+  - Minimum-phase / EQ-ability — line 564
+  - Quantify single-position phase reliability — line 571
+  - Multi-position variance — line 611
+- The crossover action-ladder — line 649
+- Shelf cookbook — line 710
+- All-pass cookbook — line 723
+- Imaging — line 766
+- Restraint — line 809
+- Verification & honesty — line 827
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -421,6 +422,65 @@ the noise floor or presenting three-decimal scores as if they were decisive. Sam
 discipline `predicted_vs_measured`'s `consistent_db` tolerance already applies to
 the predict-vs-remeasure comparison — crude and directional on purpose, not a
 precision instrument.
+
+## When the answer is physical, not electrical
+
+Some deviations are the install talking, not the tune. EQ can only change what
+the driver is *asked* to produce; it cannot change what happens to that output
+afterwards. Recognising these early stops a tuner burning filters, headroom and
+sessions on something a mechanical fix resolves properly. Four failure modes
+recur in door-mounted car installs, and they call for different remedies that
+are easy to conflate.
+
+**Damping, sealing, absorption and decoupling are four DIFFERENT jobs.** This is
+the single most useful distinction, because "I've done sound deadening" usually
+means only the first one:
+- **Damping** (constrained-layer damping tiles on panels) — stops a panel
+  *resonating*. Fixes ringing/buzzing panels. Does nothing for cancellation.
+- **Sealing** (rigid block-off plates over the inner door skin's access holes)
+  — stops the driver's rear output leaking round to the front. This is the fix
+  for cancellation, and damping tiles alone do NOT achieve it: a partial cover
+  leaks, and a leak defeats the seal.
+- **Absorption** (open-cell/melamine foam, fibre mat behind the driver) —
+  absorbs the rear wave inside the cavity so less of it returns.
+- **Decoupling / gasketing** (closed-cell foam strips between driver or mounting
+  ring and the door card; foam or rope where trim layers overlap) — seals the
+  driver's front output to the card so it can't spill into the cavity, and stops
+  trim pieces buzzing against each other.
+
+**Broad midbass cancellation, typically somewhere in the ~300-800 Hz region, is
+the classic signature of an acoustic short circuit** — the door acting as an
+open baffle rather than an enclosure, because the inner skin's large service
+holes let front and rear waves meet. Distinguishing features: it's broad rather
+than a narrow notch, it appears in the driver's own solo (not only in a summed
+trace), and it tends to appear at a similar frequency on BOTH doors because the
+geometry is near-symmetric. Do not EQ-boost it — the energy is being cancelled,
+not merely attenuated, so a boost costs headroom and excursion for very little
+recovered output (`reaches_target_after_boost` will usually flag exactly this).
+The remedy is sealing the inner skin and gasketing the driver to the door card.
+
+**A single specular reflection produces a COMB, and that's testable.** If a
+suspected reflection is the cause, the nulls fall at odd multiples of the first
+(f, 3f, 5f...), because cancellation needs a path difference of an odd number of
+half-wavelengths. Detrend the driver's raw response (remove the broad tilt with
+a low-order polynomial fit in log-frequency), locate the nulls, and check the
+ratios. If they ARE odd multiples, the implied extra path length is
+`c / (2*f1)` — which physically identifies the reflector and tells you what to
+treat. If they are NOT (real case: ratios came out 1.72, 2.30, 4.30 — no clean
+odd pattern), a single reflection is ruled out and a broadband mechanism such as
+the acoustic short circuit above is more likely. This is a cheap test that turns
+"maybe it's a reflection" into a decided question.
+
+**A resonant absorber (a rigid part on a compliant mount) is not the same as a
+rattling panel, and the decay analysis distinguishes them** — see "Beyond
+magnitude" above for the three-part notch/ring/peak signature and why the
+frequency a listener reports differs from the frequency to excite when hunting
+it by hand.
+
+**Say plainly when a deviation is an install problem.** A tuner's job includes
+reporting "this one is not correctable from the DSP, here is the physical
+cause and the remedy" rather than spending filters to partially mask it. That
+report is more valuable than a slightly flatter curve bought with headroom.
 
 ## Voicing — the most audible decision, and it's about the target, not the filters
 
