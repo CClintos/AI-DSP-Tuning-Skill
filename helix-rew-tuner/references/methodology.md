@@ -12,19 +12,19 @@ to the section you need instead of reading it whole)
 - Beyond magnitude — decay (time-domain) and distortion axes — line 148
 - Deviation analysis — line 228
 - Analysis traps (anchoring, sum-vs-solo, imaging, sub coupling, ties) — line 268
-- Voicing — the most audible decision — line 390
-- Classify the problem (the core skill) — line 421
-  - The interference audit — line 440
-  - Two checks before trusting a proposed EQ band — line 448
-  - Minimum-phase / EQ-ability — line 469
-  - Quantify single-position phase reliability — line 476
-  - Multi-position variance — line 516
-- The crossover action-ladder — line 554
-- Shelf cookbook — line 615
-- All-pass cookbook — line 628
-- Imaging — line 671
-- Restraint — line 714
-- Verification & honesty — line 732
+- Voicing — the most audible decision — line 425
+- Classify the problem (the core skill) — line 456
+  - The interference audit — line 475
+  - Two checks before trusting a proposed EQ band — line 483
+  - Minimum-phase / EQ-ability — line 504
+  - Quantify single-position phase reliability — line 511
+  - Multi-position variance — line 551
+- The crossover action-ladder — line 589
+- Shelf cookbook — line 650
+- All-pass cookbook — line 663
+- Imaging — line 706
+- Restraint — line 749
+- Verification & honesty — line 767
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -376,6 +376,41 @@ on top is much weaker than it first looked." Bias any decision built on a
 synthetic (not yet re-measured) state toward removal/neutral over new boosts —
 the smaller the assumed effect, the less a boost's benefit clears the bar of
 being worth a write with no confirming measurement behind it yet.
+
+**Measure the capture method's OWN noise floor, then require every band to
+clear it.** "Is this deviation real?" has no answer in the abstract — it depends
+on how repeatable the measurement is at that frequency, which is a property of
+the method, the rig, and the frequency, not a constant. It is directly
+measurable whenever two sessions exist with a *known* EQ delta between them
+(even a tune change, as long as the change is known): subtract the modelled EQ
+delta from the measured difference, remove a broadband offset using a region the
+change didn't touch, and whatever residual is left IS the session-to-session
+repeatability. Then require a proposed correction to exceed that residual by a
+comfortable factor (~2-3x) before spending a filter on it. A real case: MMM
+repeatability measured this way came out ~0.1 dB at 400-500 Hz, 0.6-1.0 dB at
+700-1400 Hz, 1.0-1.6 dB above 1400 Hz for the midbasses, and 0.23-0.46 dB across
+the band for the tweeters — so a 2 dB correction at 1250 Hz was well supported
+while a 1.5 dB one at 630 Hz was marginal, a distinction invisible without the
+measurement. Expect the floor to WORSEN with frequency for moving-mic captures
+(the mic path is never traced identically twice, and path variation matters more
+as wavelength shrinks), and watch for a systematic tilt in the residual rather
+than random scatter — that indicates level/path drift between sessions, not
+noise.
+
+**Don't let a handful of discrete fixed positions overrule a moving-mic average
+for tonal decisions.** `spatial_consistency` on 2-3 fixed sweep positions is the
+right tool for deciding whether a *phase/crossover* feature is stable, but it is
+the WEAKER instrument for tonal calls above a few hundred Hz, and it can flag a
+perfectly sound MMM-derived correction as "position-variable." The reason is
+sampling density: positions spaced a head-width apart are close enough to sit in
+the SAME near-field comb nulls, so their mean is not the spatial average an MMM
+capture produces — it is three samples of a comb pattern. A real case: a
+3-position mean disagreed with MMM by up to 16 dB above 800 Hz, and flagged two
+one-sided cuts as low-confidence (0.05-0.07) — yet MMM's own measured
+repeatability at those exact frequencies was +/-0.24-0.56 dB, i.e. the
+corrections were supported by 4-8x margin. When the two disagree for a tonal
+decision, prefer MMM and use its own repeatability (above) as the noise floor;
+reserve the discrete-position spread for what it's actually good at.
 
 **A score gap smaller than measurement repeatability is a tie, not a ranking.**
 Two candidates differing by a few tenths of a dB in the summed response, built from
