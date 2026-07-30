@@ -46,24 +46,25 @@ Run these with the user's files; they are the deterministic layer.
 
   | Function(s) | For | Ref |
   |---|---|---|
-  | `voice_target`, `measure_tilt` | voicing layer (tilt/bass/presence/air) | L235 |
-  | `fit_peq` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | joint PEQ optimizer, restraint & L/R matching | L548, L516 |
-  | `interference_audit` | real dip vs. destructive summation | L285 |
-  | `crossover_confidence` | one band-limited crossover go/no-go | L399 |
-  | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | L399 |
-  | `spatial_consistency`, `complex_vector_average` | multi-position averaging | L361 |
-  | `phase_linearity_residual` | single-position phase reliability | L321 |
-  | `excess_gd_mask` | minimum-phase / EQ-ability classifier | L314 |
-  | `lr_match_report` | L/R image-stability diagnostic | L516 |
-  | `predicted_vs_measured` | predict → re-measure loop (step 7) | L566 |
-  | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | L293 |
-  | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | L100 |
-  | `calibrate_solo_levels` | fix mismatched solo test levels | L100 |
+  | `voice_target`, `measure_tilt` | voicing layer (tilt/bass/presence/air) | L425 |
+  | `fit_peq` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | joint PEQ optimizer, restraint & L/R matching | L749, L706 |
+  | `interference_audit` | real dip vs. destructive summation | L475 |
+  | `crossover_confidence` | one band-limited crossover go/no-go | L589 |
+  | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | L589 |
+  | `spatial_consistency`, `complex_vector_average` | multi-position averaging | L551 |
+  | `phase_linearity_residual` | single-position phase reliability | L511 |
+  | `excess_gd_mask` | minimum-phase / EQ-ability classifier | L504 |
+  | `lr_match_report` | L/R image-stability diagnostic | L706 |
+  | `predicted_vs_measured` | predict → re-measure loop (step 7) | L767 |
+  | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | L483 |
+  | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | L101 |
+  | `calibrate_solo_levels` | fix mismatched solo test levels | L101 |
+  | *(decay/ringing + distortion axes — when EQ isn't the right tool)* | waterfall/spectrogram, THD | L148 |
   | `tune_scorecard` (`_abs_rms_db` fields catch what a signed median can hide), `headroom_report` (clip_risk is PEQ-only — check the real output level, it's often a false alarm), `compression_check` | scoring, clip risk, level sanity | — |
   | `hpf_excursion_risk` | driver excursion check (needs a supplied Fs) | — |
   | `ms_to_samples`, `samples_to_ms` | sample-rate-aware delay conversion | — |
   | `validate_peq_band` | hardware gain/Q limits | — |
-  | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | L460, L473 |
+  | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | L650, L663 |
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
   `write_delay_samples`/`verify_delay_write` can write a confirmed delay
