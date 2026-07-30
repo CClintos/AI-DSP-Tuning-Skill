@@ -7,23 +7,24 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 28
-- Sweep capture setup — line 100
-- Deviation analysis — line 147
-- Analysis traps (anchoring, sum-vs-solo, imaging, sub coupling, ties) — line 175
-- Voicing — the most audible decision — line 235
-- Classify the problem (the core skill) — line 266
-  - The interference audit — line 285
-  - Two checks before trusting a proposed EQ band — line 293
-  - Minimum-phase / EQ-ability — line 314
-  - Quantify single-position phase reliability — line 321
-  - Multi-position variance ("EQ what's common, ignore what moves") — line 361
-- The crossover action-ladder — line 399
-- Shelf cookbook — line 460
-- All-pass cookbook — line 473
-- Imaging — line 516
-- Restraint — line 548
-- Verification & honesty — line 566
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 29
+- Sweep capture setup — line 101
+- Beyond magnitude — decay (time-domain) and distortion axes — line 148
+- Deviation analysis — line 228
+- Analysis traps (anchoring, sum-vs-solo, imaging, sub coupling, ties) — line 268
+- Voicing — the most audible decision — line 390
+- Classify the problem (the core skill) — line 421
+  - The interference audit — line 440
+  - Two checks before trusting a proposed EQ band — line 448
+  - Minimum-phase / EQ-ability — line 469
+  - Quantify single-position phase reliability — line 476
+  - Multi-position variance — line 516
+- The crossover action-ladder — line 554
+- Shelf cookbook — line 615
+- All-pass cookbook — line 628
+- Imaging — line 671
+- Restraint — line 714
+- Verification & honesty — line 732
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -143,6 +144,86 @@ fix. A few things to get right before trusting a measurement:
   (`tunelib.gating_warning(gate_ms)` gives the ready-to-say sentence) with the
   actual remedy: an ungated capture, or `complex_vector_average` across
   several mic positions (see below) for that range instead.
+
+## Beyond magnitude — the decay (time-domain) and distortion axes
+
+Magnitude-vs-frequency (sweep or RTA) answers "how loud is each frequency."
+Two other axes answer questions it structurally cannot, and both are cheap to
+capture once you already have sweeps. Reach for them when something has bugged
+a listener that EQ passes never fully resolved — that's the tell it isn't a
+tonal problem at all.
+
+**Decay / CSD / waterfall / spectrogram — how long each frequency rings.** A
+resonance that *rings* (a panel, a trim assembly, a loose rigid part on a
+compliant mount, an underdamped driver or enclosure mode) shows as an extended
+decay tail while the rest of the spectrum has already died away. Magnitude
+alone cannot distinguish "this frequency is a bit hot" from "this frequency is
+ringing," and the distinction changes the correct action: **EQ reduces a ring's
+onset level but does not shorten its decay**, so a ringing resonance stays
+smeared no matter how much you cut it. The fix for a ring is mechanical
+(damping, re-seating, tightening the offending part), with EQ only reducing how
+hard the system drives it.
+
+**You do not need a dedicated capture for this if you already have a
+phase-valid sweep text export.** REW text exports on a *linear* frequency grid
+(check the header's `Frequency Step` — a sweep export is linear, e.g. ~0.37 Hz,
+while an RTA export is log/ppo) carry magnitude and phase on FFT-native bin
+spacing, so the impulse response can be reconstructed directly:
+`H(f) = 10^(SPL/20) * exp(j*phase)` placed at bin `round(f/df)` of an
+`rfft`-length array, then `irfft`. From there, a constant-Q gaussian bandpass in
+the frequency domain plus an envelope gives per-frequency decay time. Compare
+the SAME frequency between the two sides (L vs R) rather than reading absolute
+decay numbers — that controls for cabin modes and for the measurement chain,
+and turns "is this ringing?" into a differential question with a clean control.
+Note any all-pass filters loaded at capture time: an APF adds group delay and
+can extend apparent decay near its centre frequency, so check whether a
+confound biases the comparison toward or against the conclusion.
+
+**The resonant-absorber signature — and why "where it rings" and "where you
+hear it" are different frequencies.** A rigid mass on a compliant mount
+attached to a panel behaves as a tuned mass absorber, and produces a
+*three-part* signature that is easy to misread from magnitude alone:
+- **At its resonance:** a magnitude **notch** (energy absorbed out of the
+  panel's radiation) **and** a long **decay tail** (that stored energy released
+  slowly). This is where the mechanical system actually resonates.
+- **Just above resonance:** a magnitude **peak** with normal decay — the
+  anti-resonance, where the panel radiates *loudest*.
+
+A listener reports the frequency where it is **loudest** (the peak); decay
+analysis finds where it is **stored** (the notch). Both observations are
+correct and they sit tens of Hz apart. This matters twice: (1) EQ aimed at the
+radiating peak does not reduce energy going *into* the resonator, and a
+"compensating boost" placed at the notch can end up feeding the peak; (2) for
+the physical hunt, exciting the part with a tone at the **resonance/notch**
+frequency — not the peak — makes it vibrate hardest and easiest to localise by
+touch. Give the listener that frequency, not the one they reported.
+
+**Distortion (THD) — nonlinearity, a separate axis from level.** Useful for
+three specific confirmations rather than as a routine sweep: (1) a THD rise at
+or just below a high-pass corner is live confirmation of excursion stress,
+where `hpf_excursion_risk` only gives a modelled estimate from a stated Fs;
+(2) a THD rise toward the TOP of a driver's assigned band is direct evidence of
+breakup rather than benign rolloff — exactly the evidence needed before
+concluding "this driver is at its range limit, stop EQ'ing it" or before
+weighing a crossover change; (3) a THD spike unrelated to any crossover corner
+usually means amplifier clipping or a stressed driver at that frequency — worth
+catching before EQ'ing around a "dip" that is really distortion-driven.
+
+**Nearfield capture separates driver/enclosure problems from path/cabin
+problems.** A mic placed very close to a driver is dominated by that driver's
+direct output, largely excluding cabin reflections and inter-driver summation.
+A feature present in BOTH the nearfield and the listening-position trace is in
+the driver or its enclosure/door; a feature present only at the listening
+position is a path/summation/cabin effect. This can reclassify a deviation
+previously written off as "physical, not correctable" — worth doing before
+permanently accepting a large dip as untreatable.
+
+**Reverberant-room metrics (RT60, decay time, clarity/C50, EDT) do not transfer
+to a car cabin.** They are defined for spaces large and reverberant enough to
+develop a diffuse field; a car interior is far too small and too heavily damped
+by trim, glass and upholstery for these to be well-conditioned or meaningful.
+Don't force them onto the space — use the per-frequency L-vs-R decay comparison
+above instead, which asks a narrower and answerable question.
 
 ## Deviation analysis
 
