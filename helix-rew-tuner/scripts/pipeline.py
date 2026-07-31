@@ -188,6 +188,35 @@ def analyze(args):
     return report
 
 
+def check_doc_refs():
+    """Every '§Section' reference in SKILL.md must match a real heading in
+    references/methodology.md.
+
+    This exists because line-number references kept going stale: another
+    session edits methodology.md, every heading shifts, and SKILL.md silently
+    points at the wrong place. It broke three times before being replaced with
+    section names, which survive insertions. This check makes the remaining
+    drift (a renamed or deleted heading) fail loudly instead of being
+    rediscovered by accident. Returns a list of problems; empty means OK."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    skill = os.path.join(here, '..', 'SKILL.md')
+    meth = os.path.join(here, '..', 'references', 'methodology.md')
+    if not (os.path.isfile(skill) and os.path.isfile(meth)):
+        return ['SKILL.md or references/methodology.md not found']
+    import re as _re
+    with open(meth, encoding='utf-8') as fh:
+        headings = [ln.lstrip('#').strip() for ln in fh if ln.startswith('##')]
+    with open(skill, encoding='utf-8') as fh:
+        refs = sorted(set(_re.findall(r'§([^|,\n]+)', fh.read())))
+    problems = []
+    for ref in refs:
+        ref = ref.strip()
+        if not any(h.lower().startswith(ref.lower()) for h in headings):
+            problems.append('SKILL.md references "§%s" but no such heading in '
+                            'methodology.md' % ref)
+    return problems
+
+
 def _selftest():
     """Self-contained self-test -- no real REW/afpx files needed, matching
     afpx.py's/pct6.py's selftest convention. Builds synthetic fixtures on
@@ -274,6 +303,10 @@ def _selftest():
         except ValueError:
             pass
         print('pipeline selftest: unknown voice knob correctly raises')
+
+    doc_problems = check_doc_refs()
+    assert not doc_problems, 'stale doc cross-references:\n  ' + '\n  '.join(doc_problems)
+    print('pipeline selftest: SKILL.md section refs all resolve in methodology.md OK')
 
     print('\nALL PIPELINE SELFTESTS PASSED')
 
