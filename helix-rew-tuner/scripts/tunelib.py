@@ -49,7 +49,27 @@ def minphase_from_mag(freqs, mag_db, n_fft=2 ** 16, fs=48000.0):
     """Min-phase (radians, on `freqs`) implied by a magnitude curve.
     Real-cepstrum method: resample |H| to a linear grid, fold the cepstrum,
     read back the phase. Standard DSP; assumes the magnitude IS the whole story
-    (that's the definition of minimum phase)."""
+    (that's the definition of minimum phase).
+
+    `fs` here is the MEASUREMENT sample rate, NOT the DSP's internal rate
+    (module-level FS = 96 kHz). These are genuinely different quantities and
+    the difference is deliberate: the analysis grid only has to span the
+    measured axis, and a standard REW export tops out at 24 kHz = Nyquist for
+    48 kHz. Do NOT "fix" this to FS -- that would extrapolate magnitude across
+    24-48 kHz where no measurement exists.
+
+    Raises if the axis extends past fs/2. Without that check the trailing
+    np.interp silently CLAMPS above Nyquist and returns flat phase there,
+    which excess_gd_mask would then read as a perfectly minimum-phase (i.e.
+    "safe to EQ") region built on data that doesn't exist -- a silently wrong
+    answer rather than a loud failure."""
+    f_max = float(np.max(freqs))
+    if f_max > fs / 2.0:
+        raise ValueError(
+            'measurement axis reaches %.0f Hz but fs=%.0f gives Nyquist %.0f Hz -- '
+            'pass the MEASUREMENT sample rate explicitly (fs=2*f_max or higher). '
+            'Note fs here is the measurement rate, not the DSP internal rate.'
+            % (f_max, fs, fs / 2.0))
     lin_f = np.linspace(0, fs / 2, n_fft // 2 + 1)
     lo, hi = freqs.min(), freqs.max()
     lin_db = np.interp(np.clip(lin_f, lo, hi), freqs, mag_db)  # clamp ends flat
@@ -65,16 +85,24 @@ def minphase_from_mag(freqs, mag_db, n_fft=2 ** 16, fs=48000.0):
     mp_phase_lin = np.imag(mp_full[:n_fft // 2 + 1])            # radians (min phase)
     return np.interp(freqs, lin_f, mp_phase_lin)
 
-def excess_gd_mask(freqs, spl_db, phase_deg, flat_ms=1.0, smooth_oct=1 / 6.0):
+def excess_gd_mask(freqs, spl_db, phase_deg, flat_ms=1.0, smooth_oct=1 / 6.0,
+                   measurement_fs=None):
     """The EQ-ability classifier. Inputs: single-position REW text export WITH
     phase (freq, SPL, phase columns). Returns (excess_gd_ms, eqable_mask).
     REW doctrine: flat excess GD = minimum phase = EQ WORKS THERE; wild excess-GD
     swings (usually at sharp dips) = non-minimum-phase = EQ CANNOT FIX. `flat_ms`
     = how far excess GD may deviate from its local median and still count flat.
     Note: an overall time-of-flight offset only adds a CONSTANT GD slope, which the
-    local-median comparison ignores by construction."""
+    local-median comparison ignores by construction.
+
+    `measurement_fs` is the MEASUREMENT sample rate (not the DSP's FS). Left
+    None it defaults to whatever comfortably spans the supplied axis, so an
+    export reaching past 24 kHz no longer silently produces flat (fake
+    minimum-phase) values above Nyquist -- see minphase_from_mag."""
+    if measurement_fs is None:
+        measurement_fs = max(48000.0, 2.2 * float(np.max(freqs)))
     ph = np.unwrap(np.deg2rad(phase_deg))
-    mp = minphase_from_mag(freqs, spl_db)
+    mp = minphase_from_mag(freqs, spl_db, fs=measurement_fs)
     ex = ph - mp
     w = 2 * np.pi * freqs
     gd = -np.gradient(ex, w) * 1000.0            # excess group delay, ms
@@ -2119,5 +2147,24 @@ if __name__ == '__main__':
     r36c = predicted_vs_measured(freqs, before36a, after36a, band36a, conf=conf36)
     assert r36c['bands'][0]['verdict'] == 'inconclusive'
     print('  low-confidence region correctly overridden to inconclusive')
+
+    # ---- TEST37: minphase Nyquist guard (silent-wrong-answer prevention) ----
+    # Before 2026-07-31 an axis reaching past the assumed Nyquist was silently
+    # CLAMPED to flat phase, which excess_gd_mask reads as "perfectly
+    # minimum-phase" = safe to EQ, on data that doesn't exist. Fail loudly.
+    f37 = np.geomspace(20.0, 40000.0, 800)
+    mag37 = peaking_db(f37, 1000.0, 2.0, 6.0)
+    try:
+        minphase_from_mag(f37, mag37)          # default fs=48k -> Nyquist 24k
+        raise AssertionError('minphase_from_mag must reject an axis above Nyquist')
+    except ValueError as e:
+        assert 'Nyquist' in str(e)
+    mp37 = minphase_from_mag(f37, mag37, fs=2.2 * 40000.0)
+    above37 = f37 > 24000.0
+    assert not np.allclose(mp37[above37], 0.0), 'above-Nyquist phase must be real, not flat'
+    gd37, mask37 = excess_gd_mask(f37, mag37, np.rad2deg(mp37))
+    assert mask37.all(), 'a pure minimum-phase input must classify as fully EQ-able'
+    print('\nTEST37 minphase Nyquist guard: rejects over-range axis, auto-rate '
+          'handles 40 kHz export, min-phase input still classifies EQ-able')
 
     print('\nALL TESTS PASSED')

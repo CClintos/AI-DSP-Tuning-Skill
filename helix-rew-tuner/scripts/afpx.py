@@ -47,8 +47,26 @@ def filters(block):
 
 
 # Filter type codes (verified P SIX MK2). See references/afpx_format.md.
-TYPE = {'1': 'free', '17': 'PEQ', '15': 'LP', '16': 'HP',
+TYPE = {'1': 'free', '17': 'PEQ', '9': 'LP', '15': 'LP', '16': 'HP',
         '3': 'low_shelf', '4': 'high_shelf', '19': 'allpass1', '20': 'allpass2'}
+
+# THE crossover type codes, in ONE place. T=9 is a confirmed low-pass code
+# (VERIFIED 2026-07-07: a Butterworth-characteristic LP encoded as T=9, not
+# T=15 -- see afpx_format.md). Anything that protects, detects, or infers
+# crossovers must use this set, never a local literal tuple: the whole point
+# of a verified format finding is that every guard enforces it.
+CROSSOVER_TYPES = frozenset({'9', '15', '16'})
+
+# Fields that define a crossover's STATE. FilBy is not optional here --
+# FilBy="1" bypasses the filter section entirely (VERIFIED 2026-07-07 by
+# controlled diff) with F/Q/G untouched, so a signature that omits it cannot
+# see a crossover being switched off. On a tweeter that is a driver-damage
+# scenario, not a tonal one.
+CROSSOVER_FIELDS = ('T', 'F', 'Q', 'G', 'dF', 'FilBy')
+
+# Fields that define any filter SLOT's state, for change counting. Also
+# includes FilBy so bypassing an ordinary PEQ counts as a real change.
+SLOT_FIELDS = ('T', 'F', 'Q', 'G', 'dF', 'I', 'FilBy')
 
 
 def channel_summary(block):
@@ -64,7 +82,7 @@ def channel_summary(block):
     # necessarily the complete set. If a channel's role won't classify and it has
     # an unrecognized T code with a plausible crossover-like F/G/Q shape, that's
     # worth investigating rather than assuming it's just an unused/PEQ slot.
-    lp = next((a for a in fils if a.get('T') in ('15', '9')), None)
+    lp = next((a for a in fils if a.get('T') in CROSSOVER_TYPES and a.get('T') != '16'), None)
     # On crossover filters, `G` encodes the SLOPE (dB/oct), not gain -- VERIFIED
     # 2026-07-07 by controlled diff: F="1000.00" G="0" matched a real screenshot
     # showing that LP's Slope as OFF, while F="6000.00" G="-12" matched "-12 dB/Oct"
@@ -166,9 +184,11 @@ def semantic_delay_key(xml):
 
 
 def semantic_xover_key(xml):
-    keep = ('T', 'F', 'Q', 'G', 'dF')
-    return sorted(tuple((k, attrs(f).get(k)) for k in keep)
-                  for f in filters(xml) if attrs(f).get('T') in ('15', '16'))
+    """Order-independent signature of every crossover's full state. Uses the
+    central CROSSOVER_TYPES/CROSSOVER_FIELDS so it can't drift out of step
+    with what channel_summary() already treats as a crossover."""
+    return sorted(tuple((k, attrs(f).get(k)) for k in CROSSOVER_FIELDS)
+                  for f in filters(xml) if attrs(f).get('T') in CROSSOVER_TYPES)
 
 
 # ---------------------------------------------------------------- delay write
@@ -391,15 +411,28 @@ def roundtrip_lint(old_xml, new_xml, expect_changed=None,
         errors.append('delay tags changed')
     if not allow_xover and semantic_xover_key(old_xml) != semantic_xover_key(new_xml):
         errors.append('crossover filters changed')
-    # count changed PEQ/shelf/APF slots (FN-insensitive)
+    # count changed PEQ/shelf/APF slots (FN-insensitive).
+    # FAIL CLOSED on structure changes: a plain zip() silently truncates to the
+    # shorter list, so a DELETED slot or a DELETED channel would compare as
+    # "nothing changed" and pass. Length is checked explicitly first, and any
+    # missing/extra entries are counted as changes rather than skipped.
     def sig(xml):
         out = []
         for b in channel_blocks(xml):
-            out.append([tuple((k, attrs(f).get(k)) for k in ('T', 'F', 'Q', 'G', 'dF', 'I'))
+            out.append([tuple((k, attrs(f).get(k)) for k in SLOT_FIELDS)
                         for f in filters(b)])
         return out
     so, sn = sig(old_xml), sig(new_xml)
-    changed = sum(1 for co, cn in zip(so, sn) for a, b in zip(co, cn) if a != b)
+    changed = 0
+    if len(so) != len(sn):
+        errors.append('channel count changed (%d -> %d)' % (len(so), len(sn)))
+        changed += abs(len(so) - len(sn))
+    for ci, (co, cn) in enumerate(zip(so, sn)):
+        if len(co) != len(cn):
+            errors.append('ch%d: filter slot count changed (%d -> %d)'
+                          % (ci, len(co), len(cn)))
+            changed += abs(len(co) - len(cn))
+        changed += sum(1 for a, b in zip(co, cn) if a != b)
     if expect_changed is not None and changed != expect_changed:
         errors.append('changed %d slots, expected %d' % (changed, expect_changed))
     return {'pass': not errors, 'errors': errors, 'slots_changed': changed}
@@ -509,6 +542,44 @@ def _selftest():
     assert not verify_output_trim_write(vxml, tampered, {2: -3.0})['pass'], \
         'verification must catch an unrelated filter change'
     print('afpx selftest: verification catches level increase + unrelated edits OK')
+
+    # ---- roundtrip_lint must FAIL CLOSED on crossover + structure changes ----
+    # Every case below silently PASSED before 2026-07-31. Each is a real
+    # scenario the format notes already documented but the guard didn't
+    # enforce -- the T=16 bypass one is the worst: a crossover switched off
+    # entirely (full-range signal to a tweeter) read as "nothing changed".
+    XO = '<Fil T="%s" F="%s" Q="0.70" G="%s" dF="0" FilBy="%s" I="0"/>'
+    PEQ = '<Fil T="17" F="1000" Q="1" G="%s" dF="1000" I="0"%s/>'
+    wrap = lambda *chans: '<ATF>' + ''.join('<OC>%s</OC>' % c for c in chans) + '</ATF>'
+
+    must_fail = [
+        ('T=9 low-pass frequency change',
+         wrap(XO % ('9', '3000.00', '-12', '0')), wrap(XO % ('9', '1200.00', '-12', '0')), {}),
+        ('T=9 low-pass slope change',
+         wrap(XO % ('9', '3000.00', '-12', '0')), wrap(XO % ('9', '3000.00', '-24', '0')), {}),
+        ('crossover BYPASSED via FilBy (driver-risk case)',
+         wrap(XO % ('16', '2600.00', '-12', '0')), wrap(XO % ('16', '2600.00', '-12', '1')), {}),
+        ('filter slot deleted',
+         wrap(PEQ % ('-2', '') + '<Fil T="1" F="1000" Q="1" G="0" dF="1000" I="0"/>'),
+         wrap(PEQ % ('-2', '')), {'expect_changed': 0}),
+        ('whole channel deleted',
+         wrap(PEQ % ('-2', ''), PEQ % ('-3', '')), wrap(PEQ % ('-2', '')), {'expect_changed': 0}),
+        ('PEQ bypassed via FilBy',
+         wrap(PEQ % ('-2', ' FilBy="0"')), wrap(PEQ % ('-2', ' FilBy="1"')), {'expect_changed': 0}),
+    ]
+    for name, o, n, kw in must_fail:
+        res = roundtrip_lint(o, n, **kw)
+        assert not res['pass'], 'roundtrip_lint MISSED: %s -> %r' % (name, res)
+    print('afpx selftest: roundtrip_lint fails closed on all %d crossover/structure '
+          'cases OK' % len(must_fail))
+
+    # and must NOT false-positive on a legitimate single-PEQ edit
+    ok = roundtrip_lint(wrap(XO % ('16', '2600', '-12', '0') + PEQ % ('-2', '')),
+                        wrap(XO % ('16', '2600', '-12', '0') + PEQ % ('-4', '')),
+                        expect_changed=1)
+    assert ok['pass'], 'legitimate PEQ edit must still pass: %r' % ok
+    assert '9' in CROSSOVER_TYPES and 'FilBy' in CROSSOVER_FIELDS
+    print('afpx selftest: legitimate PEQ edit still passes (no false positive) OK')
 
     print('\nALL AFPX SELFTESTS PASSED')
 
