@@ -11,21 +11,21 @@ to the section you need instead of reading it whole)
 - Sweep capture setup — line 102
 - Beyond magnitude — decay (time-domain) and distortion axes — line 149
 - Deviation analysis — line 229
-- Analysis traps (anchoring, sum-vs-solo, imaging, sub coupling, ties) — line 269
-- When the answer is physical, not electrical — line 426
-- Voicing — the most audible decision — line 485
-- Classify the problem (the core skill) — line 516
-  - The interference audit — line 535
-  - Two checks before trusting a proposed EQ band — line 543
-  - Minimum-phase / EQ-ability — line 564
-  - Quantify single-position phase reliability — line 571
-  - Multi-position variance — line 611
-- The crossover action-ladder — line 649
-- Shelf cookbook — line 710
-- All-pass cookbook — line 723
-- Imaging — line 766
-- Restraint — line 809
-- Verification & honesty — line 827
+- Analysis traps (anchoring, sum-vs-solo, coherence wobble, imaging, sub coupling, ties) — line 269
+- When the answer is physical, not electrical — line 439
+- Voicing — the most audible decision — line 513
+- Classify the problem (the core skill) — line 544
+  - The interference audit — line 563
+  - Two checks before trusting a proposed EQ band — line 571
+  - Minimum-phase / EQ-ability — line 592
+  - Quantify single-position phase reliability — line 599
+  - Multi-position variance — line 639
+- The crossover action-ladder — line 677
+- Shelf cookbook — line 738
+- All-pass cookbook — line 751
+- Imaging — line 794
+- Restraint — line 837
+- Verification & honesty — line 866
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -293,6 +293,19 @@ irrelevant to what's actually heard. Decide tonal corrections from the summed
 response; use a per-channel solo only for imaging/imbalance calls, never as the
 thing you're flattening.
 
+**Near a crossover, the summed response can wobble session-to-session with no
+EQ cause — that's coherence, not level.** Where two channels sum with a
+phase relationship sensitive to mic position (a few mm move is a real phase
+shift around 800 Hz-1 kHz), the SUM can swing several dB between otherwise
+identical repeat measurements while each channel's own solo stays put. A real
+case (2026-07-31): confirmed −1.2 dB per-channel solo cuts near 800 Hz produced
+only a −0.35 dB sum change, and an untouched neighbor band (1000 Hz) swung
+−3 dB between two same-evening sessions with no filter written anywhere near
+it. Don't treat a sum deviation in a crossover-adjacent band as actionable from
+a single MMM pass — require it to persist across independent sessions (see
+Restraint) before writing a fix; a coherence wobble won't repeat, a real
+deviation will.
+
 **For L/R balance, compare ABSOLUTE inter-channel level — never each side
 self-normalized against its own reference.** Normalizing each channel to its own
 target/baseline before comparing "how scooped is each side" can hide or invert the
@@ -458,6 +471,21 @@ geometry is near-symmetric. Do not EQ-boost it — the energy is being cancelled
 not merely attenuated, so a boost costs headroom and excursion for very little
 recovered output (`reaches_target_after_boost` will usually flag exactly this).
 The remedy is sealing the inner skin and gasketing the driver to the door card.
+
+**Before spending sealing/damping effort on a cancellation, confirm it
+originates at the driver — measure nearfield.** A broad null at the seat can be
+the acoustic short circuit above (real, in the door, sealing fixes it), or a
+cabin-path effect entirely downstream of the driver (direct sound cancelling
+against a reflection somewhere between the door and the seat) — and no door
+treatment touches the second cause. The two are easy to conflate because both
+produce a broad low-mid null at the seat. The test: measure the same driver
+nearfield (mic 2-5 cm from the cone, EQ stripped from both traces) and compare
+null depth to the at-seat depth. A real case (2026-07-31): a 9-11 dB null at
+380-540 Hz at the seat measured only 2.6-3.3 dB nearfield on both channels —
+the drivers were essentially clean, so the extra ~8 dB was accumulating
+entirely in the cabin path. That closed off a sealing project that would not
+have fixed it, and moved the deviation from "work queue" to "not correctable
+from here, leave it" with a single pair of measurements instead of a guess.
 
 **A single specular reflection produces a COMB, and that's testable.** If a
 suspected reflection is the cause, the nulls fall at odd multiples of the first
@@ -823,6 +851,17 @@ before spending budget on anything symmetric in the same region.
   was watching that region. `null_boost_penalty` (on by default) actively
   penalizes any positive gain the candidate cascade produces inside masked-out
   bins, closing that loophole instead of just declining to reward it.
+- **A deviation must survive more than one session before it's actionable, not
+  just clear the noise floor once.** The noise-floor ratio filters measurement
+  jitter within a session but not run-to-run coherence/setup variance across
+  sessions (see the crossover coherence-wobble trap above). When independent
+  same-target captures exist, require a deviation to hold sign and rough
+  magnitude across all of them before writing a fix; drop anything that swings
+  sign or vanishes on a repeat, however large it looked in isolation. A real
+  case (2026-07-31): scanning one session flagged sixteen deviations by
+  noise-floor ratio alone; requiring 3-session persistence collapsed that to
+  four real ones — two of the discarded flags (68 Hz, 4000 Hz) swung 2-3 dB
+  session to session despite no EQ touching them in between.
 
 ## Verification & honesty
 
