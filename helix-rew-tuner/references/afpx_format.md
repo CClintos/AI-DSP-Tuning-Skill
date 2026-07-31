@@ -80,6 +80,33 @@ Notes that have burned people:
 - **Only write `T="17"` for ordinary EQ.** Never place a shelf/all-pass code in an
   arbitrary slot — those pin to fixed slots and don't AutoSort.
 
+## Crossover protection is enforced from ONE place — don't re-list codes
+
+`afpx.CROSSOVER_TYPES` = `{'9','15','16'}` and `afpx.CROSSOVER_FIELDS`
+(`T,F,Q,G,dF,FilBy`) are the single source of truth. Everything that detects,
+protects, or infers a crossover uses them.
+
+**Why this is a rule and not a style preference — four real detection gaps
+found 2026-07-31, all four caused by knowledge being documented here but
+re-typed as local literals in the guard:**
+- `semantic_xover_key` protected only `T=15/16`, so a **`T="9"` low-pass
+  frequency or slope change passed `roundtrip_lint` silently** — even though
+  `channel_summary` had correctly read `T=9` as a low-pass since 2026-07-07.
+- It also omitted `FilBy`, so **switching a crossover OFF entirely** (bypass,
+  with F/Q/G untouched) linted as `{'pass': True, 'slots_changed': 0}`. On a
+  tweeter that's a driver-damage scenario, not a tonal one.
+- The slot-change counter used a nested `zip()`, which truncates to the
+  shorter list: a **deleted filter slot or an entire deleted channel** counted
+  as zero changes and passed.
+- The slot signature omitted `FilBy`, so **bypassing an ordinary PEQ** was
+  invisible too.
+
+All four now fail closed, with a regression test each in `afpx.py selftest`,
+plus a no-false-positive test proving a legitimate single-PEQ gain edit still
+passes. The lesson generalises: **a verified format finding isn't real until
+some guard enforces it** — when adding a new type code or state field here,
+add it to the constants above, not to one call site.
+
 ## Output level (`<Vol>`) — VERIFIED 2026-07-14
 
 `<Vol T="15" L="0.7286181745132278" i="0"/>`, **one per channel, inside that
