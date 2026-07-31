@@ -51,7 +51,7 @@ car's near field, a single fixed mic point can show position-specific comb-
 filtering/standing-wave structure that doesn't represent what's heard across
 the volume a real head occupies. 2-3 fixed positions (centre/left-ear/
 right-ear) mitigate this — confirms a feature is position-*stable*, which is
-exactly what `spatial_consistency` (line 551) is built to check — but a
+exactly what `spatial_consistency` (§Multi-position variance) is built to check — but a
 handful of discrete points still isn't true spatial averaging.
 
 **Moving Mic Method (MMM)** — mic physically swept around the head at the
@@ -629,7 +629,7 @@ position.
 **A Moving Mic Method (MMM) capture is the continuous, mechanically-averaged
 version of this same idea** — sweeping the mic around the head during
 capture instead of comparing discrete fixed positions afterward. See
-"Measurement method selection" (line 29) for the fuller sweep-vs-MMM
+"Measurement method selection" for the fuller sweep-vs-MMM
 picture, including why MMM is the *preferred* source for tonal/EQ decisions
 when available, and the engine-noise-floor caveat that comes with it.
 
