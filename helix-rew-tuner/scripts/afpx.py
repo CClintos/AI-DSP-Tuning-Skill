@@ -102,6 +102,27 @@ def channel_summary(block):
     hp_f = float(hp['F']) if hp_engaged else None
     lp_f = float(lp['F']) if lp_engaged else None
     role = infer_role(hp_f, lp_f)
+    # Q on a CROSSOVER filter is usually NOT the operating parameter -- VERIFIED
+    # 2026-08-01 against a user's live PC-Tool display. A file showed Q=0.7 on the
+    # front mids, Q=0.5 on the sub lowpass and Q=1 on the rears, yet PC-Tool
+    # reported EVERY channel as "Linkwitz-Riley -24 dB/Oct". The alignment lives in
+    # the <OC>-level HPi/LPi index (uniform across all 8 active channels there),
+    # not in the Fil tag's Q. The stored Q only becomes live when Characteristic is
+    # set to "Self-define", which -- per the same PC-Tool screenshot -- also FORCES
+    # Slope to -12 dB/Oct (greyed out). So you cannot have LR24 with a custom Q:
+    # picking Self-define trades the 24 dB/oct slope for a 2nd-order filter whose
+    # knee Q you control (Q>~0.8 puts a real gain peak just below the corner).
+    # Same failure mode as the T=19 all-pass Q above: a number that looks
+    # meaningful, isn't, and will happily support a confident wrong conclusion.
+    # Three separate analyses "diagnosed" a resonant shoulder from these values
+    # before one glance at the UI settled it. Report the index as authoritative
+    # and mark the Q as merely stored. Do NOT reason about a decoded field's value
+    # until you have established the field is actually live.
+    # HPi/LPi mapping is not fully known -- 31/30 == LR24 on the one file confirmed
+    # against a UI. Treat other values as unidentified rather than assuming.
+    oc_head = attrs(re.match(r'<OC\b[^>]*>', block).group(0))
+    hp_char_idx = oc_head.get('HPi')
+    lp_char_idx = oc_head.get('LPi')
     peqs = [(float(a['F']), float(a['Q']), float(a['G']))
             for a in fils if a.get('T') == '17' and float(a.get('G', 0)) != 0]
     # Q on a T=19 (1st-order all-pass) is not real data -- VERIFIED 2026-07-07:
@@ -123,6 +144,13 @@ def channel_summary(block):
         polarity = 'inverted' if oc.get('CINV') == '1' else 'normal'
     return {
         'hp_hz': hp_f, 'lp_hz': lp_f, 'inferred_role': role,
+        # Alignment/characteristic index -- AUTHORITATIVE, unlike the Q below.
+        'hp_char_idx': hp_char_idx, 'lp_char_idx': lp_char_idx,
+        # Stored crossover Q. Only live when Characteristic == "Self-define"
+        # (which also forces -12 dB/Oct). Under Linkwitz/Butterworth/Bessel this
+        # is leftover state -- do not read a slope or a resonance from it.
+        'hp_q_stored_not_live': float(hp['Q']) if hp is not None and 'Q' in hp else None,
+        'lp_q_stored_not_live': float(lp['Q']) if lp is not None and 'Q' in lp else None,
         'active_filter_count': len(active),
         'peqs': peqs, 'all_passes': apfs, 'shelves': shelves,
         'free_middle_slots': free_mid,
