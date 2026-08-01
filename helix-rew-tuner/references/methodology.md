@@ -920,3 +920,24 @@ and baseline tune it actually used to compute that score — file dates catch a 
 comparison fast. A score computed against data that's since changed is meaningless
 even if it's internally consistent and the math checks out. **Always reproduce the
 claimed score yourself against the current session's data** before accepting it.
+
+**A check that cannot fail is not evidence — confirm the negative case before
+trusting the positive one.** A verification step that returns the right answer by
+construction (a parse that silently defaults to zero, a regex that matches nothing
+and leaves a variable unset, a diff against an empty baseline) will report success
+whether or not the thing being checked is actually true. A real case (2026-08-01):
+asked to confirm a car's two rear channels received sign-inverted signal from a
+routing matrix, a first pass regex failed to parse the matrix's `G<N>="..."`
+coefficients, every value silently read as the float default `0.0`, and the
+equality test `ch5 == -1 * ch4` passed — because `0.0 == -1 * 0.0` is true
+regardless of what the real matrix contains. The printed "verified: True" was
+correct-looking output for a test that could not have failed. Caught only because
+the user pushed back from firsthand knowledge (their polarity control reads
+"normal" on both channels — true, and a *different* field from the matrix sign
+being checked). The fix isn't a cleverer parser; it's a habit: before trusting an
+assertion's result, ask whether that assertion could have printed the same output
+if the underlying data were garbage, empty, or all-zero, and add an explicit guard
+for that (e.g. assert the parsed set is non-empty / not all-zero) alongside the
+real check. This is the same root failure as the stale-decoded-field trap above
+(Q on a bypassed crossover) — a value looked meaningful and wasn't — but here the
+uninspected thing is the *verification code itself*, not the data.
