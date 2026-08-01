@@ -11,21 +11,21 @@ to the section you need instead of reading it whole)
 - Sweep capture setup — line 102
 - Beyond magnitude — decay (time-domain) and distortion axes — line 149
 - Deviation analysis — line 229
-- Analysis traps (anchoring, sum-vs-solo, coherence wobble, imaging, sub coupling, ties) — line 269
-- When the answer is physical, not electrical — line 439
-- Voicing — the most audible decision — line 513
-- Classify the problem (the core skill) — line 544
-  - The interference audit — line 563
-  - Two checks before trusting a proposed EQ band — line 571
-  - Minimum-phase / EQ-ability — line 592
-  - Quantify single-position phase reliability — line 599
-  - Multi-position variance — line 639
-- The crossover action-ladder — line 677
-- Shelf cookbook — line 738
-- All-pass cookbook — line 751
-- Imaging — line 794
-- Restraint — line 837
-- Verification & honesty — line 866
+- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 269
+- When the answer is physical, not electrical — line 460
+- Voicing — the most audible decision — line 534
+- Classify the problem (the core skill) — line 565
+  - The interference audit — line 584
+  - Two checks before trusting a proposed EQ band — line 592
+  - Minimum-phase / EQ-ability — line 613
+  - Quantify single-position phase reliability — line 620
+  - Multi-position variance — line 660
+- The crossover action-ladder — line 698
+- Shelf cookbook — line 759
+- All-pass cookbook — line 772
+- Imaging — line 815
+- Restraint — line 858
+- Verification & honesty — line 887
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -353,6 +353,27 @@ its verdict exactly backwards this way — it ignored `<Vol>` tags and so missed
 from different systems — a guardrail term can dominate the composite and invert
 the acoustic verdict, and different systems' guardrails are not comparable
 (one system's guardrail scored 10 of a 17-point total in that same audit).
+
+**Establish that a decoded field is LIVE before reasoning about its value.** A
+DSP file stores parameters that the running configuration ignores — leftovers
+from whatever the slot was previously set to. Reading such a field and
+interpreting its number produces a fully-formed, confident, wrong conclusion,
+because nothing about the value itself looks stale. A real case (2026-08-01):
+crossover `Fil` tags carried Q=0.7 on the front mids, Q=0.5 on the sub lowpass
+and Q=1 on the rears, which "clearly" showed the rears were a different alignment
+with a resonant shoulder at the corner. PC-Tool showed all eight channels as
+Linkwitz-Riley −24 dB/Oct. The alignment is held in the `<OC>`-level `HPi`/`LPi`
+index (identical on every channel); the `Q` only becomes live under a
+"Self-define" characteristic. The invented defect survived three consecutive
+analyses — an initial read, a second opinion from a different model that accepted
+the premise and elaborated on it, and a "verification" pass — because each one
+reasoned about *the number* and none asked whether the field was wired to
+anything. One glance at the device UI settled it in seconds. Before building an
+argument on a decoded value: check whether the software's own display agrees,
+prefer a field you have confirmed against that display, and treat an unverified
+field as unknown rather than as data. Note this compounds badly with
+cross-model review — a second opinion inherits your framing and will confidently
+refine a defect that does not exist.
 
 **A magnitude null found in measurement data is not automatically the same
 physical thing as a resonance/rattle the user reports by ear or by hand.** Both

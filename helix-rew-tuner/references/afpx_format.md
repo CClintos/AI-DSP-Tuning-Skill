@@ -32,6 +32,34 @@ output channel, ~30 filter slots each.
 - `I` = **invert flag (0/1)** — NOT an index. `I="1"` flips the filter's polarity
   (used by the all-pass "invert" button).
 
+### `Q` on a crossover filter is usually NOT live — VERIFIED 2026-08-01
+
+The crossover **characteristic/alignment** is held in the `<OC>`-level `HPi` /
+`LPi` index, **not** in the `Fil` tag's `Q`. On a file whose PC-Tool display was
+checked directly, all 8 active channels read *Linkwitz-Riley −24 dB/Oct* while
+their stored `Q` values were 0.7 (front mids), 0.5 (sub lowpass) and 1 (rears) —
+`HPi="31"` / `LPi="30"` on every one of them. The differing Q values were
+leftover state from prior settings, and a bypassed filter (`lpBy="1"`) still
+carried a `Q`, confirming the field persists while inactive.
+
+The stored `Q` becomes live only when Characteristic is set to **"Self-define"**,
+which per the same PC-Tool screenshot also **forces Slope to −12 dB/Oct (greyed
+out)**. So LR24-with-custom-Q is not available: choosing Self-define trades the
+24 dB/oct slope for a 2nd-order filter whose knee Q you control. Q above ~0.8
+puts a genuine gain peak just under the corner (Q=1.2 → +2.4 dB, Q=1.5 →
++4.0 dB), so Self-define is a real tool but a real risk.
+
+Known mapping so far: `HPi="31"` / `LPi="30"` == LR24. **Other values are
+unidentified** — treat them as unknown rather than inferring.
+
+`afpx.channel_summary` therefore reports `hp_char_idx` / `lp_char_idx` as
+authoritative and names the Q fields `hp_q_stored_not_live` /
+`lp_q_stored_not_live` so the value cannot be mistaken for an operating
+parameter. `Q` stays in `CROSSOVER_FIELDS` for change detection — a Q edit still
+matters under Self-define. See methodology §Analysis traps for the general rule
+(establish a decoded field is live before reasoning about its value); the same
+failure mode is documented for `T=19` all-pass Q below.
+
 ## Filter type codes (`T=`) — complete verified map
 
 | T | Meaning | Slot restriction |
