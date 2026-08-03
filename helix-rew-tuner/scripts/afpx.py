@@ -142,7 +142,36 @@ def channel_summary(block):
     polarity = None
     if 'CINV' in oc:
         polarity = 'inverted' if oc.get('CINV') == '1' else 'normal'
+    # STABLE SLOT IDENTITY -- the positional index of every filter slot in this
+    # channel, alongside its stored FN. `peqs`/`shelves`/`all_passes` above are
+    # deliberately unchanged (callers pass them straight to cascade_db /
+    # headroom_report as (F,Q,G) tuples), but they carry NO identity: two bands
+    # 10% apart are indistinguishable once reduced to a tuple. Editing an
+    # EXISTING filter therefore has no stable handle, and matching by nearest
+    # frequency is genuinely ambiguous on real tunes -- a real 16-band channel
+    # had five pairs within 10% of each other (129.4/136.9, 258.3/277.0,
+    # 621.8/650.0, 1015.9/1115.0, 1236.6/1300.0). Re-centring 97 -> 100 Hz by
+    # proximity could hit the wrong band, or create a duplicate instead of
+    # moving one. Address a filter by (channel_index, slot_index) instead --
+    # see write_filter_slot().
+    slots = []
+    for si, a in enumerate(fils):
+        t = a.get('T')
+        num = lambda k: float(a[k]) if k in a and a[k] not in ('', None) else None
+        slots.append({
+            'slot_index': si,
+            'fn': a.get('FN'),
+            'type_code': t,
+            'type': TYPE.get(t, 'unknown:%s' % t),
+            'F': num('F'), 'Q': num('Q'), 'G': num('G'), 'dF': a.get('dF'),
+            'bypassed': a.get('FilBy') == '1',
+            # 'free' means genuinely available to convert to a new PEQ
+            'free': t == '1',
+            # a T=17 with G==0 occupies a slot but does nothing audible
+            'active': t != '1' and not (t == '17' and (num('G') or 0.0) == 0.0),
+        })
     return {
+        'slots': slots,
         'hp_hz': hp_f, 'lp_hz': lp_f, 'inferred_role': role,
         # Alignment/characteristic index -- AUTHORITATIVE, unlike the Q below.
         'hp_char_idx': hp_char_idx, 'lp_char_idx': lp_char_idx,
@@ -290,6 +319,131 @@ def verify_delay_write(old_xml, new_xml, channel_index, expected_samples):
             if ob != nb:
                 errors.append('ch%d: <OC> block content changed unexpectedly '
                               '(only the delay tag should differ)' % i)
+    return {'pass': not errors, 'errors': errors}
+
+
+# ---------------------------------------------------------------- slot write
+# Edit an EXISTING filter by stable (channel_index, slot_index) identity.
+#
+# Why this exists: every other writer here either converts a FREE slot into a
+# new PEQ or touches a per-channel scalar. Modifying a filter that is already
+# there had no safe handle, because channel_summary()'s `peqs` reduces bands to
+# (F,Q,G) tuples with no identity -- so "move the 97 Hz band to 100 Hz" could
+# only be expressed as "find the band nearest 97 Hz", which is ambiguous when
+# neighbouring bands sit within ~10% (common: one real channel had five such
+# pairs). Proximity matching can retune the wrong band, or -- if the caller
+# writes rather than edits -- leave the original in place and create a
+# duplicate at the new frequency.
+#
+# Deliberately NOT a policy decision: this is the mechanism for expressing an
+# edit precisely. Whether an existing filter SHOULD be relaxed, re-centred or
+# removed is a judgement call that still needs measured justification and the
+# same per-change user confirmation as any other write.
+def write_filter_slot(xml, channel_index, slot_index, F=None, Q=None, G=None,
+                      type_code=None, allow_crossover=False):
+    """Rewrite one filter slot's attributes in place. Only the attributes you
+    pass are changed; everything else on that tag (FN, dF, I, FilBy, ...) is
+    left byte-identical, and no other slot or channel is touched.
+
+    Set type_code='1' to FREE a slot (removal). Refuses to touch a crossover
+    slot unless allow_crossover=True, so a mis-indexed edit can't silently
+    retune a crossover -- crossovers remain user-initiated only.
+
+    Returns the new XML. Verify with verify_slot_write()."""
+    blocks = channel_blocks(xml)
+    if channel_index < 0 or channel_index >= len(blocks):
+        raise ValueError('channel_index %d out of range (%d channels)'
+                         % (channel_index, len(blocks)))
+    block = blocks[channel_index]
+    fil_ms = list(re.finditer(r'<Fil\b[^>]*/?>', block))
+    if slot_index < 0 or slot_index >= len(fil_ms):
+        raise ValueError('slot_index %d out of range (ch%d has %d filter slots)'
+                         % (slot_index, channel_index, len(fil_ms)))
+    m = fil_ms[slot_index]
+    old_tag = m.group(0)
+    a = attrs(old_tag)
+    if a.get('T') in CROSSOVER_TYPES and not allow_crossover:
+        raise ValueError(
+            'ch%d slot %d is a crossover (T=%s) -- refusing to edit. Crossovers '
+            'are user-initiated only; pass allow_crossover=True if that is '
+            'genuinely what was confirmed.' % (channel_index, slot_index, a.get('T')))
+
+    updates = {}
+    if type_code is not None:
+        updates['T'] = str(type_code)
+    if F is not None:
+        updates['F'] = '%.2f' % float(F)
+    if Q is not None:
+        updates['Q'] = ('%g' % float(Q))
+    if G is not None:
+        updates['G'] = ('%g' % float(G))
+    if not updates:
+        raise ValueError('nothing to change -- pass at least one of F/Q/G/type_code')
+    if 'T' in updates and updates['T'] == '17':
+        validate_peq_band_attrs(updates.get('F', a.get('F')),
+                                updates.get('Q', a.get('Q')),
+                                updates.get('G', a.get('G')))
+    elif a.get('T') == '17':
+        validate_peq_band_attrs(updates.get('F', a.get('F')),
+                                updates.get('Q', a.get('Q')),
+                                updates.get('G', a.get('G')))
+
+    new_tag = old_tag
+    for k, v in updates.items():
+        if re.search(r'(?<![A-Za-z])%s="[^"]*"' % k, new_tag):
+            new_tag = re.sub(r'(?<![A-Za-z])%s="[^"]*"' % k, '%s="%s"' % (k, v),
+                             new_tag, count=1)
+        else:  # attribute absent -- insert before the closing marker
+            new_tag = re.sub(r'\s*/?>$', ' %s="%s"/>' % (k, v), new_tag, count=1)
+    b0 = xml.index(block)
+    new_block = block[:m.start()] + new_tag + block[m.end():]
+    return xml[:b0] + new_block + xml[b0 + len(block):]
+
+
+def validate_peq_band_attrs(F, Q, G):
+    """Hardware-limit check on raw attribute strings (P SIX: G -15..+6,
+    Q 0.5..15, F 20..20000). Mirrors tunelib.validate_peq_band without
+    importing it, so afpx.py stays dependency-free."""
+    F, Q, G = float(F), float(Q), float(G)
+    if not (20.0 <= F <= 20000.0):
+        raise ValueError('F %g Hz out of range 20..20000' % F)
+    if not (0.5 <= Q <= 15.0):
+        raise ValueError('Q %g out of range 0.5..15' % Q)
+    if not (-15.0 <= G <= 6.0):
+        raise ValueError('G %g dB out of hardware range -15..+6' % G)
+
+
+def verify_slot_write(old_xml, new_xml, channel_index, slot_index, expect):
+    """Confirm a by-slot edit: the target slot matches `expect` (dict of
+    attribute name -> expected value, e.g. {'F': '100.00'}), its other
+    attributes are byte-identical, and EVERY other slot in every channel is
+    unchanged. Also confirms delays and crossover state did not move.
+    Returns {'pass': bool, 'errors': [...]}."""
+    errors = []
+    ob, nb = channel_blocks(old_xml), channel_blocks(new_xml)
+    if len(ob) != len(nb):
+        return {'pass': False, 'errors': ['channel count changed']}
+    for ci, (o, n) in enumerate(zip(ob, nb)):
+        of, nf = filters(o), filters(n)
+        if len(of) != len(nf):
+            errors.append('ch%d: slot count changed (%d -> %d)' % (ci, len(of), len(nf)))
+            continue
+        for si, (ot, nt) in enumerate(zip(of, nf)):
+            if ci == channel_index and si == slot_index:
+                oa, na = attrs(ot), attrs(nt)
+                for k, want in expect.items():
+                    if na.get(k) != want:
+                        errors.append('ch%d slot %d: %s is %r, expected %r'
+                                      % (ci, si, k, na.get(k), want))
+                rest_o = {k: v for k, v in oa.items() if k not in expect}
+                rest_n = {k: v for k, v in na.items() if k not in expect}
+                if rest_o != rest_n:
+                    errors.append('ch%d slot %d: unintended attribute change (%r -> %r)'
+                                  % (ci, si, rest_o, rest_n))
+            elif ot != nt:
+                errors.append('ch%d slot %d changed unexpectedly' % (ci, si))
+    if semantic_delay_key(old_xml) != semantic_delay_key(new_xml):
+        errors.append('delays changed -- a slot edit must not touch timing')
     return {'pass': not errors, 'errors': errors}
 
 
@@ -608,6 +762,66 @@ def _selftest():
     assert ok['pass'], 'legitimate PEQ edit must still pass: %r' % ok
     assert '9' in CROSSOVER_TYPES and 'FilBy' in CROSSOVER_FIELDS
     print('afpx selftest: legitimate PEQ edit still passes (no false positive) OK')
+
+    # ---- stable slot identity + by-slot editing --------------------------------
+    # The motivating case: two PEQs close enough that "the band near 97 Hz" is
+    # ambiguous. Editing by slot index must move exactly one of them.
+    sxml = ('<ATF><OC ON="0" CINV="0">'
+            '<Fil T="16" F="80.00" Q="0.70" G="-12" dF="80" I="0" FilBy="0"/>'
+            '<Fil T="17" F="97.00" Q="3.00" G="-4.00" dF="100" I="0" FN="11"/>'
+            '<Fil T="17" F="103.00" Q="3.00" G="-4.00" dF="100" I="0" FN="12"/>'
+            '<Fil T="1" F="250.00" Q="1" G="0" dF="250" I="0" FN="13"/>'
+            '</OC></ATF><T PM="1" P="0" T="0"/>')
+
+    ch = channels(sxml)[0]
+    assert [s['slot_index'] for s in ch['slots']] == [0, 1, 2, 3]
+    assert ch['slots'][1]['fn'] == '11' and ch['slots'][2]['fn'] == '12'
+    assert ch['slots'][3]['free'] and not ch['slots'][0]['free']
+    assert ch['peqs'] == [(97.0, 3.0, -4.0), (103.0, 3.0, -4.0)]  # unchanged shape
+    print('afpx selftest: slots expose stable index/FN; peqs stays (F,Q,G) OK')
+
+    # re-centre 97 -> 100 by SLOT, not proximity: slot 2 must not move
+    rec = write_filter_slot(sxml, 0, 1, F=100.0)
+    v = verify_slot_write(sxml, rec, 0, 1, {'F': '100.00'})
+    assert v['pass'], v['errors']
+    rch = channels(rec)[0]
+    assert rch['peqs'] == [(100.0, 3.0, -4.0), (103.0, 3.0, -4.0)], rch['peqs']
+    assert len(rch['slots']) == len(ch['slots']), 'must edit in place, not duplicate'
+    assert rch['slots'][1]['fn'] == '11', 'FN must be preserved by an edit'
+    print('afpx selftest: 97->100 Hz re-centre hits the right band, no duplicate OK')
+
+    # coarse Q change (3.0 -> 1.2) and removal (free the slot)
+    wide = write_filter_slot(sxml, 0, 2, Q=1.2)
+    assert channels(wide)[0]['peqs'][1] == (103.0, 1.2, -4.0)
+    gone = write_filter_slot(sxml, 0, 1, type_code='1', G=0.0)
+    gch = channels(gone)[0]
+    assert gch['peqs'] == [(103.0, 3.0, -4.0)], gch['peqs']
+    assert gch['slots'][1]['free'] and len(gch['slots']) == 4, 'removal frees, not deletes'
+    print('afpx selftest: coarse Q edit + removal-by-freeing-slot OK')
+
+    # guards
+    for bad, why in [
+        (dict(channel_index=0, slot_index=0, F=90.0), 'crossover slot'),
+        (dict(channel_index=0, slot_index=99, F=90.0), 'slot out of range'),
+        (dict(channel_index=9, slot_index=1, F=90.0), 'channel out of range'),
+        (dict(channel_index=0, slot_index=1, G=99.0), 'gain over hardware limit'),
+        (dict(channel_index=0, slot_index=1, Q=99.0), 'Q over hardware limit'),
+        (dict(channel_index=0, slot_index=1), 'no attributes to change'),
+    ]:
+        try:
+            write_filter_slot(sxml, **bad)
+            raise AssertionError('%s should have raised' % why)
+        except ValueError:
+            pass
+    # crossover edit allowed only when explicitly opted in
+    assert write_filter_slot(sxml, 0, 0, F=90.0, allow_crossover=True) != sxml
+    print('afpx selftest: rejects crossover/out-of-range/illegal edits; opt-in works OK')
+
+    # verification must catch collateral damage
+    tampered = write_filter_slot(sxml, 0, 1, F=100.0).replace('F="103.00"', 'F="105.00"')
+    assert not verify_slot_write(sxml, tampered, 0, 1, {'F': '100.00'})['pass'], \
+        'must catch an unrelated slot changing'
+    print('afpx selftest: slot-write verification catches collateral edits OK')
 
     print('\nALL AFPX SELFTESTS PASSED')
 

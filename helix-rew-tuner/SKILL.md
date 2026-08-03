@@ -71,6 +71,12 @@ Run these with the user's files; they are the deterministic layer.
   directly — a real, tested capability, but it does NOT change the standing
   rule that delay writes need explicit per-change user confirmation first
   (see workflow step 5 and `helix_hardware.md`).
+  `channels()[ch]['slots']` gives every filter's stable `slot_index`/`fn`;
+  `write_filter_slot`/`verify_slot_write` edit an EXISTING filter by
+  `(channel, slot)` — the only safe way to re-centre, relax or remove one,
+  since matching by nearest frequency is ambiguous on real tunes (see
+  `afpx_format.md`). Editing an existing band still needs the same measured
+  justification and per-change confirmation as adding one.
   `read_output_levels`/`write_output_trim`/`verify_output_trim_write` handle
   per-channel **output level** (`<Vol>`, linear amplitude — read
   `afpx_format.md` for the fewer-Vol-tags-than-channels gotcha). Reading it is
