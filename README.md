@@ -1,8 +1,10 @@
-# Helix REW Auto-Tuner — a Claude skill
+# Helix REW Auto-Tuner
 
 A measurement-driven tuning assistant for **Helix / Audiotec Fischer car-audio
-DSPs** (P SIX, DSP.3, M-SIX, V-SIX, …), packaged as an installable
-[Claude](https://claude.ai) skill.
+DSPs** (P SIX, DSP.3, M-SIX, V-SIX, …). Works as an installable
+[Claude](https://claude.ai) skill or, via `AGENTS.md`, with
+[OpenAI Codex](https://openai.com/codex/) and other agents that read
+repo-level `AGENTS.md` instructions.
 
 You give Claude your REW measurements, your Helix `.afpx` tune file, and a target
 curve. It decodes both formats, works out what's actually wrong (and — just as
@@ -111,10 +113,21 @@ The full Helix filter set, each used for what it's good at:
 
 ## Install
 
-Download [`helix-rew-tuner.skill`](helix-rew-tuner.skill) and install it through
-Claude's skill flow (the file card shows **Save skill** when your account allows
-skill creation). The `.skill` is self-contained — it bundles the workflow, the
-Python analysis library, the reference docs, and the default target curve.
+**Claude (skill):** download [`helix-rew-tuner.skill`](helix-rew-tuner.skill)
+and install it through Claude's skill flow (the file card shows **Save skill**
+when your account allows skill creation). The `.skill` is self-contained — it
+bundles the workflow, the Python analysis library, the reference docs, and the
+default target curve. For Claude Code specifically, you can instead clone this
+repo and copy `helix-rew-tuner/` into `~/.claude/skills/helix-rew-tuner/` — no
+`.git` folder or repo-root files in that destination, just the skill folder's
+contents.
+
+**Codex (or any `AGENTS.md`-reading agent):** clone this repo into (or
+alongside) the project you're working in. `AGENTS.md` at the repo root carries
+the same workflow and doctrine as `SKILL.md`, adapted to Codex's
+auto-loaded-instructions convention — no separate install step. It points into
+`helix-rew-tuner/scripts/` and `helix-rew-tuner/references/` for the actual
+analysis code and docs, same as the Claude skill does.
 
 ## Best way to run it
 
