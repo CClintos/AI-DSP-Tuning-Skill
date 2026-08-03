@@ -108,6 +108,37 @@ Notes that have burned people:
 - **Only write `T="17"` for ordinary EQ.** Never place a shelf/all-pass code in an
   arbitrary slot — those pin to fixed slots and don't AutoSort.
 
+## Filter identity is (channel_index, slot_index) — never frequency
+
+`channels()[ch]['slots']` lists every filter slot with its positional
+`slot_index`, stored `fn`, type, F/Q/G, `bypassed` and `free` flags.
+`peqs`/`shelves`/`all_passes` remain plain `(F,Q,G)`-style tuples for
+`cascade_db`/`headroom_report`, but they carry **no identity** — so they can
+say *what* a channel is doing, never *which* filter to edit.
+
+**Address an existing filter by slot, never by nearest frequency.** Real tunes
+put bands close enough that proximity matching is ambiguous: one 16-band
+channel had five pairs within 10% of each other (129.4/136.9, 258.3/277.0,
+621.8/650.0, 1015.9/1115.0, 1236.6/1300.0). A "move the 97 Hz band to 100 Hz"
+expressed as *find the band nearest 97* can retune the wrong one, or leave the
+original and create a duplicate at the new frequency. Slot order is also **not**
+frequency order — on that same channel the 258.3 Hz and 277.0 Hz bands live at
+slots 12 and 0.
+
+`write_filter_slot(xml, channel_index, slot_index, F=/Q=/G=/type_code=)` edits
+one slot in place: only the attributes you pass change, `FN`/`dF`/`I`/`FilBy`
+stay byte-identical, and no other slot moves. `type_code='1'` frees a slot
+(removal without deleting it, preserving slot count). It **refuses to touch a
+crossover** unless `allow_crossover=True`, so a mis-indexed edit can't silently
+retune one. PEQ edits are checked against hardware limits. Verify with
+`verify_slot_write`, which confirms the intended attributes landed, nothing
+else on that tag moved, every other slot in every channel is unchanged, and
+delays didn't shift.
+
+This is the mechanism for expressing an edit precisely — not permission to make
+one. Relaxing, re-centring or removing an existing filter still needs measured
+justification and the same per-change confirmation as any other write.
+
 ## Crossover protection is enforced from ONE place — don't re-list codes
 
 `afpx.CROSSOVER_TYPES` = `{'9','15','16'}` and `afpx.CROSSOVER_FIELDS`
