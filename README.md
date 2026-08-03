@@ -131,22 +131,25 @@ analysis code and docs, same as the Claude skill does.
 
 ## Best way to run it
 
-- **Surface: Claude Code** (terminal, desktop app, or IDE extension). The skill
-  reads your measurement and tune files off disk, runs its bundled Python, and writes
-  the corrected `.afpx` back to a real location — all of which need local file access
-  and code execution. You *can* run the conversation in Claude.ai chat by uploading
-  files, but you'll be copy-pasting and won't get a written `.afpx` back, so it's a
-  weaker fit for the full loop.
-- **Model: an Opus-class (strongest available) model for the tuning itself.** The
-  judgment — classifying each problem, predicting how filters interact, catching a
-  bad correction — is where model quality shows. A faster model like Sonnet is fine
-  for the mechanical steps (decoding a file, inspecting channels, changing one gain).
-- **Thinking: extended thinking on for the analysis and proposal steps.** The tool
-  weighs several competing fixes per region and predicts the summed result before
-  writing; the extra budget improves those calls. Not needed for routine inspection.
+- **Surface: an agent with real local file access and code execution** — Claude
+  Code (terminal, desktop app, IDE extension) or Codex (CLI/IDE), not a plain
+  chat window. It reads your measurement and tune files off disk, runs its
+  bundled Python, and writes the corrected tune back to a real location — all of
+  which need a filesystem and a shell, not just a chat box. You *can* run the
+  conversation in Claude.ai chat by uploading files, but you'll be copy-pasting
+  and won't get a written `.afpx` back, so it's a weaker fit for the full loop.
+- **Model: the strongest reasoning model your agent offers, for the tuning
+  itself.** The judgment — classifying each problem, predicting how filters
+  interact, catching a bad correction — is where model quality shows. A faster/
+  cheaper model is fine for the mechanical steps (decoding a file, inspecting
+  channels, changing one gain).
+- **Reasoning budget: turn it up for the analysis and proposal steps** — extended
+  thinking in Claude, high reasoning effort in Codex. The tool weighs several
+  competing fixes per region and predicts the summed result before writing; the
+  extra budget improves those calls. Not needed for routine inspection.
 
-In short: **Claude Code + an Opus-class model + extended thinking** for real tuning
-sessions; a lighter model is fine for quick mechanical edits.
+In short: **a code-capable agent + its strongest model + a high reasoning budget**
+for real tuning sessions; a lighter model is fine for quick mechanical edits.
 
 ## Exporting your measurements from REW
 
@@ -170,6 +173,8 @@ repeat.)
 
 ## Use
 
+### On Claude
+
 Once installed, just tell Claude something like:
 
 > "Tune my Helix DSP — here's my REW measurement, my `.afpx`, and my target curve."
@@ -188,6 +193,27 @@ Claude will:
    unproven — because the loaded, re-measured result is the only real proof.
 7. When that re-measure comes back, check each written band against it instead of
    just eyeballing the new plot, and flag anything that didn't land as predicted.
+
+### On Codex
+
+1. **Clone this repo** into, or as a sibling of, whatever directory Codex is
+   working in — Codex auto-loads `AGENTS.md` for the directory tree it's running
+   in, so there's no separate "install" step the way a Claude skill needs one.
+   (If Codex is running somewhere unrelated to the repo, just reference the repo
+   path in your prompt so it goes and reads `AGENTS.md` first.)
+2. **Give it your files** — the REW export(s), the `.afpx`/`.pct6` tune, and a
+   target curve if you have one (drop them in the working directory, or point
+   Codex at their paths).
+3. **Ask for it the same way you would with Claude:**
+
+   > "Tune my Helix DSP — here's my REW measurement, my `.afpx`, and my target
+   > curve."
+
+4. Codex follows the identical seven-step workflow above — `AGENTS.md` carries
+   the same doctrine as `SKILL.md`, calling into the same `scripts/tunelib.py`,
+   `afpx.py`, `measure.py`, and `pipeline.py` via its shell tool. The only
+   difference is which agent is driving; the analysis, the restraint rules, and
+   the write/verify discipline don't change.
 
 ## What's in the box
 
@@ -257,6 +283,140 @@ cracking tool:**
   in full before touching a real `.pct6` file — it covers the container format,
   provenance, and what's different from `.afpx` (more channels, less-verified
   filter-type mapping, non-strictly-well-formed XML).
+
+## How it actually works — and why it's not just "EQ to a line"
+
+A naive auto-EQ does one thing: measure a curve, subtract it from a target,
+turn the difference into filters. That approach reliably makes a tune *worse*
+in a car, for reasons that have nothing to do with filter quality:
+
+- **A dip isn't always a magnitude problem.** Two drivers can be individually
+  healthy and still cancel each other through a crossover or between left and
+  right — boosting that "dip" doesn't fix the cancellation, it just burns
+  headroom driving two signals further apart.
+- **A null isn't always correctable.** A room mode or a reflection can look
+  exactly like a driver problem on a single measurement, but chase the mic a
+  few inches and it moves or vanishes — "fixing" it only helps that one exact
+  seating position, and can hurt everywhere else.
+- **Not every frequency region has reliable phase**, even when the magnitude
+  trace looks clean — reflections dominate the fine structure of measured
+  phase well before they visibly disturb SPL. Timing corrections built on bad
+  phase data are worse than no correction.
+- **Filters interact.** Fitting each band independently against the raw
+  deviation and stacking them is how you get an overshoot nobody asked for the
+  moment two bands sit within an octave of each other.
+- **The target curve itself is a judgment call, not a fixed truth.** Matching
+  a studio-flat curve exactly in a car reliably sounds bright and thin — the
+  target has to be voiced for the room before it's worth chasing.
+
+So before anything gets written, every region is put through a **classifier**
+— tonal/driver-local, L/R level imbalance, phase cancellation, unstable
+room/reflection null, or unreliable measurement — and only the first two ever
+turn into an EQ move. The other three get a *different* kind of fix (timing,
+gain, nothing) or get reported as non-correctable, on purpose.
+
+### What actually gets measured, concretely
+
+These aren't hand-wavy heuristics — they're specific, testable functions in
+`scripts/tunelib.py`, each with a self-test:
+
+- **`interference_audit`** — computes both the *incoherent power-sum* (the
+  floor two drivers would hit if totally uncorrelated) and the *coherent
+  voltage-sum* (the ceiling if perfectly in phase) from two solo measurements,
+  then checks whether the real measured "together" trace falls *below* the
+  power-sum floor. If it does, that's destructive interference — a phase
+  problem, not a level problem — and boosting it is flagged as the wrong tool
+  before a filter is ever proposed.
+- **`crossover_confidence`** — bundles that interference check with phase
+  reliability and prediction-confidence into one go/no-go verdict for a
+  specific crossover band, so "is this crossover trustworthy to touch" is a
+  single, repeatable call instead of eyeballing three separate plots.
+- **`spatial_consistency`** — given three or more mic-position measurements,
+  computes the per-frequency spread across positions and turns it into a
+  continuous 0–1 confidence weight. A real driver/room feature stays roughly
+  the same level everywhere; a comb-filtering artifact from one exact mic spot
+  collapses a few inches away. Only what's *consistent* across positions gets
+  full weight in the fix.
+- **`phase_linearity_residual`** — fits a straight line (pure time delay) to
+  the unwrapped phase in a band and reports the RMS residual in degrees.
+  Real driver phase over its own passband is close to linear; reflections add
+  wiggle on top. Below ~100° residual is trustworthy for timing decisions;
+  above ~300–450° is reflection-dominated and gets rejected for anything
+  phase-domain, no matter how clean the magnitude trace looks.
+- **`excess_gd_mask`** — separates minimum-phase regions (flat excess group
+  delay — EQ genuinely works here) from non-minimum-phase regions (excess-GD
+  spikes, usually at sharp notches — EQ *cannot* fix these no matter how the
+  filter is tuned; only phase/delay/polarity work can).
+- **`inert_band_check`** — before trusting a proposed EQ band, checks whether
+  the target driver is more than ~6 dB below whatever's dominating the summed
+  response at that frequency. If so, the band is cosmetic — it changes that
+  driver's own curve but the dominant driver swamps it in the sum, so it
+  barely moves what you actually hear.
+- **`reaches_target_after_boost`** — simulates a proposed boost capped at the
+  hardware ceiling and checks whether the result actually reaches target. A
+  boost that's maxed out and still falls short is the signature of a phase
+  problem masquerading as a magnitude one — the fix isn't "more gain," it's
+  going back to the interference audit.
+- **`gating_warning`** — REW's windowed/gated measurements have a hard
+  low-frequency trust floor set by the gate length; below it, the data is a
+  reflection-of-a-reflection, not the driver. The tool computes that floor
+  from the actual gate length used and refuses to trust anything below it.
+- **`lr_match_report`** — a stereo center image (vocals, kick, anything panned
+  center) is built from left and right summing coherently; wherever the two
+  sides diverge in level, the image pulls toward the louder side *at that
+  frequency* — audible as smear even when each channel looks fine on its own.
+  This flags exactly where and how much the sides diverge in the
+  image-critical band (~300 Hz–6 kHz), rather than just reporting an averaged
+  L/R error that can hide a real, localized mismatch.
+
+### What it scores a tune on
+
+`tune_scorecard` is the single function every before/after and every
+tune-vs-tune comparison runs through, so the math is identical every time
+instead of being re-derived by hand each session:
+
+- **`sum_rms_db`** — plain RMS deviation from target across the audible band.
+- **`sum_wrms_img_db`** — the same, but weighted up in the 200 Hz–6 kHz
+  imaging band, because errors there cost more perceptually than the same
+  error at 30 Hz or 15 kHz.
+- **`worst_dev_db`** — the single worst deviation in the 100 Hz–8 kHz range,
+  so a tune that looks good on average but has one bad 3 dB notch can't hide
+  behind a flattering aggregate.
+- **`mid_balance_db` / `tweeter_balance_db`** (when L/R traces are supplied) —
+  median and RMS left/right mismatch in the mid and tweeter imaging bands,
+  the two frequency ranges where L/R error is most audible as image smear.
+
+No single number is treated as "the score." A tune that improves
+`sum_rms_db` while making `worst_dev_db` or an L/R balance metric worse is not
+a win — the workflow's step 4 requires stating confidence *per claim*, not
+one aggregate, precisely so a good average can't paper over one bad region.
+
+### After the write: closing the loop instead of trusting the prediction
+
+Everything above only produces a *prediction*. `predicted_vs_measured` is
+what happens when the user comes back with a fresh, loaded-tune measurement:
+it auto-aligns a broadband level offset using only the *untouched*
+frequencies (so a re-measure taken at a quieter volume that day doesn't read
+as "the EQ failed"), compares octave-smoothed regions rather than raw bins
+(so ordinary mic-position ripple doesn't either), and grades each written
+band `confirmed`, `diverged`, `reverted_recommended`, or `inconclusive` —
+downgrading to `inconclusive` rather than forcing a verdict when confidence
+is genuinely low. `reverted_recommended` is treated as an instruction to
+reconsider that band, not a suggestion.
+
+### The restraint budget
+
+None of the above is used to justify writing *more* filters — it's used to
+justify writing *fewer*, better-targeted ones. Overlapping candidate bands
+are modelled jointly and the summed prediction is what's evaluated, never a
+per-band gain-equals-deviation guess. Boosts are limited to protect headroom;
+cuts are preferred. Left/right stays matched unless the data — not a guess —
+proves the sides genuinely differ. When two candidate fixes score equally,
+the one that changes less wins. That bias toward doing less is deliberate:
+across real tuning sessions, the aggressive auto-EQ approach — more bands,
+bigger moves, tighter curve-matching — consistently loses to the restrained
+one on `tune_scorecard`'s whole-system metrics, not just on "sounds more
+natural" intuition.
 
 ## License
 
