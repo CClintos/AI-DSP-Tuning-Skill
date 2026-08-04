@@ -173,6 +173,69 @@ computed, so it is **never silent**: the return value reports
 `worst_q_snap_ratio` and `snapped_count`. Quote those to the user rather
 than claiming the requested Q applied exactly.
 
+## Compatibility with the real Alpine software
+
+A file that decodes cleanly and "looks right" as JSON is **not** the same as
+a file Alpine will accept and apply. Three separate things have to hold, and
+`preflight_real_file()` (CLI: `python alpine_jssh.py preflight <file>`) is
+the gate that checks them. **Run it on a real preset and report its verdict
+before trusting any generated file on hardware.**
+
+### 1. Number-text preservation (why byte-identity is achievable at all)
+
+`decode()` parses numbers into `_RawInt`/`_RawFloat`, which carry the
+original source text; `encode()` emits that text verbatim for anything not
+modified. Only values this module actually writes get re-serialized — and
+every field it writes is an integer byte.
+
+This sidesteps a genuine trap. There are two plausible "correct" serializer
+rules and **they disagree**:
+
+| source text | ported PowerShell writes | stdlib `json.dumps` writes |
+|---|---|---|
+| `1.0` | `1` | `1.0` |
+| `0.1` | `0.10000000000000001` (G17) | `0.1` |
+
+Reimplementing *either* rule silently rewrites part of a real file that
+happens to use the other form — which breaks `roundtrip_identical()`, the
+very check meant to catch real bugs, by making benign formatting noise
+indistinguishable from corruption. Preserving the source text removes the
+guesswork: an unmodified round-trip is now byte-identical **regardless of
+how Alpine formats numbers**, verified in the selftest across `1.0`, `0.1`,
+`1`, `1e3`, `100.0` and `-0.0`.
+
+### 2. Values Alpine's UI can actually represent
+
+Writing a value the UI can't express risks the stored byte and the on-screen
+value disagreeing — a silent mismatch that makes a "verified" write
+meaningless. Known entry resolutions:
+
+| Field | Resolution | Enforced by |
+|---|---|---|
+| PEQ frequency | 1 Hz below 1 kHz; **10 Hz at/above** | `quantize_band_freq_hz()`, on by default in `write_peq_bands` |
+| PEQ / channel gain | 0.1 dB | inherent in `round((dB+60)*10)` |
+| Delay | 1/96 ms (~0.0104 ms) | inherent in `round(ms*96)` |
+| PEQ Q | the 13 table codes only | `snap_q()` |
+
+The frequency rule comes from the same author's separate, real-hardware-
+tested Alpine entry tool ("values you can actually type into the Alpine").
+Acoustic cost of quantizing is nil — 10 Hz at 2 kHz is 0.5%, well under a
+hundredth of a semitone.
+
+### 3. Alpine's limits, not Helix's
+
+Covered in the table above — the recurring failure mode is reaching for
+`tunelib.validate_peq_band` or leaving `fit_peq` on its Helix-shaped
+defaults.
+
+### What preflight cannot tell you
+
+**Whether the hardware applied every value exactly.** Alpine accepting a
+file is not proof the DSP honoured every field — the source project flags
+this too. After loading a generated preset, read the values back through
+Alpine's own UI before trusting them. That is the one remaining gap no
+amount of file-level verification can close.
+
 ## A trap worth knowing: zero bytes are not a neutral preset
 
 Both gain fields encode as `stored = round((dB+60)*10)`, so a **zero** byte
