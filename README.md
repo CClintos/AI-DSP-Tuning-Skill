@@ -1,4 +1,4 @@
-# Helix REW Auto-Tuner
+# AI DSP Tuning Skill
 
 A measurement-driven tuning assistant for **Helix / Audiotec Fischer car-audio
 DSPs** (P SIX, DSP.3, M-SIX, V-SIX, …). Works as an installable
