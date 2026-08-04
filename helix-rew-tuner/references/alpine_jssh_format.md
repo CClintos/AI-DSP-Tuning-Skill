@@ -114,17 +114,72 @@ captured point changes that byte at all. Not understood; left out of both
 | 262 | LPF type | same codes as HPF type | **inferred** from structural parallel, not independently isolated |
 | 263 | LPF slope | same formula as HPF slope | CONFIRMED, two clean transitions |
 
-## An open discrepancy — not resolved here
+## Hardware limits — Alpine's, not Helix's
 
-The source project's own README documents Alpine's **PEQ gain UI** as
-limited to **−12..+12 dB**, but the byte-level formula/range-check for the
-**PEQ band gain field** (same as the confirmed channel-gain range) accepts
-**−60..+6 dB**. `alpine_jssh.validate_band_gain_db()` enforces the wider
-range, ported unchanged from the source. Whether the stored field genuinely
-supports that full range, or the UI simply never lets a user type past
-±12 dB while the byte format has more headroom, hasn't been independently
-re-verified. If you need the tighter UI-documented range enforced, check
-for it explicitly at the call site — don't assume this module does.
+`ALPINE_LIMITS` in `alpine_jssh.py` carries the real numbers. **Never use
+`tunelib.validate_peq_band` on an Alpine file** — that enforces Helix P SIX
+(−15..+6 dB, Q 0.5–15). Use `alpine_jssh.validate_band` instead.
+
+| | Alpine PXE-X121-12EV | Helix P SIX (for contrast) |
+|---|---|---|
+| PEQ freq | 20–20000 Hz | 20–20000 Hz |
+| PEQ gain | **−12..+12 dB** | −15..+6 dB |
+| PEQ Q | 0.404–28.852 (**writable: 0.498–7.588 only**) | 0.5–15 |
+| Bands | 31 | 30 |
+
+Two consequences that bite in practice:
+
+- **`tunelib.fit_peq`'s defaults are Helix-shaped** (`g_lim=(-15,3)`,
+  `q_lim=(0.5,8)`). Fitting for an Alpine without overriding them produces
+  filters that are either illegal on the Alpine or unwritable by this
+  module. Pass `q_lim=alpine_jssh.WRITABLE_Q_RANGE` and an Alpine `g_lim`.
+- **Only 13 Q values are writable**, spanning 0.498–7.588 — narrower than
+  Alpine's own UI range. A Q outside that span can't be written at all;
+  `snap_q()` raises rather than silently writing something materially
+  different.
+
+### Resolved: the band-gain range discrepancy
+
+The source project range-checked **band** gain as −60..+6 dB. That is the
+**channel**-gain range (identical formula, checked identically a few
+functions away) and appears to have been reused rather than independently
+established — it's wrong for a band in both directions, forbidding a legal
++7..+12 dB boost while permitting −60 dB, far below anything Alpine's PEQ UI
+accepts. `validate_band_gain_db()` here **deliberately deviates** and
+enforces Alpine's documented ±12 dB. The stored encoding
+(`round((dB+60)*10)`, two bytes LE) can physically hold a much wider span —
+that's an encoding capability, not permission. If you obtain primary-source
+evidence the band field genuinely accepts beyond ±12, widen
+`ALPINE_LIMITS['peq_gain_db']` deliberately rather than loosening the check.
+
+## Writing a computed filter set — Q snapping
+
+A real optimizer returns **continuous** Q; this format accepts **13 discrete
+values**. Exact-match-only writing therefore rejects almost every computed
+filter, which would make the measure → fit → write pipeline unusable.
+
+`write_peq_bands(obj, ch, bands, snap=True)` takes a `fit_peq`-shaped
+`[(F, Q, G), ...]` list, validates every band against Alpine's limits
+**before writing anything** (a partial write would leave the preset matching
+neither the old tune nor the new one), snaps each Q to the nearest writable
+value on a log scale, and clears trailing bands so a longer previous set
+can't persist underneath the new one.
+
+**Measured cost of snapping** across the practical range (Q 0.6–6.5, gains
+to 6 dB): **worst case ~0.44 dB, typically ~0.2–0.3 dB** — below the "few
+tenths of a dB is inaudible" bar used elsewhere in the methodology. That
+makes snapping safe, but it is still a real deviation from what was
+computed, so it is **never silent**: the return value reports
+`worst_q_snap_ratio` and `snapped_count`. Quote those to the user rather
+than claiming the requested Q applied exactly.
+
+## A trap worth knowing: zero bytes are not a neutral preset
+
+Both gain fields encode as `stored = round((dB+60)*10)`, so a **zero** byte
+pair decodes to **−60 dB, not 0 dB**. A zero-filled channel block therefore
+reads back as every band cut to −60 dB. A genuinely flat/unused band stores
+**600** (`0x0258`). This caught a fixture bug in this module's own selftest —
+if you ever hand-build a block, build it through the setters, not from zeros.
 
 ## Differences from `.afpx`/`.pct6` worth knowing
 

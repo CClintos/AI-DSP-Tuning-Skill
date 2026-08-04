@@ -38,6 +38,7 @@
 # does.
 #
 # CLI:
+#   python alpine_jssh.py inspect <file.jssh>    # channel map + roles (step-1 intake)
 #   python alpine_jssh.py decode <file.jssh>     # writes file.decoded.json
 #   python alpine_jssh.py encode <file.json> <out.jssh>
 #   python alpine_jssh.py selftest               # synthetic round-trip + field checks
@@ -45,6 +46,8 @@ import copy
 import json
 import sys
 from pathlib import Path
+
+import numpy as _np       # selftest only (fit_peq end-to-end check)
 
 CHANNEL_BLOCK_LEN = 296       # confirmed length of one channel's value array
 N_PEQ_BANDS = 31              # confirmed max PEQ bands per channel
@@ -63,6 +66,33 @@ PEQ_Q_TABLE = {14: 7.588, 20: 5.764, 31: 3.997, 42: 3.058, 53: 2.471,
 
 _FILTER_TYPE_CODE = {'LR': 0, 'Butterworth': 1, 'Bessel': 2}
 _FILTER_TYPE_NAME = {v: k for k, v in _FILTER_TYPE_CODE.items()}
+
+# Alpine PXE-X121-12EV hardware limits. These are ALPINE's, NOT Helix's --
+# do NOT use tunelib.validate_peq_band here (that enforces Helix P SIX:
+# -15..+6 dB, Q 0.5-15), and do NOT leave tunelib.fit_peq on its Helix-
+# shaped defaults (g_lim=(-15,3), q_lim=(0.5,8)) when fitting for an Alpine.
+# Use WRITABLE_Q_RANGE below as fit_peq's q_lim so the optimizer can't
+# return a Q this module then has to refuse or snap far.
+ALPINE_LIMITS = {
+    'peq_freq_hz': (20, 20000),      # band frequency, per the source project
+    'peq_gain_db': (-12.0, 12.0),    # Alpine UI's documented PEQ range
+    'peq_q': (0.404, 28.852),        # Alpine UI's documented Q range
+    'n_bands': N_PEQ_BANDS,
+    'channel_gain_db': (-60.0, 6.0),
+    'delay_ms': (0.0, 20.0),
+}
+
+# The Q values this module can actually WRITE -- narrower than Alpine's own
+# 0.404-28.852 UI range, because the confirmed lookup table only spans these
+# 13 points. Anything outside this span cannot be written at all (not even
+# by snapping), so constrain the optimizer to it up front.
+WRITABLE_Q_RANGE = (min(PEQ_Q_TABLE.values()), max(PEQ_Q_TABLE.values()))
+
+# Off-conventions, per the source project's README: an Alpine HPF at 20 Hz
+# and an LPF at 40000 Hz mean "filter off", not "a real 20 Hz/40 kHz corner".
+# channels() maps these to None so role inference isn't fooled by them.
+HPF_OFF_HZ = 20
+LPF_OFF_HZ = 40000
 
 
 def _xor_by_position(data):
@@ -342,11 +372,23 @@ def get_band_gain_db(obj, channel_index, band):
 
 
 def validate_band_gain_db(gain_db):
-    # Ported unchanged from the source's own range check -- see the module
-    # docstring's "noted open discrepancy" about this vs. the UI-documented
-    # -12..+12 dB PEQ range.
-    if not (-60.0 <= gain_db <= 6.0):
-        raise ValueError('PEQ band gain %.2f dB is outside a plausible -60..+6 dB range.' % gain_db)
+    """Enforces Alpine's DOCUMENTED PEQ band range, -12..+12 dB.
+
+    DELIBERATE DEVIATION from the ported source, which range-checked band
+    gain as -60..+6 dB. That figure is the CHANNEL-gain range (same formula,
+    checked identically a few functions up) and appears to have been reused
+    for bands rather than independently established -- it is wrong for a band
+    in both directions: it forbids a legal +7..+12 dB boost while permitting
+    -60 dB, far below anything Alpine's PEQ UI accepts. The stored encoding
+    (round((dB+60)*10), two bytes LE) can physically hold a much wider span
+    than either range; that is an encoding capability, not permission. If you
+    have primary-source evidence the band field really does accept beyond
+    +/-12, widen ALPINE_LIMITS['peq_gain_db'] deliberately rather than
+    loosening this check."""
+    glo, ghi = ALPINE_LIMITS['peq_gain_db']
+    if not (glo <= gain_db <= ghi):
+        raise ValueError('PEQ band gain %.2f dB is outside Alpine\'s documented %+.0f..%+.0f dB '
+                         'range.' % (gain_db, glo, ghi))
 
 
 def set_band_gain_db(obj, channel_index, band, gain_db):
@@ -366,18 +408,129 @@ def get_band_q(obj, channel_index, band):
     return PEQ_Q_TABLE.get(code)
 
 
-def set_band_q(obj, channel_index, band, q):
+def snap_q(q):
+    """Nearest WRITABLE Q (a PEQ_Q_TABLE entry) to `q`, chosen on a log scale
+    since Q is perceptually ratio-like. Returns (code, snapped_q, ratio_error)
+    where ratio_error = snapped/requested (1.0 = exact hit).
+
+    Why snapping is needed at all: any real optimizer (tunelib.fit_peq) returns
+    CONTINUOUS Q, but only 13 discrete Q codes are confirmed for this format,
+    so an exact-match-only writer rejects almost every computed filter and
+    makes the whole measure -> fit -> write pipeline unusable. Measured cost of
+    snapping across the practical Q range (0.6-6.5) at gains up to 6 dB: worst
+    case ~0.44 dB, typically ~0.2-0.3 dB of magnitude error versus the
+    requested filter -- below the "few tenths of a dB is inaudible" bar the
+    methodology already uses elsewhere. That makes snapping SAFE, but it is
+    still a real deviation from what was computed, so it is never silent:
+    set_band_q(snap=True) returns the actual Q used, and write_peq_bands()
+    reports the worst snap in the whole set.
+
+    Raises ValueError if `q` is outside WRITABLE_Q_RANGE entirely -- that is
+    not a snap, it's an unrepresentable value, and pretending otherwise would
+    write a filter materially different from the one that was asked for."""
+    lo, hi = WRITABLE_Q_RANGE
+    if not (lo * 0.999 <= q <= hi * 1.001):
+        raise ValueError('Q %.3f is outside the writable range %.3f-%.3f for this format '
+                         '(only %d Q codes are confirmed). Constrain the optimizer with '
+                         'q_lim=WRITABLE_Q_RANGE instead of snapping from outside it.'
+                         % (q, lo, hi, len(PEQ_Q_TABLE)))
+    import math
+    code = min(PEQ_Q_TABLE, key=lambda c: abs(math.log(PEQ_Q_TABLE[c] / q)))
+    snapped = PEQ_Q_TABLE[code]
+    return code, snapped, snapped / q
+
+
+def set_band_q(obj, channel_index, band, q, snap=False):
+    """Write a band's Q. By default requires an exact table hit (within 0.01)
+    and raises otherwise -- the conservative original behaviour. Pass
+    snap=True to write the nearest writable Q instead; it RETURNS the Q
+    actually written so the caller can report the deviation rather than
+    silently assume the requested value landed."""
+    if snap:
+        code, snapped, _ratio = snap_q(q)
+        set_channel_byte(obj, channel_index, _band_offset(band) + 4, code)
+        return snapped
     matched = None
     for code, table_q in PEQ_Q_TABLE.items():
         if abs(table_q - q) < 0.01:
             matched = code
             break
     if matched is None:
-        raise ValueError('Q value %.3f is not yet in the known lookup table (known values: %s). '
-                         'Setting an unlisted Q is not supported until more of the table is '
-                         'confirmed.' % (q, ', '.join('%.3f' % v for v in sorted(PEQ_Q_TABLE.values()))))
-    off = _band_offset(band)
-    set_channel_byte(obj, channel_index, off + 4, matched)
+        raise ValueError('Q value %.3f is not in the confirmed lookup table (known values: %s). '
+                         'Pass snap=True to write the nearest writable Q instead (typically '
+                         '<0.3 dB of error, worst case ~0.44 dB), or constrain your optimizer '
+                         'to those values up front.'
+                         % (q, ', '.join('%.3f' % v for v in sorted(PEQ_Q_TABLE.values()))))
+    set_channel_byte(obj, channel_index, _band_offset(band) + 4, matched)
+    return PEQ_Q_TABLE[matched]
+
+
+def validate_band(freq_hz, q, gain_db):
+    """Enforce ALPINE's PEQ limits (not Helix's -- see ALPINE_LIMITS). Checks
+    the DSP's own documented ranges, plus that Q is actually writable by this
+    module. Raises ValueError. This is the Alpine equivalent of
+    tunelib.validate_peq_band; do not use that one for an Alpine file."""
+    flo, fhi = ALPINE_LIMITS['peq_freq_hz']
+    glo, ghi = ALPINE_LIMITS['peq_gain_db']
+    qlo, qhi = ALPINE_LIMITS['peq_q']
+    if not (flo <= freq_hz <= fhi):
+        raise ValueError('PEQ frequency %.1f Hz outside Alpine range %d-%d Hz.' % (freq_hz, flo, fhi))
+    if not (glo <= gain_db <= ghi):
+        raise ValueError('PEQ gain %.2f dB outside Alpine range %+.0f..%+.0f dB.' % (gain_db, glo, ghi))
+    if not (qlo <= q <= qhi):
+        raise ValueError('PEQ Q %.3f outside Alpine range %.3f-%.3f.' % (q, qlo, qhi))
+    wlo, whi = WRITABLE_Q_RANGE
+    if not (wlo * 0.999 <= q <= whi * 1.001):
+        raise ValueError('PEQ Q %.3f is legal on the Alpine but NOT writable by this module '
+                         '(only %.3f-%.3f is covered by the confirmed Q table).'
+                         % (q, wlo, whi))
+    return True
+
+
+def write_peq_bands(obj, channel_index, bands, snap=True, clear_remaining=True):
+    """Write a full computed filter set (the shape tunelib.fit_peq returns:
+    a list of (F, Q, G)) into a channel, validating every band against
+    ALPINE's limits first and reporting exactly what was written.
+
+    This is the function that makes a measured -> fitted -> written workflow
+    actually possible on this format, instead of hand-calling three setters
+    per band and discovering mid-way that a Q is unwritable. Nothing is
+    written unless EVERY band validates -- a partial write would leave the
+    preset in a state matching neither the old tune nor the new one.
+
+    clear_remaining zeroes the gain of every band after the ones supplied, so
+    a previous, longer filter set can't leave stale bands active behind the
+    new one (the same reason afpx's writers care about untouched slots).
+
+    Returns {'written': [(F, Q_actual, G), ...], 'worst_q_snap_ratio': float,
+    'snapped_count': int} -- report worst_q_snap_ratio to the user rather than
+    claiming the requested Q was applied exactly."""
+    if len(bands) > N_PEQ_BANDS:
+        raise ValueError('%d bands requested but this format has only %d per channel.'
+                         % (len(bands), N_PEQ_BANDS))
+    prepared = []
+    for F, Q, G in bands:
+        q_target = Q
+        if snap:
+            _code, q_target, _ratio = snap_q(Q)     # raises if outside writable range
+        validate_band(F, q_target, G)
+        prepared.append((F, Q, q_target, G))
+
+    written, worst_ratio, snapped = [], 1.0, 0
+    for i, (F, Q_req, Q_use, G) in enumerate(prepared, start=1):
+        set_band_frequency_hz(obj, channel_index, i, int(round(F)))
+        set_band_gain_db(obj, channel_index, i, G)
+        set_band_q(obj, channel_index, i, Q_use, snap=False)
+        ratio = Q_use / Q_req
+        if abs(ratio - 1.0) > 1e-6:
+            snapped += 1
+            if abs(ratio - 1.0) > abs(worst_ratio - 1.0):
+                worst_ratio = ratio
+        written.append((F, Q_use, G))
+    if clear_remaining:
+        for i in range(len(prepared) + 1, N_PEQ_BANDS + 1):
+            set_band_gain_db(obj, channel_index, i, 0.0)
+    return {'written': written, 'worst_q_snap_ratio': worst_ratio, 'snapped_count': snapped}
 
 
 def get_band_is_allpass(obj, channel_index, band):
@@ -391,6 +544,95 @@ def get_band_is_allpass(obj, channel_index, band):
 def set_band_is_allpass(obj, channel_index, band, all_pass):
     off = _band_offset(band)
     set_channel_byte(obj, channel_index, off + 7, 3 if all_pass else 0)
+
+
+# --------------------------------------------------------------------------
+# Whole-file inspection -- the Alpine equivalent of afpx.channels(), and the
+# reason it exists: the tuning workflow's FIRST step is confirming the channel
+# map with the user ("nothing is assumed"), which needs a per-channel summary
+# of crossovers/levels/delay/roles, not 40 individual getter calls.
+def band_summary(obj, channel_index):
+    """Every PEQ band on a channel: [{'band','freq_hz','gain_db','q','all_pass',
+    'active'}]. 'active' = |gain| >= 0.05 dB (Alpine keeps all 31 band records
+    present at all times, so a band is 'unused' by having no gain, not by being
+    absent). 'q' is None if the stored Q code isn't in the confirmed table --
+    that's a real unknown, not a zero."""
+    out = []
+    for b in range(1, N_PEQ_BANDS + 1):
+        gain = get_band_gain_db(obj, channel_index, b)
+        out.append({'band': b,
+                   'freq_hz': get_band_frequency_hz(obj, channel_index, b),
+                   'gain_db': round(gain, 2),
+                   'q': get_band_q(obj, channel_index, b),
+                   'all_pass': get_band_is_allpass(obj, channel_index, b),
+                   'active': abs(gain) >= 0.05})
+    return out
+
+
+def channels(obj):
+    """Per-channel summary with an INFERRED driver role, mirroring
+    afpx.channels() so both formats present the same shape to the workflow.
+
+    Role inference reuses afpx.infer_role (a pure crossover heuristic, not
+    Helix-specific) and is explicitly a STARTING POINT for the user to
+    confirm or correct -- never treated as truth, same as the .afpx path.
+    Alpine's filter-off conventions (HPF 20 Hz / LPF 40000 Hz) are mapped to
+    None before inference so an 'off' filter isn't misread as a real 20 Hz
+    or 40 kHz corner."""
+    try:
+        from afpx import infer_role
+    except ImportError:                                  # pragma: no cover
+        def infer_role(hp, lp):
+            return 'unknown (afpx.py not importable)'
+    out = []
+    for i in range(len(obj['data']['output']['output'])):
+        hp = get_channel_hpf_hz(obj, i)
+        lp = get_channel_lpf_hz(obj, i)
+        hp_eff = None if hp <= HPF_OFF_HZ else hp
+        lp_eff = None if lp >= LPF_OFF_HZ else lp
+        bands = band_summary(obj, i)
+        active = [b for b in bands if b['active']]
+        out.append({
+            'index': i,
+            'channel_number': i + 1,
+            'inferred_role': infer_role(hp_eff, lp_eff),
+            'hp_hz': hp_eff, 'lp_hz': lp_eff,
+            'hp_raw_hz': hp, 'lp_raw_hz': lp,
+            'hp_type': get_channel_hpf_type(obj, i),
+            'hp_slope_db_oct': get_channel_hpf_slope_db_per_oct(obj, i),
+            'lp_type': get_channel_lpf_type(obj, i),
+            'lp_slope_db_oct': get_channel_lpf_slope_db_per_oct(obj, i),
+            'gain_db': round(get_channel_gain_db(obj, i), 2),
+            'delay_ms': round(get_channel_delay_ms(obj, i), 3),
+            'muted': get_channel_muted(obj, i),
+            'inverted': get_channel_inverted(obj, i),
+            'active_band_count': len(active),
+            'free_band_count': N_PEQ_BANDS - len(active),
+            'all_pass_bands': [b['band'] for b in bands if b['all_pass']],
+            'bands': bands,
+        })
+    return out
+
+
+def format_channels(chans):
+    """Human-readable inspect output -- what the user actually confirms the
+    channel map against."""
+    lines = []
+    for c in chans:
+        xo = '%s-%s Hz' % ('off' if c['hp_hz'] is None else '%d' % c['hp_hz'],
+                          'off' if c['lp_hz'] is None else '%d' % c['lp_hz'])
+        flags = []
+        if c['muted']:
+            flags.append('MUTED')
+        if c['inverted']:
+            flags.append('INVERTED')
+        if c['all_pass_bands']:
+            flags.append('AP:%s' % ','.join(str(b) for b in c['all_pass_bands']))
+        lines.append('CH%-3d %-18s %-16s %2d/%d bands  gain %+6.2f dB  delay %6.3f ms  %s'
+                     % (c['channel_number'], c['inferred_role'], xo,
+                        c['active_band_count'], N_PEQ_BANDS,
+                        c['gain_db'], c['delay_ms'], ' '.join(flags)))
+    return '\n'.join(lines)
 
 
 # --------------------------------------------------------------------------
@@ -451,15 +693,39 @@ def verify_write(source_path, out_path, expected_channel_indices, expected_byte_
 
 # --------------------------------------------------------------------------
 def _make_synthetic_preset(n_channels=3):
-    """A minimal but schema-shaped object for the selftest -- NOT a real
-    Alpine preset (no real one is bundled; see decode()'s docstring on why).
-    Verifies the codec and field accessors are internally consistent, not
-    that field offsets match a real PC-Tool version -- validate against a
+    """A schema-shaped, ACOUSTICALLY NEUTRAL object for the selftest -- NOT a
+    real Alpine preset (no real one is bundled; see decode()'s docstring on
+    why). Verifies the codec and field accessors are internally consistent,
+    not that field offsets match a real PC-Tool version -- validate against a
     real file (roundtrip_identical()) before trusting a generated file on
-    real hardware."""
+    real hardware.
+
+    IMPORTANT, and a real trap this fixture exists to avoid: an all-zero
+    block is NOT a neutral preset. Both gain fields encode as
+    stored=round((dB+60)*10), so a zero byte pair decodes to -60 dB, not
+    0 dB -- a zero-filled fixture reads back as every band cut to -60 dB
+    and every channel muted-by-gain. A genuinely flat/unused band stores
+    600 (0x0258). This builds that true neutral state via the setters, so
+    tests measure real behaviour instead of an artefact of the fixture."""
     block = [0] * CHANNEL_BLOCK_LEN
-    return {'data': {'output': {'output': [list(block) for _ in range(n_channels)]}},
-           'data_info': {'data_upload_time': '2026-01-01T00:00:00'}}
+    obj = {'data': {'output': {'output': [list(block) for _ in range(n_channels)]}},
+          'data_info': {'data_upload_time': '2026-01-01T00:00:00'}}
+    for i in range(n_channels):
+        set_channel_gain_db(obj, i, 0.0)
+        set_channel_delay_ms(obj, i, 0.0)
+        set_channel_muted(obj, i, False)
+        set_channel_inverted(obj, i, False)
+        set_channel_hpf_hz(obj, i, HPF_OFF_HZ)      # HPF off
+        set_channel_lpf_hz(obj, i, LPF_OFF_HZ)      # LPF off
+        set_channel_hpf_type(obj, i, 'LR')
+        set_channel_lpf_type(obj, i, 'LR')
+        set_channel_hpf_slope_db_per_oct(obj, i, 24)
+        set_channel_lpf_slope_db_per_oct(obj, i, 24)
+        for b in range(1, N_PEQ_BANDS + 1):
+            set_band_gain_db(obj, i, b, 0.0)        # flat = stored 600, not 0
+            set_band_q(obj, i, b, 1.0, snap=True)
+            set_band_is_allpass(obj, i, b, False)
+    return obj
 
 
 def _selftest():
@@ -531,12 +797,13 @@ def _selftest():
         assert res['diff_count'] == 2, 'expected exactly 2 diffs (both HPF Hz bytes)'
         sneaky = copy.deepcopy(base)
         set_channel_hpf_hz(sneaky, 0, 3000)
-        set_channel_muted(sneaky, 1, False)  # an unexpected out-of-scope change
-                                             # (False, not True: the synthetic
-                                             # block's byte 248 defaults to 0
-                                             # (=muted), so muted=True is a
-                                             # same-value no-op that wouldn't
-                                             # actually produce a diff here)
+        # An unexpected out-of-scope change. Flip whatever the CURRENT value
+        # is rather than hardcoding one -- twice now this assertion silently
+        # passed-by-not-testing because the value written happened to equal
+        # the fixture's default, making the "change" a no-op that produced no
+        # diff for verify_write to catch. Deriving it from the live value
+        # makes the test independent of the fixture's defaults.
+        set_channel_muted(sneaky, 1, not get_channel_muted(sneaky, 1))
         encode(sneaky, out)
         try:
             verify_write(tmp, out, expected_channel_indices=[0], expected_byte_offsets=[256, 257])
@@ -544,6 +811,78 @@ def _selftest():
         except ValueError:
             pass
         out.unlink(missing_ok=True)
+
+        # ---- Q snapping: the fix that makes a computed filter set writable --
+        code, snapped, ratio = snap_q(2.0)
+        assert abs(snapped - 1.983) < 1e-6, 'Q 2.0 should snap to the 1.983 table entry'
+        assert abs(ratio - 1.0) < 0.02, 'Q 2.0 -> 1.983 should be a <2%% change'
+        try:
+            snap_q(50.0)
+            raise AssertionError('snap_q must refuse a Q outside the writable range')
+        except ValueError:
+            pass
+        # exact-match mode must still refuse (conservative default preserved)
+        try:
+            set_band_q(obj, 0, 1, 2.0, snap=False)
+            raise AssertionError('set_band_q(snap=False) must refuse a non-table Q')
+        except ValueError:
+            pass
+        assert abs(set_band_q(obj, 0, 1, 2.0, snap=True) - 1.983) < 1e-6
+
+        # ---- Alpine limits are ALPINE's, not Helix's ------------------------
+        validate_band(1000.0, 1.5, 9.0)          # +9 dB is legal on Alpine...
+        import tunelib as _T
+        try:
+            _T.validate_peq_band(1000.0, 1.5, 9.0)   # ...but NOT on Helix
+            raise AssertionError('Helix validator should reject +9 dB')
+        except ValueError:
+            pass
+        try:
+            validate_band(1000.0, 1.5, 15.0)     # beyond Alpine's own +/-12
+            raise AssertionError('validate_band should reject +15 dB')
+        except ValueError:
+            pass
+        try:
+            validate_band(1000.0, 20.0, 3.0)     # legal Alpine Q, NOT writable
+            raise AssertionError('validate_band should reject an unwritable Q')
+        except ValueError:
+            pass
+
+        # ---- end-to-end: a real fit_peq result must be writable -------------
+        freqs = 24000.0 / (_T.LOGSTEP ** (1231 - _np.arange(1232)))
+        dev = _T.peaking_db(freqs, 500.0, 2.0, 5.0) + _T.peaking_db(freqs, 2000.0, 1.0, 4.0)
+        fitted, _rep = _T.fit_peq(freqs, dev, (100, 8000), n_bands_max=4,
+                                 q_lim=WRITABLE_Q_RANGE, g_lim=(-12.0, 3.0))
+        assert fitted, 'fit_peq returned no bands for a synthetic 2-peak deviation'
+        target = _make_synthetic_preset()
+        res = write_peq_bands(target, 0, fitted, snap=True)
+        assert len(res['written']) == len(fitted), 'not every fitted band was written'
+        for (F, Q, G) in res['written']:
+            validate_band(F, Q, G)               # everything written is legal + writable
+        assert abs(res['worst_q_snap_ratio'] - 1.0) < 0.25, \
+            'Q snapping moved a band more than 25%% -- unexpectedly coarse'
+        # read back what was written
+        assert get_band_frequency_hz(target, 0, 1) == int(round(res['written'][0][0]))
+        # bands beyond the written set were cleared, not left stale
+        assert abs(get_band_gain_db(target, 0, N_PEQ_BANDS)) < 0.05, \
+            'trailing bands should be cleared so a longer previous set cannot persist'
+
+        # ---- channels(): the step-1 channel-map inspect ---------------------
+        insp = _make_synthetic_preset(n_channels=2)
+        set_channel_hpf_hz(insp, 0, 3150); set_channel_lpf_hz(insp, 0, LPF_OFF_HZ)
+        set_channel_hpf_hz(insp, 1, HPF_OFF_HZ); set_channel_lpf_hz(insp, 1, 80)
+        set_band_gain_db(insp, 0, 3, -2.0)
+        chans = channels(insp)
+        assert len(chans) == 2
+        assert chans[0]['inferred_role'] == 'tweeter', \
+            'HPF 3150 Hz should infer a tweeter, got %r' % chans[0]['inferred_role']
+        assert chans[1]['inferred_role'] == 'sub', \
+            'LPF 80 Hz should infer a sub, got %r' % chans[1]['inferred_role']
+        assert chans[0]['lp_hz'] is None, 'LPF 40000 must read as off, not a real corner'
+        assert chans[1]['hp_hz'] is None, 'HPF 20 must read as off, not a real corner'
+        assert chans[0]['active_band_count'] == 1, 'exactly one band was given gain'
+        assert chans[0]['free_band_count'] == N_PEQ_BANDS - 1
+        assert format_channels(chans), 'format_channels produced no output'
 
         print('SELFTEST PASSED (synthetic schema only -- verify against a real .jssh file too: '
               'roundtrip_identical(real_file) should report byte_identical=True)')
@@ -553,11 +892,18 @@ def _selftest():
 
 def _main():
     if len(sys.argv) < 2:
-        print('usage: python alpine_jssh.py {decode <file.jssh> | encode <file.json> <out.jssh> | selftest}')
+        print('usage: python alpine_jssh.py {inspect <file.jssh> | decode <file.jssh> '
+              '| encode <file.json> <out.jssh> | selftest}')
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd == 'selftest':
         _selftest()
+    elif cmd == 'inspect':
+        obj = decode(sys.argv[2])
+        chans = channels(obj)
+        print('%d channels in %s' % (len(chans), sys.argv[2]))
+        print(format_channels(chans))
+        print('\nRoles are INFERRED from crossovers -- confirm/correct them before tuning.')
     elif cmd == 'decode':
         obj = decode(sys.argv[2])
         out = Path(sys.argv[2]).with_suffix('.decoded.json')
