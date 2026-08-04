@@ -109,6 +109,20 @@ Run these with the user's files; they are the deterministic layer.
   corrupts them on re-encode. **Read `references/pct6_format.md` before
   using this on a real file** — the container key is version-fragile and
   unverified beyond PC-Tool 6.01.08/6.03.04.
+- **`alpine_jssh.py`** — **BETA, personal-use only** — a **different vendor**:
+  decode/encode Alpine DSP PC-Tool `.jssh` presets (confirmed on a
+  PXE-X121-12EV). Same workflow shape as `afpx.py`: `channels()` for the
+  step-1 channel-map confirmation (`python alpine_jssh.py inspect <file>`),
+  per-field getters/setters, `write_peq_bands()` to write a whole
+  `fit_peq` result, and `verify_write()` (refuses if anything outside the
+  intended bytes moved). **Alpine's limits are NOT Helix's** — use
+  `alpine_jssh.validate_band` and `ALPINE_LIMITS`, never
+  `tunelib.validate_peq_band`, and pass `q_lim=alpine_jssh.WRITABLE_Q_RANGE`
+  + an Alpine `g_lim` to `fit_peq` (its defaults are Helix-shaped). Only 13
+  Q values are writable, so `write_peq_bands(snap=True)` snaps to the
+  nearest and **reports** the deviation (~0.2 dB typical, 0.44 dB worst) —
+  quote that to the user, don't claim the requested Q landed exactly. Read
+  `references/alpine_jssh_format.md` before touching a real file.
 
 For anything not covered by a script, write short Python that imports these —
 never hand-guess `.afpx`/`.pct6` bytes or filter codes.
@@ -121,6 +135,10 @@ never hand-guess `.afpx`/`.pct6` bytes or filter codes.
   and the version-fragility/no-password limitations. **Read this in full
   before touching a `.pct6` file** — it's held to a much lower confidence bar
   than `.afpx`.
+- **`references/alpine_jssh_format.md`** — the Alpine `.jssh` container format,
+  full field table with per-field confidence markers, the 13-point Q lookup
+  table, and Alpine's hardware limits. **Read in full before touching a
+  `.jssh` file.**
 - **`references/methodology.md`** — how to decide what to fix: deviation analysis,
   the interference audit, the crossover action-ladder, shelf and all-pass
   cookbooks, imaging, and the restraint rules. Read before proposing edits.
@@ -163,6 +181,14 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   don't proceed on faith. If it raises (password-protected, or the key doesn't
   match this PC-Tool version), say so plainly and don't guess further; this
   path is beta and unverified beyond one PC-Tool 6 version.
+  If given an Alpine **`.jssh`** instead, read
+  `references/alpine_jssh_format.md` first, then `alpine_jssh.decode()` (it
+  raises unless the result is valid JSON). Run
+  `alpine_jssh.roundtrip_identical(path)` **before any write** and tell the
+  user the result — this Python port has not been re-verified against a real
+  file, so that check is the gate, not a formality. From there the workflow
+  is unchanged, but every Helix-specific limit must be swapped for Alpine's
+  (see the `alpine_jssh.py` entry above).
 - **DSP model** and how many channels (read from the `.afpx` — `afpx.py` lists them).
 - **Channel map**: run `python afpx.py inspect <file>` to auto-detect roles from
   crossovers, then **show the user and have them confirm/correct** which channel is

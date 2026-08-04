@@ -89,6 +89,22 @@ Python that imports these.
   corrupts them on re-encode. Read `references/pct6_format.md` before touching
   a real `.pct6` file — the container key is version-fragile and unverified
   beyond PC-Tool 6.01.08/6.03.04.
+- **`alpine_jssh.py`** — **BETA, personal-use only** — a **different vendor**:
+  decode/encode Alpine DSP PC-Tool `.jssh` presets (confirmed on a
+  PXE-X121-12EV). Mirrors the `afpx.py` workflow shape: `channels()` for the
+  step-1 channel-map confirmation (`python alpine_jssh.py inspect <file>`),
+  per-field getters/setters, `write_peq_bands()` to write a whole `fit_peq`
+  result at once, and `verify_write()` which refuses if anything outside the
+  intended bytes moved. **Alpine's hardware limits are NOT Helix's** — use
+  `alpine_jssh.validate_band` / `ALPINE_LIMITS`, never
+  `tunelib.validate_peq_band`, and pass `q_lim=alpine_jssh.WRITABLE_Q_RANGE`
+  plus an Alpine-appropriate `g_lim` to `fit_peq` (its defaults are
+  Helix-shaped). Only 13 Q values are writable on this format, so
+  `write_peq_bands(snap=True)` snaps to the nearest and **reports** the
+  deviation (~0.2 dB typical, 0.44 dB worst case) — quote that to the user
+  rather than claiming the requested Q applied exactly. Run
+  `roundtrip_identical(path)` against the real file before any write. Read
+  `references/alpine_jssh_format.md` first.
 
 ## Reference files (`helix-rew-tuner/references/`)
 
@@ -97,6 +113,9 @@ Python that imports these.
 - **`pct6_format.md`** — the `.pct6` container format, BETA caveats, and the
   version-fragility/no-password limitations. Read in full before touching a
   `.pct6` file — it's held to a much lower confidence bar than `.afpx`.
+- **`alpine_jssh_format.md`** — the Alpine `.jssh` container format, full
+  field table with per-field confidence markers, the 13-point Q lookup table,
+  and Alpine's hardware limits. Read in full before touching a `.jssh` file.
 - **`methodology.md`** — how to decide what to fix: deviation analysis, the
   interference audit, the crossover action-ladder, shelf and all-pass
   cookbooks, imaging, and the restraint rules. Read before proposing edits.
