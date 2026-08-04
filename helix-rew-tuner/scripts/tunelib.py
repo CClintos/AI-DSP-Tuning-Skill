@@ -1166,6 +1166,98 @@ def fit_shelf_to_curve(freqs, target_curve_db, kind, band, q_lim=(0.1, 2.0)):
                     best = (round(float(F), 1), round(float(Q), 2), float(G), round(err, 2))
     return best
 
+# --------------------------------------------------------------------------
+# PEAKING-ONLY APPROXIMATION OF A SHELF -- the mirror of fit_shelf_to_curve.
+# Not a Helix need (Helix's PEQ has real shelf filters, T=3/T=4) -- this is
+# for the OTHER direction: a target DSP whose parametric EQ offers only
+# peaking (bell) bands, no shelf type at all. Inspired by reviewing a sibling
+# tool built for a specific Alpine head unit that solved exactly this problem
+# for its own PEQ -- generalized here to any target DSP's real Q/gain limits
+# via q_lim/gain_limit rather than assuming one unit's numbers. This produces
+# ONLY F/Q/G numbers; it does not read, write, or assume anything about a
+# target DSP's file format or software -- how those numbers get into the
+# unit (manual entry, a vendor app, etc.) is entirely up to the caller.
+def fit_peaking_to_shelf(shelves, n_bands, fit_band, q_lim=(0.5, 15.0),
+                         gain_limit=None, fs=FS, grid=300, drop_below_db=0.05,
+                         seed=0):
+    """Fit `n_bands` peaking filters to approximate one or more shelves, for
+    a DSP whose PEQ has no shelf filter type.
+
+    shelves: list of (kind, F, Q, G) with kind in {'low','high'} -- same
+    convention as low_shelf_db/high_shelf_db/fit_shelf_to_curve.
+    fit_band: (lo_hz, hi_hz) -- the CHANNEL's actual passband (e.g. a
+    tweeter's crossover range), not the whole audio band. A fit generated
+    for one channel's passband is not valid for a different channel --
+    regenerate per channel from that channel's own crossover points.
+    q_lim: the TARGET DSP's real peaking-Q range -- pass the actual unit's
+    hardware limits, not Helix's; e.g. (0.404, 6.0) is a deliberately
+    conservative ceiling used for one real unit's gentle-shelf case in the
+    sibling tool this was generalized from, not a universal default.
+    gain_limit: |gain| cap per peaking band. None (default) picks
+    max(4.0, 1.4 * the largest shelf gain) so the optimizer can't hide error
+    behind a big near-cancelling pair; pass the DSP's real ceiling explicitly
+    if you have it.
+    drop_below_db: filters that fit at or below this |gain| are dropped
+    after fitting (a peaking filter at ~0 dB does nothing but occupies a
+    band) -- the returned rms/max_err_db are recomputed on the survivors so
+    the reported match quality stays honest.
+
+    Returns (bands, report). bands = [(F, Q, G), ...] sorted by frequency,
+    F/Q/G plain floats -- NOT rounded to any specific DSP's entry precision
+    and NOT hardware-validated (that varies by unit; call the target DSP's
+    own limits check, e.g. validate_peq_band for Helix, before writing or
+    entering these). report = {'rms_db', 'max_err_db', 'dropped'} describing
+    fit quality; anything under a few tenths of a dB is inaudible."""
+    from scipy.optimize import differential_evolution
+
+    lo_hz, hi_hz = fit_band
+    f = np.geomspace(lo_hz, hi_hz, grid)
+    target = np.zeros_like(f)
+    max_shelf = 0.0
+    for kind, F, Q, G in shelves:
+        if kind not in ('low', 'high'):
+            raise ValueError("shelf kind must be 'low' or 'high', got %r" % (kind,))
+        max_shelf = max(max_shelf, abs(G))
+        fn = low_shelf_db if kind == 'low' else high_shelf_db
+        target += fn(f, F, Q, G, fs=fs)
+
+    gb = gain_limit if gain_limit is not None else max(4.0, 1.4 * max_shelf)
+    q_min, q_max = q_lim
+    bounds = [(np.log10(lo_hz), np.log10(hi_hz)), (-gb, gb), (q_min, q_max)] * n_bands
+    reg = 1.5e-3   # ridge on peaking gains: among equally-good fits, prefer the
+                   # smaller-gain (well-conditioned) one over a fragile large
+                   # near-cancelling pair that happens to score the same RMS
+
+    def model_of(p):
+        m = np.zeros_like(f)
+        for i in range(n_bands):
+            m += peaking_db(f, 10 ** p[3 * i], p[3 * i + 2], p[3 * i + 1], fs=fs)
+        return m
+
+    def obj(p):
+        rms = float(np.sqrt(np.mean((model_of(p) - target) ** 2)))
+        gains = p[1::3]
+        return rms + reg * float(np.mean(gains ** 2))
+
+    res = differential_evolution(obj, bounds, seed=seed, tol=1e-10,
+                                 maxiter=300, popsize=20, polish=True)
+
+    filters = sorted(
+        [(round(float(10 ** res.x[3 * i]), 1), round(float(res.x[3 * i + 2]), 3),
+          round(float(res.x[3 * i + 1]), 2)) for i in range(n_bands)],
+        key=lambda b: b[0])
+    filters = [(F, Q, G) for F, Q, G in filters if abs(G) > drop_below_db]
+    dropped = n_bands - len(filters)
+
+    model = np.zeros_like(f)
+    for F, Q, G in filters:
+        model += peaking_db(f, F, Q, G, fs=fs)
+    err = model - target
+    report = {'rms_db': round(float(np.sqrt(np.mean(err ** 2))), 3),
+             'max_err_db': round(float(np.max(np.abs(err))), 3),
+             'dropped': dropped}
+    return filters, report
+
 
 
 # --------------------------------------------------------------------------
@@ -2166,5 +2258,21 @@ if __name__ == '__main__':
     assert mask37.all(), 'a pure minimum-phase input must classify as fully EQ-able'
     print('\nTEST37 minphase Nyquist guard: rejects over-range axis, auto-rate '
           'handles 40 kHz export, min-phase input still classifies EQ-able')
+
+    # ---- TEST38: fit_peaking_to_shelf recovers a known LS+HS pair -------------
+    # Same reference case (values and tolerances) the sibling Alpine tool this
+    # was generalized from used for its own headless self-check -- confirms
+    # the ported math + scipy-DE optimizer reproduce that result.
+    shelves38 = [('high', 10000.0, 0.71, 3.28), ('low', 8644.0, 0.71, -4.78)]
+    bands38, rep38 = fit_peaking_to_shelf(
+        shelves38, 4, (3000.0, 20000.0), q_lim=(0.404, 6.0), fs=96000.0, seed=3)
+    print('\nTEST38 fit_peaking_to_shelf (HS 10000/0.71/+3.28 + LS 8644/0.71/-4.78, '
+          '4 PK, 3k-20k, 96 kHz):')
+    for F, Q, G in bands38:
+        print('   PK  %6.0f Hz   %+.2f dB   Q %.3f' % (F, G, Q))
+    print('   rms=%.3f dB  max=%.3f dB  dropped=%d' %
+          (rep38['rms_db'], rep38['max_err_db'], rep38['dropped']))
+    assert rep38['rms_db'] < 0.05, 'fit_peaking_to_shelf RMS too high'
+    assert rep38['max_err_db'] < 0.20, 'fit_peaking_to_shelf max error too high'
 
     print('\nALL TESTS PASSED')

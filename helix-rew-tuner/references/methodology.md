@@ -768,6 +768,14 @@ the plateau.
 - Keep shelf Q low (0.1–0.7) for a smooth knee; Q > 1 adds a resonant bump.
 - **Decide shelf vs bell numerically**: `tunelib.fit_shelf_to_curve` — if a single
   shelf can't reproduce the target shape within ~0.75 dB, it's a bell, keep the PEQ.
+- **The reverse case — no shelf filters available at all**: this doesn't come up
+  for Helix (it has real shelf types, T=3/T=4), but if you're ever helping with a
+  DSP whose parametric EQ offers only peaking bands, `tunelib.fit_peaking_to_shelf`
+  approximates a low/high shelf with N peaking filters over the channel's actual
+  passband. Pass that DSP's real Q/gain limits — don't default to Helix's. It
+  returns plain F/Q/G numbers only; it does not know or assume anything about that
+  DSP's file format, so hardware-validate and enter/write them through whatever
+  that specific unit actually supports.
 
 ## All-pass cookbook (phase only — use sparingly)
 
