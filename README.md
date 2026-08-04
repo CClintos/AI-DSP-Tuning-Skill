@@ -287,7 +287,7 @@ cracking tool:**
   provenance, and what's different from `.afpx` (more channels, less-verified
   filter-type mapping, non-strictly-well-formed XML).
 
-## Beta: Alpine `.jssh` support (a second DSP vendor)
+## Beta: Alpine `.jssh` support - Thanks to Pascal BH!
 
 `scripts/alpine_jssh.py` decodes/encodes Alpine DSP PC-Tool's `.jssh` preset
 format (confirmed on a PXE-X121-12EV) — a **different vendor's** DSP entirely,
