@@ -225,10 +225,12 @@ helix-rew-tuner/
 │   ├── afpx.py                       decode / inspect / channel-detect / write-lint
 │   ├── measure.py                    load REW exports & .mdat, validate axis, targets
 │   ├── pipeline.py                   one deterministic analysis CLI -> one JSON report
-│   └── pct6.py                       BETA, personal-use-only .pct6 decode/encode
+│   ├── pct6.py                       BETA, personal-use-only .pct6 decode/encode
+│   └── alpine_jssh.py                BETA, personal-use-only Alpine .jssh decode/encode
 ├── references/
 │   ├── afpx_format.md                the .afpx binary + filter-code spec
 │   ├── pct6_format.md                the .pct6 container format + BETA caveats
+│   ├── alpine_jssh_format.md         the Alpine .jssh container format + BETA caveats
 │   ├── methodology.md                how to decide what to fix (the doctrine)
 │   └── helix_hardware.md             filter modes, limits, model caveats
 └── assets/
@@ -241,6 +243,7 @@ Every script self-tests standalone, no real measurement/tune files needed:
 python helix-rew-tuner/scripts/tunelib.py    # -> ALL TESTS PASSED
 python helix-rew-tuner/scripts/afpx.py selftest
 python helix-rew-tuner/scripts/pct6.py selftest
+python helix-rew-tuner/scripts/alpine_jssh.py selftest
 python helix-rew-tuner/scripts/pipeline.py selftest
 ```
 
@@ -283,6 +286,32 @@ cracking tool:**
   in full before touching a real `.pct6` file — it covers the container format,
   provenance, and what's different from `.afpx` (more channels, less-verified
   filter-type mapping, non-strictly-well-formed XML).
+
+## Beta: Alpine `.jssh` support (a second DSP vendor)
+
+`scripts/alpine_jssh.py` decodes/encodes Alpine DSP PC-Tool's `.jssh` preset
+format (confirmed on a PXE-X121-12EV) — a **different vendor's** DSP entirely,
+ported from a sibling project's independent reverse-engineering rather than
+built here. Same confidence bar as `.pct6`, **personal/interoperability use
+only:**
+
+- **Confirmed valid JSON** under a position-dependent XOR (`byte_index % 256`,
+  not a short repeating key) — genuinely reverse-engineered, not a guess: the
+  source project verified it against six real captured presets, including one
+  byte-for-byte match against Alpine's own output for an identical change.
+- **Per-field confidence varies** — every getter/setter in `alpine_jssh.py`
+  carries the same `CONFIRMED` / `assumed, not yet isolated` marker the source
+  documented, field by field; some (channel gain, delay, mute, polarity) are
+  byte-perfect confirmed, others (LPF filter type) are inferred from structural
+  symmetry and flagged as such.
+- **Not yet independently re-verified from this Python port against a real
+  file** — run `alpine_jssh.roundtrip_identical()` against your own real
+  `.jssh` before trusting a generated file on real hardware; that's the actual
+  safety check, not the bundled synthetic selftest.
+- Read [`references/alpine_jssh_format.md`](helix-rew-tuner/references/alpine_jssh_format.md)
+  in full before touching a real `.jssh` file — it covers the full field table,
+  the Q lookup table, and a noted open discrepancy between the UI-documented
+  PEQ gain range and the wider range the byte format itself accepts.
 
 ## How it actually works — and why it's not just "EQ to a line"
 
