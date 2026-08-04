@@ -123,6 +123,7 @@ Run these with the user's files; they are the deterministic layer.
   nearest and **reports** the deviation (~0.2 dB typical, 0.44 dB worst) —
   quote that to the user, don't claim the requested Q landed exactly. Read
   `references/alpine_jssh_format.md` before touching a real file.
+  Run `alpine_jssh.preflight_real_file(path)` (CLI: `python alpine_jssh.py preflight <file>`) on the REAL preset BEFORE any write and report its verdict — it checks decode, byte-identical round-trip, channel-block layout and stray floats in byte data. Only `safe_to_write` clears a write. Note it cannot prove the hardware applied a value: after loading a generated preset, have the user read the values back in Alpine's UI.
 
 For anything not covered by a script, write short Python that imports these —
 never hand-guess `.afpx`/`.pct6` bytes or filter codes.

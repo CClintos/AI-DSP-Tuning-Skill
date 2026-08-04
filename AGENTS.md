@@ -105,6 +105,7 @@ Python that imports these.
   rather than claiming the requested Q applied exactly. Run
   `roundtrip_identical(path)` against the real file before any write. Read
   `references/alpine_jssh_format.md` first.
+  Run `alpine_jssh.preflight_real_file(path)` (CLI: `python alpine_jssh.py preflight <file>`) on the REAL preset BEFORE any write and report its verdict — it checks decode, byte-identical round-trip, channel-block layout and stray floats in byte data. Only `safe_to_write` clears a write. Note it cannot prove the hardware applied a value: after loading a generated preset, have the user read the values back in Alpine's UI.
 
 ## Reference files (`helix-rew-tuner/references/`)
 

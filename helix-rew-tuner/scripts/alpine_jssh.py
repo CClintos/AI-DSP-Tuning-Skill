@@ -21,23 +21,41 @@
 # short repeating key like .pct6's XOR_KEY. XOR is symmetric, so one function
 # decodes and encodes.
 #
-# ALWAYS run verify_write() (or at minimum re-decode and eyeball the result)
-# before trusting a generated file on real hardware -- this module refuses to
-# silently guess: decode() raises if the result isn't valid JSON, and
-# verify_write() raises if anything outside the expected fields changed.
+# RUN preflight_real_file() ON A REAL PRESET BEFORE TRUSTING ANY WRITE, and
+# report its verdict. "It decodes and the JSON looks right" is NOT the same
+# bar as "Alpine will accept it". Nothing here silently guesses: decode()
+# raises if the result isn't valid JSON, verify_write() raises if anything
+# outside the expected fields changed, and preflight refuses a file whose
+# channel blocks aren't the expected length.
 #
-# A NOTED OPEN DISCREPANCY, not resolved here: the source project's own
-# README documents Alpine's PEQ gain UI as limited to -12..+12 dB, but the
-# byte-level gain formula/range-check in this module (ported unchanged from
-# the source) accepts -60..+6 dB, matching the *channel* gain field's
-# documented range. Whether the *band* gain field genuinely shares that wider
-# stored range or the UI simply never lets you type past +/-12 hasn't been
-# independently re-verified -- validate_band_gain_db() enforces the wider
-# range as ported; if you want the tighter UI-documented range enforced too,
-# check for it explicitly at the call site rather than assuming this module
-# does.
+# COMPATIBILITY WITH THE REAL ALPINE SOFTWARE -- the three things that make
+# a file Alpine actually accepts, rather than one that merely parses:
+#
+#  1. NUMBER-TEXT PRESERVATION. decode() keeps each number's original source
+#     text (_RawInt/_RawFloat) and encode() emits it verbatim for anything
+#     not modified. This sidesteps a real trap: the ported PowerShell
+#     serializer rewrites integral floats as integers (1.0 -> "1") and
+#     non-integral ones as G17 (0.1 -> "0.10000000000000001"), while stdlib
+#     json.dumps does neither -- so BOTH would silently rewrite parts of a
+#     real file and break byte-identity, making a benign formatting
+#     difference indistinguishable from a real content bug.
+#
+#  2. UI-REPRESENTABLE VALUES. Writing a number Alpine's own UI cannot
+#     express risks the file and the screen disagreeing. PEQ frequencies are
+#     quantized to Alpine's entry resolution (1 Hz below 1 kHz, 10 Hz at or
+#     above -- see quantize_band_freq_hz); band gain is inherently on 0.1 dB
+#     steps via its encoding, and delay on 1/96 ms steps via its own.
+#
+#  3. ALPINE'S LIMITS, NOT HELIX'S. See ALPINE_LIMITS/validate_band. Never
+#     use tunelib.validate_peq_band on an Alpine file, and never leave
+#     tunelib.fit_peq on its Helix-shaped defaults.
+#
+# STILL UNVERIFIED, and only a real file can close it: whether the hardware
+# applies every written value exactly. Accepting a file is not proof the DSP
+# honoured it -- read the values back through the Alpine UI after loading.
 #
 # CLI:
+#   python alpine_jssh.py preflight <file.jssh>  # compatibility gate -- run this first
 #   python alpine_jssh.py inspect <file.jssh>    # channel map + roles (step-1 intake)
 #   python alpine_jssh.py decode <file.jssh>     # writes file.decoded.json
 #   python alpine_jssh.py encode <file.json> <out.jssh>
@@ -128,22 +146,202 @@ def decode(path):
     returns the parsed structure directly rather than a text view -- use
     ordinary dict/list access (see channel_block() etc. below) instead of
     regex parsing."""
-    return json.loads(decode_bytes(path).decode('utf-8'))
+    return json.loads(decode_bytes(path).decode('utf-8'),
+                     parse_int=_RawInt, parse_float=_RawFloat)
+
+
+class _RawInt(int):
+    """An int that remembers exactly how it was written in the source file."""
+
+    def __new__(cls, text):
+        obj = int.__new__(cls, text)
+        obj.raw = text
+        return obj
+
+
+class _RawFloat(float):
+    """A float that remembers exactly how it was written in the source file."""
+
+    def __new__(cls, text):
+        obj = float.__new__(cls, text)
+        obj.raw = text
+        return obj
+
+
+def _alpine_json(value):
+    """Serialize back to Alpine's exact byte representation.
+
+    The core trick is NUMBER-TEXT PRESERVATION, not reproducing Alpine's
+    number formatting rules. decode() parses numbers into _RawInt/_RawFloat,
+    which carry the original text; this emits that text verbatim for any
+    value that was not modified. That makes an unmodified round-trip
+    byte-identical **regardless of how Alpine chooses to format numbers** --
+    no guessing required.
+
+    That matters because guessing was demonstrably unsafe. The ported
+    PowerShell serializer converts integral floats to integers (1.0 -> "1")
+    and non-integral ones to G17 (0.1 -> "0.10000000000000001"); stdlib
+    json.dumps does neither (repr(): "1.0" and "0.1"). Reimplementing either
+    rule CHANGES a file that happens to contain the other form, silently
+    breaking byte-identity -- which is exactly what roundtrip_identical()
+    exists to detect, so a benign formatting difference would become
+    indistinguishable from a real content bug. Preserving the source text
+    sidesteps the entire question.
+
+    Values this module WRITES are plain Python ints (all the byte fields
+    are), which serialize unambiguously as JSON integers; only those change.
+
+    String escaping matches the confirmed reference too: only " \\ \\n \\r \\t
+    get short escapes, any other char below 0x20 becomes \\uXXXX, and
+    everything else is emitted as literal UTF-8. (stdlib additionally emits
+    \\b and \\f short escapes; those are vanishingly unlikely in a DSP preset
+    but would be a divergence, so they are handled the reference way here.)"""
+    if value is None:
+        return 'null'
+    if isinstance(value, bool):            # MUST precede int -- bool subclasses int
+        return 'true' if value else 'false'
+    raw = getattr(value, 'raw', None)      # untouched number -> emit source text verbatim
+    if raw is not None:
+        return raw
+    if isinstance(value, str):
+        out = ['"']
+        for ch in value:
+            if ch == '"':
+                out.append('\\"')
+            elif ch == '\\':
+                out.append('\\\\')
+            elif ch == '\n':
+                out.append('\\n')
+            elif ch == '\r':
+                out.append('\\r')
+            elif ch == '\t':
+                out.append('\\t')
+            elif ord(ch) < 0x20:
+                out.append('\\u%04x' % ord(ch))
+            else:
+                out.append(ch)
+        out.append('"')
+        return ''.join(out)
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value == int(value) and abs(value) < 1e15:
+            return str(int(value))
+        return '%.17G' % value
+    if isinstance(value, dict):
+        return '{' + ','.join('%s:%s' % (_alpine_json(str(k)), _alpine_json(v))
+                              for k, v in value.items()) + '}'
+    if isinstance(value, (list, tuple)):
+        return '[' + ','.join(_alpine_json(v) for v in value) + ']'
+    raise TypeError('_alpine_json: unsupported type %s for value %r'
+                    % (type(value).__name__, value))
+
+
+def find_unverified_constructs(obj, path=''):
+    """INFORMATIONAL scan for float values in a decoded preset.
+
+    Not a blocker: because decode() preserves each number's source text
+    (see _alpine_json), a float that is never modified round-trips
+    byte-identically no matter how Alpine formats it. This exists to
+    surface where floats live at all, since a float in a field this module
+    might WRITE would be re-serialized from its numeric value rather than
+    its source text -- and every field these setters touch is an integer
+    byte, so that should never happen. If this reports a float inside
+    data.output.output, treat it as a genuine surprise worth understanding
+    before writing."""
+    found = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            found.extend(find_unverified_constructs(v, '%s.%s' % (path, k)))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            found.extend(find_unverified_constructs(v, '%s[%d]' % (path, i)))
+    elif isinstance(obj, float) and not isinstance(obj, bool):
+        found.append({'path': path, 'value': float(obj),
+                     'in_channel_data': path.startswith('.data.output.output'),
+                     'reason': 'float value -- round-trips verbatim if untouched, but '
+                               'would be reformatted if this module writes to it'})
+    return found
 
 
 def encode(obj, path):
-    """Parsed Python object -> .jssh. Serializes with compact separators and
-    ensure_ascii=False (non-ASCII left as real UTF-8, not \\u-escaped) --
-    the source project independently confirmed this exact formatting
-    reproduces Alpine's own serializer byte-for-byte for a real file, which
-    is why this uses stdlib json.dumps with those settings rather than a
-    hand-rolled serializer. NOT independently re-verified from this Python
-    port against a real Alpine-produced file -- do that (byte-diff the
-    output of an unmodified read+write against the original) before trusting
-    a generated file on real hardware, same as the source project's own
+    """Parsed Python object -> .jssh, using Alpine's own number/string
+    formatting rules (see _alpine_json). NOT independently re-verified from
+    this Python port against a real Alpine-produced file -- run
+    preflight_real_file() on your own real preset before trusting a
+    generated file on real hardware, exactly as the source project's own
     mandatory round-trip self-test required."""
-    text = json.dumps(obj, separators=(',', ':'), ensure_ascii=False)
-    encode_bytes(text.encode('utf-8'), path)
+    encode_bytes(_alpine_json(obj).encode('utf-8'), path)
+
+
+def preflight_real_file(path):
+    """THE compatibility gate. Run this on a REAL .jssh before trusting any
+    generated file on real hardware, and report its verdict to the user.
+
+    "It decodes and the JSON looks right" is NOT the same as "Alpine will
+    accept it". This checks the things that actually differ between those
+    two bars:
+      1. does it decode at all (valid JSON under the position-XOR)?
+      2. does an UNMODIFIED read+write reproduce the original file
+         byte-for-byte? If not, this port's serializer disagrees with
+         Alpine's somewhere, and every generated file inherits that
+         disagreement.
+      3. does it contain JSON constructs whose Alpine formatting nobody has
+         verified (non-integral floats)?
+      4. does it have the channel structure the field accessors assume?
+
+    Returns a dict including 'verdict' -- 'safe_to_write' only when all
+    checks pass. Anything else means: read the file fine, but do NOT write
+    one back until the cause is understood."""
+    result = {'path': str(path), 'decodes': False, 'byte_identical': False,
+             'unverified_constructs': [], 'channel_count': None,
+             'block_len_ok': None, 'verdict': 'do_not_write', 'reasons': []}
+    try:
+        obj = decode(path)
+    except Exception as e:
+        result['reasons'].append('does not decode: %s' % e)
+        return result
+    result['decodes'] = True
+
+    rt = roundtrip_identical(path)
+    result['byte_identical'] = rt['byte_identical']
+    result['source_len'] = rt['source_len']
+    result['output_len'] = rt['output_len']
+    if not rt['byte_identical']:
+        result['reasons'].append(
+            'unmodified read+write is NOT byte-identical (%d -> %d bytes). This port\'s '
+            'serializer disagrees with Alpine\'s somewhere; any generated file inherits '
+            'that difference. Do not write until this is understood.'
+            % (rt['source_len'], rt['output_len']))
+
+    # Informational unless a float sits in the channel data this module
+    # writes to -- an untouched float round-trips verbatim, but one inside a
+    # byte block would be reformatted by a write and is a real surprise.
+    result['unverified_constructs'] = find_unverified_constructs(obj)
+    in_ch = [c for c in result['unverified_constructs'] if c['in_channel_data']]
+    if in_ch:
+        result['reasons'].append(
+            '%d float(s) found INSIDE data.output.output (e.g. %s) -- the byte fields are '
+            'expected to be integers; writing near these could reformat them.'
+            % (len(in_ch), in_ch[0]['path']))
+
+    try:
+        blocks = obj['data']['output']['output']
+        result['channel_count'] = len(blocks)
+        bad = [i for i, b in enumerate(blocks) if len(b) != CHANNEL_BLOCK_LEN]
+        result['block_len_ok'] = not bad
+        if bad:
+            result['reasons'].append(
+                'channel block(s) %s are not %d values long -- the field offsets in this '
+                'module assume that layout and would write to the wrong place.'
+                % (bad, CHANNEL_BLOCK_LEN))
+    except (KeyError, TypeError) as e:
+        result['reasons'].append('missing expected data.output.output structure: %s' % e)
+        result['block_len_ok'] = False
+
+    if result['decodes'] and result['byte_identical'] and not result['reasons']:
+        result['verdict'] = 'safe_to_write'
+    return result
 
 
 def roundtrip_identical(path):
@@ -465,6 +663,22 @@ def set_band_q(obj, channel_index, band, q, snap=False):
     return PEQ_Q_TABLE[matched]
 
 
+def quantize_band_freq_hz(hz):
+    """Snap a PEQ frequency to a value Alpine's UI can actually represent:
+    1 Hz steps below 1000 Hz, 10 Hz steps at/above it.
+
+    Source: the same author's separate, real-hardware-tested Alpine entry
+    tool uses exactly this rule to produce "values you can actually type
+    into the Alpine". Writing an unrepresentable frequency (e.g. 1997 Hz)
+    into the FILE risks the file and the UI disagreeing -- Alpine may
+    display or re-save a snapped value while the stored byte says otherwise,
+    which is the kind of silent mismatch that makes a verified write
+    meaningless. The acoustic cost of quantizing is nil: 10 Hz at 2 kHz is
+    0.5%, well under a hundredth of a semitone."""
+    hz = float(hz)
+    return int(round(hz)) if hz < 1000 else int(round(hz / 10.0) * 10)
+
+
 def validate_band(freq_hz, q, gain_db):
     """Enforce ALPINE's PEQ limits (not Helix's -- see ALPINE_LIMITS). Checks
     the DSP's own documented ranges, plus that Q is actually writable by this
@@ -487,7 +701,8 @@ def validate_band(freq_hz, q, gain_db):
     return True
 
 
-def write_peq_bands(obj, channel_index, bands, snap=True, clear_remaining=True):
+def write_peq_bands(obj, channel_index, bands, snap=True, clear_remaining=True,
+                    quantize_freq=True):
     """Write a full computed filter set (the shape tunelib.fit_peq returns:
     a list of (F, Q, G)) into a channel, validating every band against
     ALPINE's limits first and reporting exactly what was written.
@@ -513,8 +728,9 @@ def write_peq_bands(obj, channel_index, bands, snap=True, clear_remaining=True):
         q_target = Q
         if snap:
             _code, q_target, _ratio = snap_q(Q)     # raises if outside writable range
-        validate_band(F, q_target, G)
-        prepared.append((F, Q, q_target, G))
+        f_target = quantize_band_freq_hz(F) if quantize_freq else int(round(F))
+        validate_band(f_target, q_target, G)
+        prepared.append((f_target, Q, q_target, G))
 
     written, worst_ratio, snapped = [], 1.0, 0
     for i, (F, Q_req, Q_use, G) in enumerate(prepared, start=1):
@@ -884,6 +1100,91 @@ def _selftest():
         assert chans[0]['free_band_count'] == N_PEQ_BANDS - 1
         assert format_channels(chans), 'format_channels produced no output'
 
+        # ---- Alpine-exact serialization (the "will Alpine accept it" bar) ---
+        # Integral floats must emit as integers the way Alpine writes them --
+        # stdlib json.dumps would emit "1.0" here and silently break
+        # byte-identity against a real Alpine-produced file.
+        assert _alpine_json(1.0) == '1', 'integral float must serialize as an integer'
+        assert _alpine_json(100.0) == '100'
+        assert _alpine_json(True) == 'true' and _alpine_json(False) == 'false'
+        assert _alpine_json(1) == '1', 'bool/int ordering bug (bool subclasses int)'
+        assert _alpine_json(None) == 'null'
+        assert _alpine_json({'a': [1, 2]}) == '{"a":[1,2]}', 'must be compact, no spaces'
+        assert _alpine_json('café') == '"café"', 'non-ASCII must stay literal UTF-8'
+        assert _alpine_json('a"b\\c\nd') == '"a\\"b\\\\c\\nd"'
+        assert _alpine_json('\x08') == '"\\u0008"', 'control chars use \\uXXXX, not \\b'
+        assert json.loads(_alpine_json({'x': [1, 2.5, 'y', None, True]})) == \
+            {'x': [1, 2.5, 'y', None, True]}, 'output must still be valid, faithful JSON'
+
+        # the float scanner locates floats and flags whether they sit in
+        # channel byte data (the only place they'd actually be a problem)
+        assert find_unverified_constructs({'a': {'b': 0.1}})[0]['path'] == '.a.b'
+        assert find_unverified_constructs({'a': 1, 'c': 'x'}) == [], 'ints/strings are not floats'
+        assert find_unverified_constructs(
+            {'data': {'output': {'output': [[1.5]]}}})[0]['in_channel_data'] is True
+
+        # ---- NUMBER-TEXT PRESERVATION: the real compatibility guarantee ----
+        # An unmodified round-trip must be byte-identical no matter HOW Alpine
+        # formats numbers -- covering both forms the two candidate serializer
+        # rules disagree on (integral 1.0 and non-integral 0.1). Reimplementing
+        # either rule would rewrite one of these and silently break byte-identity.
+        _blk = json.dumps([0] * CHANNEL_BLOCK_LEN, separators=(',', ':'))
+        for literal in ('1.0', '0.1', '1', '1e3', '100.0', '-0.0'):
+            src = ('{"data":{"output":{"output":[%s]}},"data_info":{"v":%s}}'
+                   % (_blk, literal))
+            tp = Path('_alpine_jssh_numfmt.jssh')
+            tp.write_bytes(_xor_by_position(src.encode('utf-8')))
+            assert roundtrip_identical(tp)['byte_identical'], \
+                'unmodified round-trip must preserve the literal %s exactly' % literal
+            assert preflight_real_file(tp)['verdict'] == 'safe_to_write', \
+                'a file containing %s should still pass preflight' % literal
+            tp.unlink(missing_ok=True)
+        # ...and a MODIFIED file must change only the intended bytes
+        src = '{"data":{"output":{"output":[%s]}},"data_info":{"v":1.0}}' % json.dumps(
+            [0] * CHANNEL_BLOCK_LEN, separators=(',', ':'))
+        tp = Path('_alpine_jssh_numfmt.jssh')
+        tp.write_bytes(_xor_by_position(src.encode('utf-8')))
+        mod = decode(tp)
+        set_channel_hpf_hz(mod, 0, 3000)
+        outp = Path('_alpine_jssh_numfmt_out.jssh')
+        encode(mod, outp)
+        verify_write(tp, outp, expected_channel_indices=[0], expected_byte_offsets=[256, 257])
+        assert b'"v":1.0' in _xor_by_position(outp.read_bytes()), \
+            'an untouched 1.0 elsewhere in the file must survive a write verbatim'
+        tp.unlink(missing_ok=True); outp.unlink(missing_ok=True)
+
+        # ---- frequency quantization to what Alpine can represent -----------
+        assert quantize_band_freq_hz(1997) == 2000, '>=1kHz snaps to 10 Hz steps'
+        assert quantize_band_freq_hz(1994) == 1990
+        assert quantize_band_freq_hz(432.4) == 432, '<1kHz keeps 1 Hz steps'
+        qb = _make_synthetic_preset()
+        qres = write_peq_bands(qb, 0, [(1997.0, 1.0, -3.0)], snap=True)
+        assert get_band_frequency_hz(qb, 0, 1) == 2000, \
+            'write_peq_bands must store an Alpine-representable frequency'
+        assert qres['written'][0][0] == 2000, 'reported freq must be what was stored'
+
+        # ---- preflight gate on a well-formed synthetic file ----------------
+        pf_path = Path('_alpine_jssh_preflight.jssh')
+        encode(_make_synthetic_preset(n_channels=2), pf_path)
+        pf = preflight_real_file(pf_path)
+        assert pf['decodes'] and pf['byte_identical'], 'clean file must round-trip'
+        assert pf['channel_count'] == 2 and pf['block_len_ok']
+        assert pf['verdict'] == 'safe_to_write', 'clean file should pass preflight'
+        # a float inside the channel byte data IS a real surprise and must block
+        bad = '{"data":{"output":{"output":[[1.5%s]]}},"data_info":{}}' % (',0' * (CHANNEL_BLOCK_LEN - 1))
+        pf_path.write_bytes(_xor_by_position(bad.encode('utf-8')))
+        pf3 = preflight_real_file(pf_path)
+        assert pf3['unverified_constructs'][0]['in_channel_data'] is True
+        assert pf3['verdict'] == 'do_not_write', \
+            'a float inside channel byte data must block the write verdict'
+        # a malformed block length must also block (offsets would write blind)
+        short = '{"data":{"output":{"output":[[0,1,2]]}},"data_info":{}}'
+        pf_path.write_bytes(_xor_by_position(short.encode('utf-8')))
+        pf4 = preflight_real_file(pf_path)
+        assert pf4['block_len_ok'] is False and pf4['verdict'] == 'do_not_write', \
+            'a wrong-length channel block must block the write verdict'
+        pf_path.unlink(missing_ok=True)
+
         print('SELFTEST PASSED (synthetic schema only -- verify against a real .jssh file too: '
               'roundtrip_identical(real_file) should report byte_identical=True)')
     finally:
@@ -892,12 +1193,23 @@ def _selftest():
 
 def _main():
     if len(sys.argv) < 2:
-        print('usage: python alpine_jssh.py {inspect <file.jssh> | decode <file.jssh> '
-              '| encode <file.json> <out.jssh> | selftest}')
+        print('usage: python alpine_jssh.py {preflight <file.jssh> | inspect <file.jssh> '
+              '| decode <file.jssh> | encode <file.json> <out.jssh> | selftest}')
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd == 'selftest':
         _selftest()
+    elif cmd == 'preflight':
+        r = preflight_real_file(sys.argv[2])
+        print('decodes:          %s' % r['decodes'])
+        print('byte-identical:   %s' % r['byte_identical'])
+        print('channels:         %s (block length OK: %s)' % (r['channel_count'], r['block_len_ok']))
+        print('unverified JSON:  %d construct(s)' % len(r['unverified_constructs']))
+        print('VERDICT:          %s' % r['verdict'].upper())
+        for reason in r['reasons']:
+            print('  - %s' % reason)
+        if r['verdict'] != 'safe_to_write':
+            sys.exit(2)
     elif cmd == 'inspect':
         obj = decode(sys.argv[2])
         chans = channels(obj)
