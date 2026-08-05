@@ -123,6 +123,14 @@ Run these with the user's files; they are the deterministic layer.
   nearest and **reports** the deviation (~0.2 dB typical, 0.44 dB worst) —
   quote that to the user, don't claim the requested Q landed exactly. Read
   `references/alpine_jssh_format.md` before touching a real file.
+  **Do NOT write channel gain on the PXE-X121-12EV** — the stored field and
+  PC-Tool's own Gain slider disagree on a real unit (−24.00 dB stored vs 9
+  shown) and the mapping is unexplained; see `alpine_jssh_format.md`. Band gain
+  is unaffected. Also: most real bands carry a Q code outside the writable
+  13-value table (`get_band_q` → `None`), so **to keep some bands and disable
+  others, zero the unwanted ones with `set_band_gain_db(...,0.0)` rather than
+  rebuilding the channel with `write_peq_bands`** — the latter rewrites every
+  band and snaps the Q of ones you meant to preserve.
   Run `alpine_jssh.preflight_real_file(path)` (CLI: `python alpine_jssh.py preflight <file>`) on the REAL preset BEFORE any write and report its verdict — it checks decode, byte-identical round-trip, channel-block layout and stray floats in byte data. Only `safe_to_write` clears a write. Note it cannot prove the hardware applied a value: after loading a generated preset, have the user read the values back in Alpine's UI.
 
 For anything not covered by a script, write short Python that imports these —

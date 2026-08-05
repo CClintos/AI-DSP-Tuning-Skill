@@ -236,6 +236,49 @@ this too. After loading a generated preset, read the values back through
 Alpine's own UI before trusting them. That is the one remaining gap no
 amount of file-level verification can close.
 
+## Unresolved: the channel-gain field does not match the UI slider
+
+On a real PXE-X121-12EV (2026-08-05), `get_channel_gain_db` read **−24.00 dB**
+for CH11/CH12 while DSP PC-Tool's own Channel-settings `Gain` control for the
+same channel displayed **9**. Both were read from the same preset in the same
+session, so one of these is true: the field at 250–251 is not what the UI slider
+writes, the slider uses a different scale/offset, or that control is a separate
+parameter stored elsewhere in the block (offsets 264–295 are still unmapped).
+
+**Do not write channel gain on this platform until this is resolved.** Every
+other field in the table above was confirmed by diffing real files against known
+PC-Tool actions; this one has a live contradiction against the UI and no
+explanation. Band gain is unaffected — it uses the same encoding but was
+confirmed independently and byte-perfectly.
+
+Two related observations from the same unit, useful if you pick this up:
+- The slider is **linear in dB and finely stepped**: measured acoustically at
+  **1.03 dB per step** (slider 8 → 14 produced 6.16 dB over 25–80 Hz). So it
+  behaves like a gain control; it just doesn't obviously map to the stored bytes.
+- Some units expose a **2 Ω parallel mode** that merges CH11+CH12 into a single
+  CH11 output. Where that's active, a solo capture of CH11 is the full output,
+  not half — and CH12's stored settings may be ignored by the hardware. Worth
+  asking the user rather than inferring from the file, which looks identical
+  either way.
+
+## The 13 writable Q values are narrower than the UI's own range
+
+`get_band_q` returning `None` is not a bug and not rare — real presets are full
+of Q codes outside the 13-entry table. On one real tune roughly 70% of stored
+bands read back as `Q: None` (observed values from the UI included 1.714, 1.736,
+1.955, 2.041, 2.560, 3.193, 4.966, 7.208 — none in the table). Frequency and
+gain still decode correctly for those bands.
+
+Two practical consequences:
+- **You cannot faithfully rewrite a band whose Q isn't in the table.** Writing it
+  back snaps the Q to a neighbour, silently changing a filter you meant to
+  preserve. If the intent is to keep some bands and clear others, **edit only the
+  bands you're changing** (`set_band_gain_db(obj, ch, band, 0.0)` on the ones to
+  disable) rather than rebuilding the channel with `write_peq_bands`, which
+  rewrites every band including the ones you wanted untouched.
+- When reporting an existing tune to a user, say which bands' Q you could not
+  read rather than presenting the readable subset as the whole picture.
+
 ## A trap worth knowing: zero bytes are not a neutral preset
 
 Both gain fields encode as `stored = round((dB+60)*10)`, so a **zero** byte

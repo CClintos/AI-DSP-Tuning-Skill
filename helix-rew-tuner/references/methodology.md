@@ -12,20 +12,23 @@ to the section you need instead of reading it whole)
 - Beyond magnitude — decay (time-domain) and distortion axes — line 149
 - Deviation analysis — line 229
 - Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 269
-- When the answer is physical, not electrical — line 460
-- Voicing — the most audible decision — line 534
-- Classify the problem (the core skill) — line 565
-  - The interference audit — line 584
-  - Two checks before trusting a proposed EQ band — line 592
-  - Minimum-phase / EQ-ability — line 613
-  - Quantify single-position phase reliability — line 620
-  - Multi-position variance — line 660
-- The crossover action-ladder — line 698
-- Shelf cookbook — line 759
-- All-pass cookbook — line 772
-- Imaging — line 815
-- Restraint — line 858
-- Verification & honesty — line 887
+  - Traps from the Alpine session: null-averaging read as level, judging
+    inherited EQ, flat interference offsets, MMM level comparability,
+    fractional-octave smearing, zero-band fits, crossover skirts — line 460
+- When the answer is physical, not electrical — line 539
+- Voicing — the most audible decision — line 613
+- Classify the problem (the core skill) — line 644
+  - The interference audit — line 663
+  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 671
+  - Minimum-phase / EQ-ability — line 704
+  - Quantify single-position phase reliability — line 711
+  - Multi-position variance — line 751
+- The crossover action-ladder — line 789
+- Shelf cookbook (incl. judging a shelf emulation) — line 850
+- All-pass cookbook — line 883
+- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 926
+- Restraint — line 1017
+- Verification & honesty — line 1046
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -457,6 +460,85 @@ discipline `predicted_vs_measured`'s `consistent_db` tolerance already applies t
 the predict-vs-remeasure comparison — crude and directional on purpose, not a
 precision instrument.
 
+### Traps caught on an Alpine PXE-X121-12EV session (2026-08-05)
+
+Six more, all from one session, all of which produced confident wrong answers
+before being caught. Grouped because they share a root cause: **a summary
+statistic hid the shape of the thing being summarised.**
+
+**Band-averaging a deviation across a modal null reads as a LEVEL DEFICIT.**
+The most expensive error of that session. A subwoofer's deviation averaged over
+25–40 Hz and 40–63 Hz came out −3.3 and −5.1 dB, which reads unambiguously as
+"this sub is 5 dB short — raise the gain, and the existing cuts are why it's
+short." Point-by-point, the same response was **+9.2 dB at 32 Hz and +5.6 dB at
+53 Hz** with deep nulls at 28 and 44 Hz dragging the averages down. The sub was
+never short on level; it was peaky, and the inherited filters sitting on those
+peaks were doing exactly the right job. Acting on the averaged read meant
+proposing to delete filters that were *improving* in-band RMS by 1.2 dB.
+**Before concluding "level" from any band-averaged deviation, look at the
+point-by-point deviation inside that band.** If it alternates sign by more than
+a few dB, it is modal ripple and the average is meaningless — averaging across
+a null is arithmetic, not acoustics. Level errors move a whole region the same
+direction; ripple does not.
+
+**Judging inherited EQ: check every band against the RAW response before
+removing it.** Corollary of the above, and the mechanism that made it costly. A
+tune carrying obvious junk (bands outside their own channel's passband,
+duplicated bands, +6/−11 dB pairs a few Hz apart) invites the conclusion that
+the whole set is junk. It usually isn't: the junk and the real corrections sit
+in the same list. Reconstruct the raw (pre-EQ) response — either measured with
+EQ bypassed, or by mathematically removing the known filters — and check each
+band against it individually. In that session 3 of 11 sub bands were doing real
+work on real modal peaks and 8 were inert; a blanket clear got the 8 right and
+the 3 badly wrong. **Where the user has captured the same channel both with and
+without its EQ, use that instead of any model — it is the only comparison free
+of your own filter arithmetic.**
+
+**A CONSTANT offset across the whole band in `interference_audit` is a level
+mismatch between captures, not interference.** Real destructive summation is
+frequency-dependent — it combs, swinging several dB across an octave. A flat
+−6 dB (std 0.36 dB across 3.3 octaves) is a capture-level difference, and the
+giveaway is arithmetic: the "pair" trace measuring *quieter than either solo
+alone* is physically impossible for any summation. Check the spread of
+`interference_db` before interpreting its sign; a low standard deviation across
+a wide band invalidates the audit rather than reporting a problem.
+
+**Separate MMM captures are not reliably level-comparable.** MMM level depends
+on traverse path, speed and volume, so two MMM runs of different drivers can
+differ by several dB for no acoustic reason. This breaks anything that compares
+absolute levels *across* captures — `interference_audit` above all, which needs
+solos and their pair on a common scale. Comparisons *within* a single capture,
+and shape comparisons after level-normalising, remain valid. Plan for it at
+capture time: if solos and pairs are both wanted, capture them at the same
+master volume in one sitting.
+
+**Fractional-octave summaries misplace narrow features — locate at full
+resolution before placing a mask or a filter.** A 1/3-octave view put a
+midrange null at "1600 Hz" and invented a dip at "12.7 kHz". At full resolution
+the null was at **1908 Hz** and the 12.7 kHz dip did not exist — it was the
+1/3-octave bin smearing in the rolloff above 13 kHz. Both errors then propagated:
+the mask went in the wrong place, and `fit_peq` was handed a fit region still
+containing a −12 dB null it could not fix. **Use fractional-octave views to
+notice that something is there; use the full-resolution trace to decide where
+it is.**
+
+**`fit_peq` returning ZERO bands on an obviously-wrong channel means your mask
+or fit band is wrong — not that the thresholds need loosening.** Twice in one
+session. Once because an unmasked −12 dB null dominated the error so no cut
+could clear the improvement gate; once because the fit band included the
+crossover skirt. The parsimony gate is doing its job in both cases. The correct
+response is to fix the region you handed it, then re-fit. **Never respond by
+lowering `improve_pct` or `min_gain` to force an answer out** — that converts a
+diagnosable input error into filters nobody can justify.
+
+**Never include a crossover skirt in a fit band.** Given 22–80 Hz on a channel
+low-passed at 60 Hz, `fit_peq` (boosts allowed) returned **four identical +4 dB
+bands stacked at 76 Hz** — 16 dB of boost trying to undo the low-pass, because
+the skirt reads as deviation-from-target like anything else. Fit only over the
+range where that driver is the dominant contributor, well inside its own
+passband. An output that stacks multiple same-frequency bands is the signature
+of this error and should never be written.
+
 ## When the answer is physical, not electrical
 
 Some deviations are the install talking, not the tune. EQ can only change what
@@ -598,6 +680,18 @@ dominant_db)` flags a band as **inert** when the target driver sits ~6 dB or mor
 below whichever driver dominates the summed response there — a cut or boost on a
 buried driver changes that driver's own curve but barely moves the audible result,
 because the dominant driver's contribution swamps it.
+
+**"Outside the passband" does NOT mean "contributes nothing" — check the
+skirt.** A band centred beyond a channel's own crossover still has skirts that
+reach back inside it, and dismissing such bands wholesale is as wrong as
+trusting them. Evaluate the combined magnitude response of the out-of-band
+bands *at frequencies inside the passband* and read the actual numbers. A real
+case (2026-08-05): of seven out-of-band bands on a 400–4000 Hz channel, six
+contributed under 0.05 dB anywhere in the passband — genuinely inert — while
+the seventh (`4800 Hz Q4.966 −8.0 dB`, just above the 4 kHz corner) reached
+**−1.95 dB at 4000 Hz**. Report the ones that do something and the ones that
+don't as separate findings; "N bands lie outside the passband" is a lead, not a
+conclusion.
 
 **Does the boost actually reach target, or is the gap being papered over?** If a
 large proposed boost still leaves the trace far short of the deficit at that
@@ -776,6 +870,18 @@ the plateau.
   returns plain F/Q/G numbers only; it does not know or assume anything about that
   DSP's file format, so hardware-validate and enter/write them through whatever
   that specific unit actually supports.
+- **Judging someone else's shelf emulation: check the Q values first.** A shelf
+  is a plateau; peaking filters only build one if their skirts overlap, which
+  needs **low Q (~0.5–0.7)** and placement *inside* the passband. Bands at
+  Q 1.7–7.2 sitting outside the crossover cannot make a shelf no matter how many
+  there are — each is a narrow bump on a signal the crossover is already
+  attenuating. A real case (2026-08-05): seven such bands, offered as a
+  "high shelf / low shelf emulation", summed to a **skirt** rising to −1.95 dB
+  only in the last half-octave before the crossover, and under 0.05 dB
+  everywhere else. The intent was sound (that DSP has no native shelf type);
+  the execution could not work. Diagnose it by evaluating the bands' combined
+  response inside the passband and comparing it to what an actual shelf would
+  do — flat past the hinge — rather than by counting bands.
 
 ## All-pass cookbook (phase only — use sparingly)
 
@@ -821,6 +927,54 @@ when the defect is phase (a summation null), never a magnitude bump.
   **different** F/Q per side and does carry real interaural GD risk (above).
 
 ## Imaging
+
+**Level is a poor proxy for distance — timing is the definitive one.** It is
+tempting to infer "which speaker is nearer the measured seat" from which side
+measures louder, and it is unreliable, because measured level is confounded by
+at least three things at once: the channels' own gain settings (measurements
+taken through a tune include them — subtract them before comparing), driver
+aiming/directivity (in a car the *far* tweeter often fires more on-axis across
+the cabin and can measure louder than the near one), and driver-to-driver
+variation. A real case (2026-08-05): raw measured level said "right is nearer"
+on two pairs and "left is nearer" on the other two, while arrival time said
+"right is farther" consistently on all four. **When level and timing disagree
+about geometry, timing wins.** Level asymmetry is still worth reporting — as an
+imaging problem to solve — just never as evidence of which speaker is closer.
+
+**Was the tune's own delay active during the capture? Test it, don't assume —
+sign-coherence across pairs settles it.** Arrival times measured through a DSP
+that is already applying delay are not acoustic flight times, and the two
+interpretations lead to opposite conclusions about seat and wiring. Compute the
+L/R arrival difference for every driver pair under both hypotheses (raw
+arrivals, and arrivals minus the preset's stored delays). **One microphone
+cannot be in two places: the correct hypothesis gives the same side farther on
+every pair.** In a real case, "delays bypassed" gave right-farther by 31–74 cm
+on all four pairs while "delays active" gave left-farther by 3–7 cm on two
+pairs and right-farther by 23–35 cm on the other two — incoherent, therefore
+wrong. A further sanity check on the surviving hypothesis: the L/R differences
+should track mounting geometry, growing as drivers sit further outboard
+(dash mids 32 cm < sail tweeters 44 cm < rears 48 cm < door midbass 74 cm is
+what a real driver's-seat capture looks like).
+
+**Within-pair L/R timing is immune to crossover group delay — cross-driver
+timing is not.** Both channels of a driver pair pass through identical
+crossovers, so any group delay they add cancels in the L-vs-R *difference*.
+That makes the L/R split usable even from captures taken with crossovers
+bypassed or with a protective filter in place, which is often the only data
+available. The same capture tells you nothing reliable about tweeter-vs-midbass
+alignment, where the crossovers' group delay is precisely what you'd be
+measuring. **A safe partial correction follows from this: fix each pair's L/R
+split while preserving that pair's MEAN delay**, which leaves every
+cross-driver relationship exactly where it was and changes only the thing the
+data supports.
+
+**Low-frequency arrival estimates inflate — cross-check before writing one.**
+A driver's own rolloff plus cabin effects push REW's delay estimate long at LF;
+in one case a door midbass roughly 0.7 m away reported 2.80 m and 3.54 m paths.
+A physically impossible distance is the cheap tell. Run `estimate_delay_xcorr`
+as an independent check and compare: agreement to a few hundredths of a ms with
+`reliable` set is writable; a 2.5 ms disagreement with `confidence_ratio` near 1
+is not, and no amount of wanting the number changes that.
 
 The near/dominant speaker (louder, closer to the measured seat) anchors
 localization. Broad level-match the two sides in the image band (~500 Hz–8 kHz,
