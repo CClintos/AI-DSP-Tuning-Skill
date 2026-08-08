@@ -1040,6 +1040,32 @@ def polarity_delay_search(freqs, driver_a, driver_b, band, max_delay_ms=1.5,
     do -- apply +|delay| to the OTHER branch instead (keep its pair's internal
     offsets intact), exactly like the doc's negative-delay TA rule.
 
+    ⚠️ NARROW `damage_band` WHEN driver_a/driver_b ISN'T FULL-RANGE ON BOTH SIDES
+    (a sub vs. a mid/full-range channel, in particular) -- the default
+    (60, 16000) Hz assumes both inputs plausibly have real signal across most
+    of that span. A driver low-passed well below the top of that range (a
+    sub) is measurement noise, not signal, for most of it -- and CONFIRMED
+    on two independent real sessions (2026-08-08), that noise floor can sit
+    within a few dB of the *other* driver's own level at those frequencies
+    (e.g. a directly-measured sub read +4 to +10 dB "louder" than the mids at
+    6-12 kHz -- pure noise floor, the sub has no real output there). The
+    `damage` term scores ANY change to driver_b against the ORIGINAL sum
+    across the whole damage_band, so shifting delay rotates that noise's
+    phase arbitrarily and reads as broadband "damage" dozens of dB in excess
+    of any real in-band gain -- which silently locks `delay_ms_B` at 0.000 /
+    `improvement_pct` at 0.0%, even when a real, small, correctly-signed gain
+    exists in `band`. Confirmed on real data: default `damage_band` reported
+    "nothing to gain" on a sub/mid pair (score_after == score_before exactly)
+    on BOTH a directly-measured sub and an independently-recovered one (see
+    the N=L+R/V=L-R decomposition note below); narrowing `damage_band` to the
+    sub's real electrical passband (20-200 Hz here) on the SAME two datasets
+    converged on delay_ms_B = +0.6 ms and +0.438 ms respectively (28% and 28%
+    improvement) -- close agreement, and the number that actually held up
+    under a real A/B measurement afterward. **Match `damage_band` to the
+    frequency span where BOTH inputs genuinely have signal, not the default,
+    whenever either one is a low-passed or otherwise band-limited driver** --
+    otherwise a real small win can read as "already optimal."
+
     cross_check=True (default) also runs estimate_delay_xcorr as an
     independent second opinion and reports agreement -- large disagreement
     between the grid search and the cross-correlation estimate means the
