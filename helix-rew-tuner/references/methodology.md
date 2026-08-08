@@ -7,33 +7,34 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 38
-- Sweep capture setup — line 110
-- Beyond magnitude — decay (time-domain) and distortion axes — line 157
-- Deviation analysis — line 237
-- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 277
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 39
+- Sweep capture setup — line 111
+- Beyond magnitude — decay (time-domain) and distortion axes — line 158
+- Deviation analysis — line 238
+- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 278
   - Traps from the Alpine session: null-averaging read as level, judging
     inherited EQ, flat interference offsets, MMM level comparability,
-    fractional-octave smearing, zero-band fits, crossover skirts — line 468
-- When the answer is physical, not electrical — line 547
-- Voicing — the most audible decision — line 621
-- Classify the problem (the core skill) — line 652
-  - The interference audit — line 671
-  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 679
-  - Minimum-phase / EQ-ability — line 712
-  - Quantify single-position phase reliability — line 719
-  - Multi-position variance — line 759
-- The crossover action-ladder — line 797
-- Shelf cookbook (incl. judging a shelf emulation) — line 858
-- All-pass cookbook — line 891
-- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 934
-- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1025
-- Verification & honesty — line 1083
-- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1141
-- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1172
-- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1202
-- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1238
-- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1265
+    fractional-octave smearing, zero-band fits, crossover skirts — line 469
+- When the answer is physical, not electrical — line 548
+- Voicing — the most audible decision — line 622
+- Classify the problem (the core skill) — line 653
+  - The interference audit — line 672
+  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 680
+  - Minimum-phase / EQ-ability — line 713
+  - Quantify single-position phase reliability — line 720
+  - Multi-position variance — line 760
+- The crossover action-ladder — line 798
+- Shelf cookbook (incl. judging a shelf emulation) — line 859
+- All-pass cookbook — line 892
+- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 935
+- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1026
+- Verification & honesty — line 1084
+- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1142
+- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1173
+- When a candidate-finder says "nothing to gain," check for a noise-vs-signal scoring mismatch — line 1215
+- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1256
+- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1292
+- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1319
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -1198,6 +1199,59 @@ Useful when solo captures weren't taken, when re-measuring solos would cost
 too much session time, or — as in the imbalance case below — as a
 cross-check that builds multi-session confidence in a finding alongside
 directly-measured solos.
+
+**Validate OUTSIDE the recovered channel's expected passband too, not just
+inside it.** A recovered low-passed driver (a sub, from an N/V decomposition)
+can carry substantial spurious energy far above its real crossover — the two
+source captures' shared noise floor doesn't fully cancel in the subtraction,
+and dividing by 2 can still leave a "signal" within a few dB of whatever
+else you're comparing it against. On a real project this showed up as a
+recovered sub reading nearly as loud as the mids at 6–19 kHz, a decade above
+its LR24 low-pass — obviously not real, but only obvious once someone
+printed the level there. See the next section for the real downstream damage
+this specific artifact can do to a candidate-finder function that isn't
+expecting it.
+
+## When a candidate-finder function says "nothing to gain," check whether it's reacting to noise, not signal
+
+`tunelib.polarity_delay_search`'s default `damage_band=(60, 16000)` Hz is a
+sensible safety net for a genuine full-range vs. full-range comparison (mid
+vs. tweeter): it penalizes any candidate delay that makes the ORIGINAL summed
+response worse anywhere across that whole span, not just inside the band
+being optimized. That safety net actively misfires when one input is a
+low-passed driver (a sub) being compared against a full-range partner — most
+of that 60–16000 Hz span is pure measurement noise floor for the sub, not
+signal, and rotating a delay scrambles that noise's phase just as readily as
+it would real content. The `damage` term can't tell the difference.
+
+**Real case (2026-08-08), confirmed on two independent sessions and
+reproduced exactly from the function's own scoring internals:**
+`polarity_delay_search` on a sub/mids pair, target band 40–140 Hz, reported
+`delay_ms_B: 0.0, improvement_pct: 0.0` — read at face value, "sub timing
+is already optimal, nothing to gain." Splitting the function's own score into
+its two summed terms showed the in-band `gap` component *did* fall
+substantially moving away from 0 ms (0.729 → 0.336 around +0.875 ms) — a real
+candidate improvement existed. But the full-range `damage` term swung from
+0.000 to ~2.7 over the same move, swamping it completely. Tracing where that
+damage came from: at 6–19 kHz the sub input carried energy within a few dB of
+the mids' own level — pure noise floor (confirmed on BOTH a directly-measured
+sub solo AND an independently N/V-recovered one, so it isn't a decomposition
+artifact specifically, just a property of a band-limited driver's capture in
+general). Re-running with `damage_band` narrowed to the sub's real electrical
+passband (20–200 Hz) on the SAME two datasets converged cleanly:
+`delay_ms_B = +0.6 ms` (session 1, directly measured) and `+0.438 ms`
+(session 3, N/V-recovered) — 28% improvement both times, close numerical
+agreement between two independently-captured datasets, and the number that
+went on to be confirmed by a real A/B measurement in the car afterward.
+
+**Rule: before accepting a candidate-finder's "no improvement here" verdict —
+especially `improvement_pct` landing suspiciously exactly at 0.0 — check
+whether any scoring band it uses (here, `damage_band`) extends beyond where
+the driver actually being adjusted has real signal.** If it does, narrow that
+band to the driver's genuine passband and re-run before concluding there's
+nothing there. A candidate-finder returning "nothing to gain" is not itself
+evidence of that — it's evidence the SCORE didn't move, and the score can
+fail to move for reasons that have nothing to do with the acoustics.
 
 ## Bracket every A/B write A→B→B→A, and anchor on a band the write structurally cannot touch
 
