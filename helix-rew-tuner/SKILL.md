@@ -51,6 +51,7 @@ Run these with the user's files; they are the deterministic layer.
   | `interference_audit` | real dip vs. destructive summation | §The interference audit |
   | `crossover_confidence` | one band-limited crossover go/no-go | §The crossover action-ladder |
   | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | §The crossover action-ladder |
+  | `delay_sweep`, `overlap_weighted_delay_gain` | in-band-only delay search (run alongside `polarity_delay_search` whenever either driver is band-limited — its damage-band safety net can hide a real gain there); maximin across multiple sessions; flags cycle-ambiguous results | §When `polarity_delay_search` says "nothing to gain" |
   | `spatial_consistency`, `complex_vector_average` | multi-position averaging | §Multi-position variance |
   | `phase_linearity_residual` | single-position phase reliability | §Quantify single-position phase reliability |
   | `excess_gd_mask` | minimum-phase / EQ-ability classifier | §Minimum-phase |
