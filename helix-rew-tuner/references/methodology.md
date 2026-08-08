@@ -31,10 +31,10 @@ to the section you need instead of reading it whole)
 - Verification & honesty — line 1084
 - REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1142
 - Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1173
-- When a candidate-finder says "nothing to gain," check for a noise-vs-signal scoring mismatch — line 1215
-- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1256
-- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1292
-- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1319
+- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1215
+- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1273
+- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1309
+- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1336
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -1212,46 +1212,63 @@ printed the level there. See the next section for the real downstream damage
 this specific artifact can do to a candidate-finder function that isn't
 expecting it.
 
-## When a candidate-finder function says "nothing to gain," check whether it's reacting to noise, not signal
+## When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found)
 
-`tunelib.polarity_delay_search`'s default `damage_band=(60, 16000)` Hz is a
-sensible safety net for a genuine full-range vs. full-range comparison (mid
-vs. tweeter): it penalizes any candidate delay that makes the ORIGINAL summed
-response worse anywhere across that whole span, not just inside the band
-being optimized. That safety net actively misfires when one input is a
-low-passed driver (a sub) being compared against a full-range partner — most
-of that 60–16000 Hz span is pure measurement noise floor for the sub, not
-signal, and rotating a delay scrambles that noise's phase just as readily as
-it would real content. The `damage` term can't tell the difference.
+**Real case (2026-08-08).** `polarity_delay_search` on a sub/mids pair,
+target band 40–140 Hz, reported `delay_ms_B: 0.0, improvement_pct: 0.0`. That
+was taken at face value — "sub timing is already optimal, nothing to gain" —
+and told to the user as such. **This was wrong, and it wasn't caught by
+re-examining the tool. An independent second opinion (a different AI, given
+the same measurement files) computed its own delay sweep from scratch using a
+different scoring method — direct coherent-summation gain, weighted toward
+frequencies where BOTH drivers actually overlap in level, checked for a
+"maximin-robust" optimum across two separately-captured sessions — and
+proposed a specific non-zero delay with the reasoning laid out.** Reproducing
+that computation confirmed a real, small (0.1–0.7 dB depending on band and
+weighting), reproducible gain that `polarity_delay_search` had missed, and it
+went on to be confirmed by an actual A/B measurement in the car.
 
-**Real case (2026-08-08), confirmed on two independent sessions and
-reproduced exactly from the function's own scoring internals:**
-`polarity_delay_search` on a sub/mids pair, target band 40–140 Hz, reported
-`delay_ms_B: 0.0, improvement_pct: 0.0` — read at face value, "sub timing
-is already optimal, nothing to gain." Splitting the function's own score into
-its two summed terms showed the in-band `gap` component *did* fall
-substantially moving away from 0 ms (0.729 → 0.336 around +0.875 ms) — a real
-candidate improvement existed. But the full-range `damage` term swung from
-0.000 to ~2.7 over the same move, swamping it completely. Tracing where that
-damage came from: at 6–19 kHz the sub input carried energy within a few dB of
-the mids' own level — pure noise floor (confirmed on BOTH a directly-measured
-sub solo AND an independently N/V-recovered one, so it isn't a decomposition
-artifact specifically, just a property of a band-limited driver's capture in
-general). Re-running with `damage_band` narrowed to the sub's real electrical
-passband (20–200 Hz) on the SAME two datasets converged cleanly:
-`delay_ms_B = +0.6 ms` (session 1, directly measured) and `+0.438 ms`
-(session 3, N/V-recovered) — 28% improvement both times, close numerical
-agreement between two independently-captured datasets, and the number that
-went on to be confirmed by a real A/B measurement in the car afterward.
+**`tunelib.delay_sweep` / `overlap_weighted_delay_gain` package that exact
+method** (added after this happened, so it's a one-line call next time
+instead of needing a second opinion to surface it):
+`delay_sweep(freqs, driver_a, driver_b, band, datasets=[...])` scores every
+candidate delay by coherent-sum-vs-power-sum gain inside `band` ONLY — no
+cross-band safety term at all — weighted by `min(|a|,|b|)**2` so frequencies
+where one driver dominates and the other is negligible don't dilute a real
+in-band gain toward zero. Pass other independently-captured `(freqs, a, b)`
+tuples via `datasets=` for the maximin-across-sessions check: it returns the
+delay whose WORST-case gain across every dataset is highest, so a delay that
+only helps one session doesn't get recommended. It also flags `ambiguous`
+when a near-equal second local maximum sits more than half a wavelength away
+from the best one — the same cycle-slip signature documented above for REW's
+own delay estimator, now checked automatically instead of by eye.
 
-**Rule: before accepting a candidate-finder's "no improvement here" verdict —
-especially `improvement_pct` landing suspiciously exactly at 0.0 — check
-whether any scoring band it uses (here, `damage_band`) extends beyond where
-the driver actually being adjusted has real signal.** If it does, narrow that
-band to the driver's genuine passband and re-run before concluding there's
-nothing there. A candidate-finder returning "nothing to gain" is not itself
-evidence of that — it's evidence the SCORE didn't move, and the score can
-fail to move for reasons that have nothing to do with the acoustics.
+**Only after this was fixed did it become worth asking WHY the original tool
+missed it** — that's a separate, useful diagnosis, not the discovery itself.
+`polarity_delay_search`'s default `damage_band=(60, 16000)` Hz penalizes any
+candidate delay that makes the ORIGINAL full-range sum worse anywhere across
+that whole span — a sensible safety net for a genuine full-range vs.
+full-range comparison (mid vs. tweeter), but most of that span is pure
+measurement noise floor, not signal, for a low-passed driver like a sub.
+Splitting the function's own score into its two summed terms confirmed this
+directly: the in-band `gap` component *did* fall substantially moving away
+from 0 ms, but the full-range `damage` term swung by roughly 4x more over the
+same move, swamping it. Traced to source: at 6–19 kHz the sub input carried
+energy within a few dB of the mids' own level — pure noise floor, confirmed
+on both a directly-measured sub solo and an independently N/V-recovered one
+(see the decomposition section above), so it's a property of any band-limited
+driver's capture, not specific to the decomposition technique. Narrowing
+`damage_band` to the sub's real electrical passband (20–200 Hz) recovered a
+sensible, non-zero answer from `polarity_delay_search` too, in reasonable
+agreement with `delay_sweep`'s result on the same data.
+
+**Rule: don't accept a candidate-finder's "nothing here" verdict —
+especially `improvement_pct` landing suspiciously exactly at 0.0 — as
+evidence the acoustics are already optimal. It's evidence the SCORE didn't
+move, and a score can fail to move for reasons that have nothing to do with
+the acoustics.** Run `delay_sweep` alongside `polarity_delay_search` whenever
+either driver is band-limited (a sub, in particular), and treat a flat 0.0%
+from the latter as a prompt to check the former, not as a closed question.
 
 ## Bracket every A/B write A→B→B→A, and anchor on a band the write structurally cannot touch
 

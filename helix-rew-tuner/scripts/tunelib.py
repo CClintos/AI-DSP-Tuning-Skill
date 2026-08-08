@@ -1117,6 +1117,126 @@ def polarity_delay_search(freqs, driver_a, driver_b, band, max_delay_ms=1.5,
             best['xcorr_agrees'] = None
     return best
 
+
+def overlap_weighted_delay_gain(freqs, driver_a, driver_b, band, delay_ms):
+    """Coherent-summation gain (dB) of delaying driver_b by delay_ms, relative
+    to no delay, averaged over `band` and weighted by min(|a|,|b|)**2 at each
+    frequency -- i.e. weighted toward frequencies where BOTH drivers actually
+    contribute, not frequencies where one of them dominates and the other is
+    negligible (which dilutes a real gain toward zero if averaged unweighted).
+    Positive = the delayed sum is closer to the incoherent power-sum ceiling
+    than the undelayed sum; this is the metric, not `polarity_delay_search`'s
+    gap-to-ceiling-plus-damage-band score -- see `delay_sweep` below for why
+    that distinction found a real gain the other one missed."""
+    m = (np.asarray(freqs) >= band[0]) & (np.asarray(freqs) <= band[1])
+    b_delayed = driver_b * np.exp(-1j * 2 * np.pi * freqs * delay_ms / 1000.0)
+    a, b = driver_a[m], b_delayed[m]
+    tot = 20 * np.log10(np.abs(a + b) + 1e-30)
+    pw = 10 * np.log10(np.abs(a) ** 2 + np.abs(b) ** 2 + 1e-30)
+    w = np.minimum(np.abs(driver_a[m]), np.abs(b_delayed[m])) ** 2
+    w = w / (w.sum() + 1e-30)
+    return float(np.sum((tot - pw) * w))
+
+
+def delay_sweep(freqs, driver_a, driver_b, band, max_delay_ms=1.5, steps=241,
+                datasets=None, ambiguity_gain_frac=0.7):
+    """Find the delay on driver_b that maximizes `overlap_weighted_delay_gain`
+    over `band`. Complements (does NOT replace) `polarity_delay_search`: that
+    function's `damage_band` safety net is essential for a genuine full-range
+    comparison (mid vs. tweeter) but can silently hide a real gain when one
+    driver is band-limited (a sub) -- its "safety" region includes frequencies
+    where the band-limited driver is pure measurement noise, and any delay
+    change scrambles that noise's phase, reading as broadband "damage" that
+    swamps a real small in-band gain. This function has no cross-band term at
+    all; it only ever scores inside `band`, so it can't be fooled that way.
+
+    HOW THIS WAS ACTUALLY FOUND (2026-08-08, credit where due): on a real
+    project, `polarity_delay_search` reported "0.000 ms, 0.0% improvement" on
+    a sub/mids pair and that was taken at face value -- "already optimal."
+    An independent second opinion (a different AI, working from the same
+    measurement data but computing its own direct delay sweep with exactly
+    this overlap-weighting, checked for a maximin-robust optimum across TWO
+    separately-captured sessions) proposed a specific non-zero delay instead,
+    with the reasoning explicitly laid out. Reproducing that computation
+    confirmed a real, small (0.1-0.7 dB depending on band), reproducible gain
+    that the default tool's scoring had missed -- and it went on to be
+    confirmed by an actual A/B measurement in the car. This function exists
+    so that computation is a one-line call next time, not something that
+    needs a second opinion to surface: **when `polarity_delay_search` reports
+    a suspiciously flat 0.0% on a driver pair where one side is band-limited,
+    run this too before concluding there's nothing there.**
+
+    `datasets`: optional list of extra (freqs, driver_a, driver_b) tuples from
+    OTHER independent sessions/captures of the same driver pair. If given, the
+    returned `best_delay_ms` is chosen by MAXIMIN across this dataset plus all
+    of them (the delay whose WORST-case gain across every dataset is highest)
+    -- a delay that only helps one session isn't a real finding. This is the
+    "conservative maximin value" reasoning from the real case above, made
+    explicit and reusable.
+
+    `ambiguity_gain_frac`: a delay sweep on a narrow-band driver can have
+    multiple near-equal local maxima spaced ~1/(band centre frequency) apart
+    -- the same cycle-ambiguity signature documented for REW's IR-delay
+    estimator (see methodology.md). If another local maximum within
+    `ambiguity_gain_frac` of the best gain sits more than half a cycle away
+    from it, `ambiguous=True` is returned: trust that SOME improvement exists,
+    but do not trust the specific sign/magnitude of `best_delay_ms` without a
+    real A/B measurement to disambiguate.
+
+    Returns: {'best_delay_ms', 'best_gain_db', 'ambiguous', 'maximin_gain_db',
+    'gain_at_zero_db', 'local_maxima': [(delay_ms, gain_db), ...] sorted best
+    first}."""
+    grid = np.linspace(-max_delay_ms, max_delay_ms, steps)
+    all_sets = [(freqs, driver_a, driver_b)] + list(datasets or [])
+
+    def curve(f, a, b):
+        return np.array([overlap_weighted_delay_gain(f, a, b, band, d) for d in grid])
+
+    curves = [curve(f, a, b) for f, a, b in all_sets]
+    primary = curves[0]
+
+    loc = [(grid[i], primary[i]) for i in range(1, len(grid) - 1)
+           if primary[i] > primary[i - 1] and primary[i] > primary[i + 1]]
+    loc.sort(key=lambda t: -t[1])
+    if not loc:
+        loc = [(float(grid[int(np.argmax(primary))]), float(primary.max()))]
+
+    best_delay, best_gain = loc[0]
+    band_centre = (band[0] * band[1]) ** 0.5
+    half_cycle_ms = 0.5 / band_centre * 1000.0
+    ambiguous = any(
+        abs(d - best_delay) > half_cycle_ms and g >= ambiguity_gain_frac * best_gain
+        for d, g in loc[1:]
+    )
+
+    if len(all_sets) > 1:
+        stacked = np.vstack(curves)
+        worst_case = stacked.min(axis=0)
+        j = int(np.argmax(worst_case))
+        maximin_delay = float(grid[j])
+        maximin_gain = float(worst_case[j])
+    else:
+        maximin_delay, maximin_gain = best_delay, best_gain
+
+    gain_at_zero = float(primary[int(np.argmin(np.abs(grid)))])
+    maximin_at_zero = float(np.vstack(curves).min(axis=0)[int(np.argmin(np.abs(grid)))]) if len(all_sets) > 1 else gain_at_zero
+    return {
+        # 'best_*' fields are ABSOLUTE overlap-weighted score, not a gain --
+        # compare against 'gain_at_zero_db' yourself, or just use the
+        # '*_over_zero_db' fields, which are what you almost always want:
+        # how much better than doing nothing is this delay.
+        'best_delay_ms': round(float(best_delay), 3),
+        'best_gain_db': round(float(best_gain), 3),
+        'best_gain_over_zero_db': round(float(best_gain) - gain_at_zero, 3),
+        'ambiguous': bool(ambiguous),
+        'maximin_delay_ms': round(maximin_delay, 3),
+        'maximin_gain_db': round(maximin_gain, 3),
+        'maximin_gain_over_zero_db': round(maximin_gain - maximin_at_zero, 3),
+        'gain_at_zero_db': round(gain_at_zero, 3),
+        'local_maxima': [(round(float(d), 3), round(float(g), 3)) for d, g in loc[:6]],
+    }
+
+
 # --------------------------------------------------------------------------
 # 3e) TWO-LEVEL COMPRESSION GATE -- added 2026-07-03. Makes the "high-SPL
 # linearity check" numeric. Sweep the same thing twice, `level_delta_db` apart
@@ -2300,5 +2420,54 @@ if __name__ == '__main__':
           (rep38['rms_db'], rep38['max_err_db'], rep38['dropped']))
     assert rep38['rms_db'] < 0.05, 'fit_peaking_to_shelf RMS too high'
     assert rep38['max_err_db'] < 0.20, 'fit_peaking_to_shelf max error too high'
+
+    # ---- TEST39: delay_sweep recovers a known synthetic skew --------------
+    # Added 2026-08-08 after a real session where polarity_delay_search's
+    # damage_band swallowed a genuine small gain on a sub/mids pair -- see
+    # that function's docstring and delay_sweep's own docstring for the full
+    # story. This confirms the replacement tool actually works: exact
+    # recovery of a known injected delay, correct maximin behavior across
+    # two datasets with DIFFERENT individual optima, and correct ambiguity
+    # detection on a band narrow enough to have real cycle-slip structure.
+    f39 = np.linspace(100.0, 300.0, 600)
+    mag39 = 1.0 + 0.3 * np.sin(2 * np.pi * (f39 - 100) / 400.0)
+    a39 = mag39 * np.exp(1j * 0.01 * f39)
+    skew39 = 0.4
+    b39 = a39 * np.exp(-1j * 2 * np.pi * f39 * skew39 / 1000.0)
+    r39 = delay_sweep(f39, a39, b39, (120, 280), max_delay_ms=1.0, steps=401)
+    assert abs(r39['best_delay_ms'] - (-skew39)) < 0.01, \
+        'delay_sweep must recover a known synthetic skew: got %r' % r39
+    assert abs(r39['best_gain_db'] - 3.01) < 0.02, \
+        'equal-magnitude in-phase alignment must hit the ~3.01 dB coherent ceiling'
+    assert not r39['ambiguous'], 'a wide, single-lobe band must not flag ambiguous'
+    print('\nTEST39a delay_sweep: recovers exact synthetic skew (%.3f ms), '
+          'hits theoretical coherent ceiling, not ambiguous' % r39['best_delay_ms'])
+
+    mag39b = 1.0 + 0.3 * np.cos(2 * np.pi * (f39 - 100) / 350.0)
+    a39b = mag39b * np.exp(1j * 0.02 * f39)
+    skew39b = -0.25
+    b39b = a39b * np.exp(-1j * 2 * np.pi * f39 * skew39b / 1000.0)
+    alone_a = delay_sweep(f39, a39, b39, (120, 280), max_delay_ms=1.0, steps=401)['best_delay_ms']
+    alone_b = delay_sweep(f39, a39b, b39b, (120, 280), max_delay_ms=1.0, steps=401)['best_delay_ms']
+    mm39 = delay_sweep(f39, a39, b39, (120, 280), max_delay_ms=1.0, steps=401,
+                       datasets=[(f39, a39b, b39b)])
+    lo39, hi39 = sorted([alone_a, alone_b])
+    assert lo39 < mm39['maximin_delay_ms'] < hi39, \
+        'maximin delay must sit strictly between the two datasets\' own individual optima, not equal either: %r' % mm39
+    print('TEST39b delay_sweep maximin: dataset optima %.2f / %.2f ms -> maximin %.2f ms '
+          '(between them, favoring neither)' % (alone_a, alone_b, mm39['maximin_delay_ms']))
+
+    f39c = np.linspace(2000.0, 6000.0, 4000)
+    a39c = np.ones_like(f39c, dtype=complex)
+    skew39c = 0.45  # deliberately close to one cycle at ~2200 Hz
+    b39c = a39c * np.exp(-1j * 2 * np.pi * f39c * skew39c / 1000.0)
+    r39c_wide = delay_sweep(f39c, a39c, b39c, (2000, 4000), max_delay_ms=1.5, steps=301)
+    r39c_narrow = delay_sweep(f39c, a39c, b39c, (2100, 2300), max_delay_ms=1.5, steps=301)
+    assert not r39c_wide['ambiguous'], \
+        'a band wide enough to resolve the true lobe from its neighbors must not flag ambiguous'
+    assert r39c_narrow['ambiguous'], \
+        'a band narrow enough to sit near a single cycle must flag the real cycle-ambiguity here'
+    print('TEST39c delay_sweep ambiguity flag: wide band (2000-4000 Hz) correctly '
+          'confident, narrow band near one cycle (2100-2300 Hz) correctly flagged ambiguous')
 
     print('\nALL TESTS PASSED')
