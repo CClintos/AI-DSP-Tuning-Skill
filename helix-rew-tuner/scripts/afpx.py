@@ -292,9 +292,31 @@ def verify_delay_write(old_xml, new_xml, channel_index, expected_samples):
       - every <OC> block's content (filters, CINV/polarity, etc.) is
         completely unchanged -- confirms the write really touched nothing
         else in the whole file.
-    Returns {'pass': bool, 'errors': [...]}."""
-    old_delays = [attrs(t) for t in delay_tags(old_xml)]
-    new_delays = [attrs(t) for t in delay_tags(new_xml)]
+    Returns {'pass': bool, 'errors': [...]}.
+
+    BUG FIXED 2026-08-08 (found via a real user session, not synthetic
+    testing): on real P SIX MK2 exports the per-channel `<T .../>` delay tag
+    lives INSIDE that channel's `<OC>...</OC>` block, not after it. The old
+    OC-block-content check compared the two blocks byte-for-byte with no
+    exception for the tag this function's own caller had just changed on
+    purpose -- so it reported a false failure on every single correct delay
+    write on that file layout, 100% of the time. It went undetected because
+    the synthetic self-test fixture placed the delay tags AFTER </ATF>,
+    matching an older/simplified layout, not the real nested one -- a "check
+    that cannot fail" in the opposite direction from the usual case (this one
+    could not PASS on real input, rather than couldn't fail on bad input).
+    Confirmed via direct byte-level diff of a real file: a single-channel
+    delay write produced exactly 2 changed characters in a 25KB file, with
+    the intended <T .../> tag as the sole differing line -- yet the old
+    checker still reported OC-block corruption on that channel. Fixed by
+    excluding channel_index's own (before, after) delay-tag substrings from
+    the OC-block equality check for that one channel only; every other
+    channel's OC block is still compared byte-for-byte, so unrelated
+    collateral edits are still caught."""
+    old_delay_tags_raw = delay_tags(old_xml)
+    new_delay_tags_raw = delay_tags(new_xml)
+    old_delays = [attrs(t) for t in old_delay_tags_raw]
+    new_delays = [attrs(t) for t in new_delay_tags_raw]
     errors = []
     if len(old_delays) != len(new_delays):
         return {'pass': False,
@@ -316,7 +338,14 @@ def verify_delay_write(old_xml, new_xml, channel_index, expected_samples):
         errors.append('channel count changed unexpectedly')
     else:
         for i, (ob, nb) in enumerate(zip(old_blocks, new_blocks)):
-            if ob != nb:
+            ob_cmp, nb_cmp = ob, nb
+            if i == channel_index and i < len(old_delay_tags_raw):
+                # Strip the one tag this write intentionally changed (a no-op
+                # .replace if that tag isn't actually inside this OC block on
+                # a file where delay tags live elsewhere -- safe either way).
+                ob_cmp = ob_cmp.replace(old_delay_tags_raw[i], '', 1)
+                nb_cmp = nb_cmp.replace(new_delay_tags_raw[i], '', 1)
+            if ob_cmp != nb_cmp:
                 errors.append('ch%d: <OC> block content changed unexpectedly '
                               '(only the delay tag should differ)' % i)
     return {'pass': not errors, 'errors': errors}
@@ -671,6 +700,26 @@ def _selftest():
     except ValueError:
         pass
     print('afpx selftest: out-of-range channel_index correctly raises')
+
+    # Regression test for the 2026-08-08 real-file bug: delay tag NESTED
+    # inside its own <OC> block (the layout real P SIX MK2 exports actually
+    # use), not trailing the file as in the fixture above. A correct write
+    # here must still verify as pass=True, and an unrelated edit inside the
+    # SAME block must still be caught.
+    nested_xml = ('<ATF>'
+                  '<OC ON="0" CINV="0"><Fil T="1"/><T PM="1" P="0" T="0"/></OC>'
+                  '<OC ON="1" CINV="1"><Fil T="17" F="100" G="-2" Q="1"/>'
+                  '<T PM="4" P="0" T="98"/></OC>'
+                  '</ATF>')
+    nested_new = write_delay_samples(nested_xml, 1, 182)
+    vn = verify_delay_write(nested_xml, nested_new, 1, 182)
+    assert vn['pass'], 'nested-in-OC delay write must verify clean: %r' % vn['errors']
+    print('afpx selftest: nested-delay-tag (real file layout) write+verify OK')
+
+    nested_corrupted = nested_new.replace('G="-2"', 'G="-5"')
+    vn2 = verify_delay_write(nested_xml, nested_corrupted, 1, 182)
+    assert not vn2['pass'], 'must still catch a filter-gain edit inside the same nested OC block'
+    print('afpx selftest: nested-delay-tag collateral-edit detection OK')
 
     # ---- output trim -------------------------------------------------------
     # NOTE ch1 deliberately has NO <Vol> tag, and ch2 does -- this reproduces
