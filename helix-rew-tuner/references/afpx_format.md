@@ -216,9 +216,26 @@ value — `PM`/`P` are left byte-identical (they aren't confirmed to mean
 anything, see below, so nothing should touch them). `verify_delay_write` is
 deliberately stronger than the generic `roundtrip_lint(allow_delay=True)`: it
 confirms the exact new value landed, every other channel's delay tag is
-untouched, and every `<OC>` block is unchanged — not just "something delay-
-related changed." Always run it after a delay write, and always follow with a
-re-measure — a predicted-good delay is still a prediction until confirmed.
+untouched, and every `<OC>` block is unchanged apart from the one tag this
+write intentionally changed — not just "something delay-related changed."
+Always run it after a delay write, and always follow with a re-measure — a
+predicted-good delay is still a prediction until confirmed.
+
+⚠️ **On real P SIX MK2 exports, the per-channel `<T .../>` delay tag lives
+INSIDE that channel's `<OC>...</OC>` block** (`...<Fil .../><Vol .../><T P="0"
+PM="4" T="98"/></OC>`), not trailing the file the way an earlier synthetic
+test fixture assumed. `verify_delay_write` was fixed 2026-08-08 for this —
+before the fix, its OC-block-unchanged check compared the two blocks with no
+exception for the tag it had just been asked to confirm changed, so it
+reported a false FAIL on every legitimate delay write on this file layout,
+100% of the time. Confirmed via direct byte diff on a real user file: a
+single-channel write produced exactly two changed characters in a ~25KB file
+(the intended `98`→`182`), with nothing else touched — yet the pre-fix
+checker still reported OC-block corruption. If you ever see `verify_delay_write`
+fail on what a byte-level diff shows is a clean, single-tag write, that's the
+signature of this bug recurring (e.g. after a hand-edit that didn't go through
+`write_delay_samples`) — trust the byte diff, and check the function is the
+current version (its own docstring records the fix).
 
 **Polarity is `CINV` on the `<OC>` tag — VERIFIED 2026-07-07 by controlled diff**
 (on a `.pct6` file, same `<OC>` schema as `.afpx`): flipping polarity for one

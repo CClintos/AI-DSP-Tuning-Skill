@@ -7,28 +7,33 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 30
-- Sweep capture setup — line 102
-- Beyond magnitude — decay (time-domain) and distortion axes — line 149
-- Deviation analysis — line 229
-- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 269
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 38
+- Sweep capture setup — line 110
+- Beyond magnitude — decay (time-domain) and distortion axes — line 157
+- Deviation analysis — line 237
+- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 277
   - Traps from the Alpine session: null-averaging read as level, judging
     inherited EQ, flat interference offsets, MMM level comparability,
-    fractional-octave smearing, zero-band fits, crossover skirts — line 460
-- When the answer is physical, not electrical — line 539
-- Voicing — the most audible decision — line 613
-- Classify the problem (the core skill) — line 644
-  - The interference audit — line 663
-  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 671
-  - Minimum-phase / EQ-ability — line 704
-  - Quantify single-position phase reliability — line 711
-  - Multi-position variance — line 751
-- The crossover action-ladder — line 789
-- Shelf cookbook (incl. judging a shelf emulation) — line 850
-- All-pass cookbook — line 883
-- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 926
-- Restraint — line 1017
-- Verification & honesty — line 1046
+    fractional-octave smearing, zero-band fits, crossover skirts — line 468
+- When the answer is physical, not electrical — line 547
+- Voicing — the most audible decision — line 621
+- Classify the problem (the core skill) — line 652
+  - The interference audit — line 671
+  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 679
+  - Minimum-phase / EQ-ability — line 712
+  - Quantify single-position phase reliability — line 719
+  - Multi-position variance — line 759
+- The crossover action-ladder — line 797
+- Shelf cookbook (incl. judging a shelf emulation) — line 858
+- All-pass cookbook — line 891
+- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 934
+- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1025
+- Verification & honesty — line 1083
+- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1141
+- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1172
+- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1202
+- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1238
+- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1265
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -1045,6 +1050,35 @@ before spending budget on anything symmetric in the same region.
   noise-floor ratio alone; requiring 3-session persistence collapsed that to
   four real ones — two of the discarded flags (68 Hz, 4000 Hz) swung 2-3 dB
   session to session despite no EQ touching them in between.
+- **A gain predicted by optimizing coherent complex summation at ONE fixed mic
+  point is not evidence the change helps in the car — the objective itself is
+  the flaw, not the candidate filter/delay.** A phase-only edit (all-pass,
+  delay) cannot create acoustic energy; it only moves WHERE constructive and
+  destructive summation land in space. Selecting an fc/Q or a delay value by
+  maximizing predicted summation at a handful of points will reliably find
+  *something* that looks robust — even agreeing in sign across several points,
+  even across several sessions — precisely because summation peaks/nulls are
+  large and spatially structured. That structure is exactly what a spatially-
+  averaged (MMM) measurement integrates away. A real case (2026-08-08): an
+  all-pass was selected because 4 independent complex-summation datasets
+  across 3 mic positions all agreed in sign on the predicted gain (+0.3 to
+  +1.5 dB in the target band) — and it measured the OPPOSITE sign by MMM after
+  writing it (−0.65 dB), degrading a broad ~2000–8000 Hz span the fixed-point
+  prediction never flagged. The same session independently killed a whole-side
+  delay proposal by the identical mechanism (it improved the centre-mic
+  prediction while simultaneously worsening BOTH ear-position predictions in
+  the source data itself — the failure was visible before ever measuring), and
+  a channel-level trim (a fixed-point sweep said +1.56 dB; two separate MMM
+  sessions on the same channels said +0.51 dB and +1.09 dB). **If a
+  phase-domain change is meant to survive in the car, select AND validate it
+  against spatially-averaged data from the start — fixed-point agreement
+  across positions or sessions is not a substitute, no matter how internally
+  consistent it looks.** The one delay refinement that DID hold up under MMM
+  in that same project worked because, at those frequencies (40–140 Hz,
+  wavelength 2.4–8.6 m), a single point genuinely represents the whole cabin —
+  the fixed-point technique isn't wrong in general, it just stops being valid
+  somewhere in the low hundreds of Hz, well below where crossovers and imaging
+  decisions usually live.
 
 ## Verification & honesty
 
@@ -1103,3 +1137,166 @@ for that (e.g. assert the parsed set is non-empty / not all-zero) alongside the
 real check. This is the same root failure as the stale-decoded-field trap above
 (Q on a bypassed crossover) — a value looked meaningful and wasn't — but here the
 uninspected thing is the *verification code itself*, not the data.
+
+## REW's IR-delay estimator can lock onto the wrong cycle on a band-limited driver
+
+On a driver with a steep high-pass (a tweeter above its crossover corner, in
+particular), REW's "estimated IR delay" figure can jump between two (or more)
+discrete values roughly `1 / f_passband_centre` apart between otherwise-
+identical repeat captures. Nothing physically moved; only the estimator's
+cycle-lock did.
+
+**Signature, confirmed by an 8-repeat controlled test (nothing touched between
+captures):** the reported delay clustered on exactly two values —
+`7.017, 7.018, 7.019, 6.579, 6.574, 6.579, 7.019, 7.018` ms — a 0.439 ms gap,
+matching `1/2278 Hz` almost exactly, sitting inside that tweeter's crossover
+region. Within either cluster the spread was 1–5 µs (real repeatability);
+across the two clusters it looked like a 0.44 ms "timing failure."
+
+**How to tell the estimator from a real timing problem — this is the decisive
+test, not eyeballing the impulse plot.** Fit a delay to the PHASE DIFFERENCE
+between one capture from each cluster (linear regression of
+`unwrap(angle(B/A))` vs. frequency, over a band where both captures have real
+energy). On the same 8-repeat set this returned an implied delay of
+`0.0000 ms` (residual ~18°) between a "6.58 ms" capture and a "7.02 ms"
+capture — the underlying phase-valid data was unaffected the whole time; only
+the single scalar REW reports in the header/sidebar was jumping.
+
+**Practical rule:** never trust a single reported REW delay number for a
+band-limited driver, especially a tweeter above its own crossover corner.
+Either (a) take multiple repeats and check for a small-integer-multiple-of-a-
+cycle relationship between clustered values before drawing any conclusion, or
+(b) skip the reported number entirely and work from the exported complex data
+(phase-slope delay, or the algebraic recovery below) instead.
+
+## Recovering per-channel L/R responses from a common-source pair, without solo captures
+
+If the DSP allows toggling one channel's polarity, two captures — `N = L + R`
+(normal) and `V = L − R` (one channel inverted) — algebraically recover BOTH
+individual channel responses with no solo measurements at all:
+
+```
+L = (N + V) / 2
+R = (N − V) / 2
+```
+
+This holds exactly for any linear system, as long as N and V share a common
+time reference (so they're complex-comparable) and nothing else changed
+between the two captures.
+
+**Always validate the recovery before trusting it downstream** — reconstruct
+L (or R) and compare it against an independently, directly measured solo of
+that same channel, if one exists anywhere in the project (a different
+session, a different day — fine, as long as that channel's crossover/EQ
+hasn't changed since). A real case: this technique validated to 0.01–0.26 dB
+median error against independent solos across four separate recovered-channel
+vs. independent-solo comparisons in one project, which is what made every
+subsequent phase and level conclusion drawn from the recovered channels
+trustworthy rather than assumed.
+
+Useful when solo captures weren't taken, when re-measuring solos would cost
+too much session time, or — as in the imbalance case below — as a
+cross-check that builds multi-session confidence in a finding alongside
+directly-measured solos.
+
+## Bracket every A/B write A→B→B→A, and anchor on a band the write structurally cannot touch
+
+Any two-state comparison (tune A vs. tune B) that spans more than a couple of
+minutes is vulnerable to session-level drift — playback level creeping,
+auto-gain re-engaging, a physical connection changing — large enough to dwarf
+the effect being measured. Two defenses, used together:
+
+**Bracket, don't just A→B.** Capture order `A, B, B, A` (or `A1, A2 … B1,
+B2 … A3`), not just `A, B`. If the two `B` captures agree, and the closing `A`
+disagrees with the opening `A` by more than that, the session drifted — caught
+DURING the session instead of discovered afterward. A real case (2026-08-08):
+a delay-write A/B test showed a monotonic +2.7 dB broadband level rise across
+~4 minutes (`A1 → A2 +2.6 dB`; a control solo capture the write couldn't
+possibly touch also drifted +0.85 dB, flat across frequency — pure gain
+drift, not a response change), caught immediately by comparing the two
+nominally-identical control captures.
+
+**Anchor on a band the specific write is physically incapable of altering,
+then re-derive the result relative to that anchor.** A pure delay or a pure
+all-pass filter is magnitude-flat by construction on the channel it's applied
+to — it changes phase only, never that channel's own SPL at any frequency.
+That gives two free, zero-cost checks for any delay/APF write:
+- The edited channel's own solo capture, before vs. after, must be
+  magnitude-identical. If it isn't, something in the measurement chain moved
+  — not the filter.
+- Any frequency band where the edited channel doesn't dominate the trace
+  (below its own crossover corner, or a different channel's passband
+  entirely) is a valid drift anchor: re-reference every capture in the
+  session to its OWN level in that band before comparing anything else.
+
+Applied to the +2.7 dB drift above: anchoring every capture on 300–2000 Hz (a
+band the sub-delay write couldn't reach — the sub is low-passed well below
+it) collapsed the drift and recovered clean 0.07–0.11 dB repeatability,
+revealing a small (~0.2–0.6 dB) real, repeatable, correctly-signed gain that
+the raw numbers had made look unusable.
+
+## A whole-system "sum" scorecard is nearly blind to a channel-pair L/R imbalance — the math
+
+Two decorrelated, equal-nominal-level sources with a total imbalance of `D` dB
+between them (one at `+D/2`, the other at `−D/2` relative to balanced) produce
+an incoherent power-sum only THIS much different from the balanced pair's sum:
+
+| imbalance between the two channels | change in their SUMMED level |
+|---|---|
+| 1 dB | 0.03 dB |
+| 2 dB | 0.11 dB |
+| 2.45 dB | 0.17 dB |
+| 3 dB | 0.25 dB |
+| 5 dB | 0.68 dB |
+| 10 dB | 2.40 dB |
+
+`ΔdB = 10·log10[(10^((D/2)/10) + 10^((−D/2)/10)) / 2]`, verified numerically.
+
+A 2–3 dB L/R channel imbalance — clearly audible, clearly worth a level trim —
+moves a system-sum scorecard by roughly a TENTH of a dB. Any scoring/QA loop
+that only ever looks at a system sum (or any other coherent multi-driver mix)
+is structurally unable to see this class of error: the sum isn't wrong, the
+energy really is all there, it's just distributed unevenly between two
+sources the sum can no longer tell apart. **If per-channel L/R balance
+matters (it usually does for imaging), it has to be checked from per-channel
+solo measurements — an excellent system-sum score is evidence of aggregate
+tonal correctness, not of balance.**
+
+## Extracting distortion/coherence from a REW `.mdat` when only text exports were expected
+
+REW's SPL & Phase text export (what `measure.py` parses) carries magnitude and
+phase only. If a distortion, coherence, or raw-IR question comes up and only
+text exports exist, the answer may already be sitting in a `.mdat` the user
+also has — REW's binary Java-serialized measurement file (magic bytes
+`\xac\xed\x00\x05` + "REW Measurement Data File V2") carries all of that, per
+measurement, that the text export drops.
+
+Rough layout, observed directly on a real file (not from REW documentation —
+treat as version/config-dependent and validate before trusting it on a
+different REW version): distortion is stored as one `1053`-point float32
+block per measurement = an explicit ascending frequency axis (`10 → ~19900`
+Hz), followed by ~10 more `1053`-point blocks = the fundamental and
+successive harmonics, in descending mean-level order (fundamental strongest).
+**Blocks for different measurements are NOT necessarily in the file in the
+same order the captures were taken** — match a block to its measurement by
+correlating its fundamental trace against that measurement's already-known
+SPL curve (from a paired text export, if one exists), not by position in the
+file.
+
+**Listening-position THD from RTA/MMM-style captures is frequently an
+artifact, not driver stress — two specific traps:**
+1. **Below a crossover.** A driver's fundamental is attenuated by its own
+   high-pass at a given frequency, but a harmonic 1–2 octaves up can land
+   comfortably inside the driver's passband at full gain — dividing a
+   suppressed fundamental by an unsuppressed harmonic reports huge "THD"
+   (17–20% observed) that has nothing to do with the driver actually
+   distorting.
+2. **In a cabin null.** The same division problem happens spatially: a
+   driver measured at a frequency where the room/cabin has a deep magnitude
+   null shows inflated THD at that frequency even with a perfectly linear
+   driver, because only the fundamental — not the harmonic, elsewhere in the
+   spectrum — is being suppressed by the null.
+
+Both traps distort magnitude only, not distortion measured **nearfield**, or
+measured **only inside the driver's own passband, away from crossover
+corners**. Restrict any real driver-stress conclusion to those conditions.
