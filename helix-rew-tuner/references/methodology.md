@@ -7,34 +7,40 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 39
-- Sweep capture setup — line 111
-- Beyond magnitude — decay (time-domain) and distortion axes — line 158
-- Deviation analysis — line 238
-- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 278
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 45
+- Sweep capture setup — line 117
+- Beyond magnitude — decay (time-domain) and distortion axes — line 164
+- Deviation analysis — line 244
+- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 284
   - Traps from the Alpine session: null-averaging read as level, judging
     inherited EQ, flat interference offsets, MMM level comparability,
-    fractional-octave smearing, zero-band fits, crossover skirts — line 469
-- When the answer is physical, not electrical — line 548
-- Voicing — the most audible decision — line 622
-- Classify the problem (the core skill) — line 653
-  - The interference audit — line 672
-  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 680
-  - Minimum-phase / EQ-ability — line 713
-  - Quantify single-position phase reliability — line 720
-  - Multi-position variance — line 760
-- The crossover action-ladder — line 798
-- Shelf cookbook (incl. judging a shelf emulation) — line 859
-- All-pass cookbook — line 892
-- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 935
-- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1026
-- Verification & honesty — line 1084
-- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1142
-- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1173
-- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1215
-- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1273
-- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1309
-- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1336
+    fractional-octave smearing, zero-band fits, crossover skirts — line 475
+- When the answer is physical, not electrical — line 554
+- Voicing — the most audible decision — line 628
+- Classify the problem (the core skill) — line 659
+  - The interference audit — line 678
+  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 686
+  - Minimum-phase / EQ-ability — line 719
+  - Quantify single-position phase reliability — line 726
+  - Multi-position variance — line 766
+- The crossover action-ladder — line 804
+- Shelf cookbook (incl. judging a shelf emulation) — line 865
+- All-pass cookbook — line 898
+- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 941
+- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1032
+- Verification & honesty — line 1090
+- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1148
+- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1179
+- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1221
+- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1279
+- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1315
+- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1342
+- Electrical-vs-measured decomposition must be tune-matched, and may not be
+  recoverable at all — line 1380
+- Width/Q from a plot: pick one definition and don't switch mid-analysis — line 1402
+- A filter's benefit must clear the untouched-channel drift floor, not just be positive — line 1419
+- Nearfield-vs-seat shape comparison as a cheap cancellation test — line 1437
+- Common-mode (System Sum vs target) is a first-class objective, not a fallback — line 1456
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -1371,3 +1377,101 @@ artifact, not driver stress — two specific traps:**
 Both traps distort magnitude only, not distortion measured **nearfield**, or
 measured **only inside the driver's own passband, away from crossover
 corners**. Restrict any real driver-stress conclusion to those conditions.
+## Electrical-vs-measured decomposition must be tune-matched, and may not be recoverable at all
+
+When splitting a measured L/R (or any) difference into "DSP-electrical" (computed
+from a `.afpx`'s PEQ chain) vs "non-DSP residual" (measured minus electrical), the
+electrical transfer function and the measured trace **must come from the same tune
+state**. A real case (2026-08-09): a script subtracted one tune file's electrical
+L/R transfer from an **8-session historical mean** measurement, spanning five weeks
+and multiple different tune states. The arithmetic was internally consistent and
+produced plausible-looking numbers (e.g. "DSP explains only 5-9% of the imbalance",
+"non-DSP residual +14 dB") — but it was invalid, because five of the eight sessions
+predated every tune file that still existed on disk. There was no way to redo the
+decomposition correctly from the available corpus; the finding had to be withdrawn
+outright, not merely corrected. This is the same "apples to oranges" class of error
+as averaging deviation across different tune states elsewhere in this file, but it's
+easy to miss specifically in decomposition scripts because the electrical subtraction
+happens as one clean vectorized step and nothing about the code makes the mismatch
+visible. **Before trusting a decomposition's "non-DSP residual" number, check that
+each measurement session has a surviving `.afpx` (or documented no-EQ state) from
+the same date**, and if it doesn't, decompose only single-session measurements
+against their own tune, and don't average residuals across tune states you couldn't
+individually decompose.
+
+## Width/Q from a plot: pick one definition and don't switch mid-analysis
+
+Two different scripts in the same project, over the same feature, produced two
+different octave-widths — 0.09 octave (implying Q~16, beyond the hardware's Q15
+ceiling) vs 0.13-0.15 octave (implying Q~10, well within range) — because one
+script measured "band where the mean stays within 1.5 dB of the extreme" and the
+other measured the standard −3 dB / half-amplitude width. Both numbers were
+computed correctly from real data; they just answer different questions, and only
+the −3 dB definition maps onto PEQ Q the way `fc/Q` filter design assumes. The
+"1.5 dB of the extreme" version is *narrower by construction* whenever the feature
+isn't a clean symmetric notch (real notches never are), so it will systematically
+suggest more extreme Q than the filter you'd actually design. **Always use −3 dB
+(half-amplitude) width for any Q estimate that will inform an actual filter choice**,
+and if a different width metric is used for some other purpose (e.g. characterizing
+how "narrow" a feature looks for a stability/robustness argument), label it
+explicitly as such so it never gets read as a Q recommendation.
+
+## A filter's benefit must clear the untouched-channel drift floor, not just be positive
+
+A single unbracketed before/after A/B will always show *some* movement on the
+channel that wasn't touched — session-level drift (mic reseat, playback level,
+cabin conditions). A real case (2026-08-09): an 8 kHz filter's benefit, measured
+at auditory (ERB) bandwidth over its intended 4-14 kHz range, was +0.17 dB — while
+the same session's untouched control channel drifted a median 0.13 dB with a
+0.96 dB 10-90 percentile spread. The filter's electrical behavior was independently
+confirmed correct (the touched channel moved almost exactly what the PEQ predicts),
+so this isn't a case for reverting it — but the *size of the win* is not
+distinguishable from ordinary drift, and should not be cited as evidence this class
+of correction is worth pursuing further. **Before reporting a filter's dB benefit
+from a single A/B, compute the same before/after metric on an untouched control
+channel from the same session and report both numbers side by side** — see also
+`predicted_vs_measured`'s untouched-frequency alignment, which exists for the same
+reason. A benefit smaller than the control drift is "keep, benign, unproven" — not
+"materially improved."
+
+## Nearfield-vs-seat shape comparison as a cheap cancellation test
+
+The established test for "is this a cabin null, not a driver/level issue" has been
+nearfield-absent-at-seat-present (documented above re: the 400-500 Hz seat null).
+The same test works directly on an **L/R difference trace**, not just on a single
+channel's response, and is cheap if a nearfield L/R pair already exists from an
+unrelated session: mean-remove each of the seat-difference and nearfield-difference
+traces over a shared reference band (to cancel the arbitrary mic-distance level
+offset between the two capture types), then compare shape. A real case
+(2026-08-09): a 12.5 dB seat-only L/R swing across 140-200 Hz (a null signature by
+its narrowness and depth alone) was confirmed non-actionable this way — the 140 Hz
+and 200 Hz components were largely or fully absent nearfield, while only the 160 Hz
+component partially survived. This closed a question that would otherwise have
+needed a dedicated physical/mechanical measurement session. Caveat: this is
+supporting evidence, not proof, when the nearfield and seat captures are from
+different sessions/distances with no matched-distance control — treat a clean
+absence as license to *not* spend measurement time on physical investigation, not
+as certainty.
+
+## Common-mode (System Sum vs target) is a first-class objective, not a fallback
+
+It's easy for a tuning session to drift into scoring only L/R differential error,
+because that's usually where the interesting/actionable findings show up early and
+because most of the diagnostic tooling here (`tune_scorecard`, delay/EQ candidate
+search) is framed around per-channel or per-pair comparisons. But the tonal-target
+objective (System Sum vs the reference curve) is an equally valid, independent axis,
+and a long L/R-focused investigation can leave it completely unscored for weeks
+while genuinely large, genuinely repeatable common-mode errors sit untouched. A real
+case (2026-08-09): after an entire multi-week campaign optimizing 4-14 kHz L/R
+balance down to parity with the rest of the spectrum, scoring System Sum vs target
+for the first time turned up a **+2.5 dB excess at 100 Hz with SD 0.2 dB across
+four sessions spanning three different tune states** — more repeatable than any L/R
+feature found in the whole project, sitting in a region nobody had looked at because
+all recent attention was on the region that had, ironically, already been leveled.
+Common-mode corrections are lower-risk than differential ones (identical filter on
+both channels of a pair leaves R−L mathematically unchanged, so they can never
+undo differential work), which makes neglecting this axis doubly wasteful. **When a
+tuning investigation has been running on one axis (L/R, a single band, a single
+driver pair) for several sessions, periodically re-score the other axis (System
+Sum vs target) from scratch** rather than assuming it was already covered earlier
+in the project.
