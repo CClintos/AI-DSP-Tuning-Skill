@@ -7,40 +7,42 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 45
-- Sweep capture setup — line 117
-- Beyond magnitude — decay (time-domain) and distortion axes — line 164
-- Deviation analysis — line 244
-- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 284
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 47
+- Sweep capture setup — line 131
+- Beyond magnitude — decay (time-domain) and distortion axes — line 178
+- Deviation analysis — line 258
+- Analysis traps (anchoring, causal A/B, anchor sensitivity, sum-vs-solo,
+  coherence wobble, stale decoded fields, imaging, sub coupling, ties,
+  stable-near-zero, duplicates) — line 325
   - Traps from the Alpine session: null-averaging read as level, judging
     inherited EQ, flat interference offsets, MMM level comparability,
-    fractional-octave smearing, zero-band fits, crossover skirts — line 475
-- When the answer is physical, not electrical — line 554
-- Voicing — the most audible decision — line 628
-- Classify the problem (the core skill) — line 659
-  - The interference audit — line 678
-  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 686
-  - Minimum-phase / EQ-ability — line 719
-  - Quantify single-position phase reliability — line 726
-  - Multi-position variance — line 766
-- The crossover action-ladder — line 804
-- Shelf cookbook (incl. judging a shelf emulation) — line 865
-- All-pass cookbook — line 898
-- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 941
-- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1032
-- Verification & honesty — line 1090
-- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1148
-- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1179
-- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1221
-- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1279
-- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1315
-- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1342
+    fractional-octave smearing, zero-band fits, crossover skirts — line 536
+- When the answer is physical, not electrical — line 615
+- Voicing — the most audible decision — line 689
+- Classify the problem (the core skill) — line 720
+  - The interference audit — line 739
+  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 747
+  - Minimum-phase / EQ-ability — line 780
+  - Quantify single-position phase reliability — line 787
+  - Multi-position variance — line 827
+- The crossover action-ladder — line 865
+- Shelf cookbook (incl. judging a shelf emulation) — line 926
+- All-pass cookbook — line 959
+- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 1002
+- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1093
+- Verification & honesty — line 1151
+- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1209
+- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1240
+- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1282
+- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1340
+- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1376
+- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1403
 - Electrical-vs-measured decomposition must be tune-matched, and may not be
-  recoverable at all — line 1380
-- Width/Q from a plot: pick one definition and don't switch mid-analysis — line 1402
-- A filter's benefit must clear the untouched-channel drift floor, not just be positive — line 1419
-- Nearfield-vs-seat shape comparison as a cheap cancellation test — line 1437
-- Common-mode (System Sum vs target) is a first-class objective, not a fallback — line 1456
+  recoverable at all — line 1441
+- Width/Q from a plot: pick one definition and don't switch mid-analysis — line 1463
+- A filter's benefit must clear the untouched-channel drift floor, not just be positive — line 1480
+- Nearfield-vs-seat shape comparison as a cheap cancellation test — line 1498
+- Common-mode (System Sum vs target) is a first-class objective, not a fallback — line 1517
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -113,6 +115,18 @@ the same tune, a large disagreement between them in a given band is itself
 diagnostic: check for ambient masking in the MMM capture and whether the
 sweep-only feature is position-stable (2-3 positions) or a likely near-field
 artifact, before trusting either one in isolation.
+
+**A fixed-point coherent-sum prediction must never override an MMM magnitude
+result — this is a hard rule, not a preference.** If a fixed-position model
+predicts a tonal gain from a delay/APF change but the MMM A/B shows no
+improvement (or a regression), **reject the tonal claim**, no matter how good
+the fixed-point number looks. `tunelib.mmm_overrides_fixed_point(
+fixed_point_predicted_db, mmm_measured_db)` encodes this so it isn't a
+judgment call each time. The phase-domain finding can still be diagnostically
+valid (e.g. for timing) — only the *tonal* claim is rejected. This specific
+failure is worth watching for: a delay whose predicted improvement sits close
+to a cycle-slip / period-ambiguity interval can look clearly beneficial at one
+coherent point and simply not survive spatial averaging.
 
 ## Sweep capture setup (before you have data to analyze)
 
@@ -280,6 +294,33 @@ untouched frequency inherited that shift. **When scoring a re-measure, align
 levels using frequencies the write did NOT touch** (here, a clean 2–10 kHz region),
 not the same fixed mid-band used for target-deviation anchoring — those are two
 different jobs and can need two different anchor choices.
+
+**For a causal A/B (did THIS specific change do what I think), use
+`tunelib.causal_ab_delta(freqs, before, after)` instead of reconstructing this
+by hand.** It's deliberately just `after − before`, no target and no anchor at
+all — a causal A/B on the same measurement chain doesn't need one.
+Independently anchoring "before" and "after" to a target before differencing
+them is the exact anti-pattern above in a different outfit: it can absorb a
+real common-mode change into each curve's own offset and hide it completely
+(a real −1.5 dB common-mode cut compared this way reads as **0.00 dB** of
+change — verified, see TEST39). `target_anchor_offset` still answers a
+different, legitimate question (how close is this curve to target); don't use
+it to answer "what changed."
+
+**Before trusting a feature's magnitude enough to size a filter from it, check
+whether the anchor choice itself is doing the work.** A real case: a 100 Hz
+excess read as +2.5 dB using one defensible 300–1000 Hz anchor band — which
+happened to contain both a cancellation null and a second, unrelated excess —
+and +1.3 to +1.6 dB using seven other defensible anchors. The filter changed
+from `100/Q2/−2` (which *worsened* whole-curve tracking) to `100/Q4/−1.5`
+(which improved it) depending on which was trusted.
+`tunelib.anchor_sensitivity_report(freqs, measured_db, target_db,
+candidate_band)` runs several anchor bands (excluding the candidate feature
+itself, to avoid the circularity of anchoring against the thing being judged)
+and reports the range. `anchor_sensitive: True` means the conclusion depends
+on an arbitrary choice — don't size a filter from it yet; find out why the
+anchors disagree (usually a null or a second feature sitting inside one of
+them) before trusting any single number.
 
 ## Analysis traps — conclusions that are confidently wrong, not just imprecise
 
@@ -471,6 +512,26 @@ the noise floor or presenting three-decimal scores as if they were decisive. Sam
 discipline `predicted_vs_measured`'s `consistent_db` tolerance already applies to
 the predict-vs-remeasure comparison — crude and directional on purpose, not a
 precision instrument.
+
+**A low-SD near-zero mean is a strong, repeatable finding — not a weak or
+unreliable one.** `|mean|/SD` is a tempting trust gate across repeated
+sessions and a real anti-pattern: a band reading mean=+0.1 dB, SD=0.2 dB
+across several independent sessions is *very* stable and nearly balanced,
+but a `|mean|/SD`-style gate reads its small mean as low "signal" and can
+exclude it from scoring as unreliable — exactly backwards. Repeatability
+(how much values scatter session to session) and effect size (how far from
+zero the mean is) are different questions; `tunelib.historical_repeatability
+(values)` answers them separately and returns `'stable_near_zero'`,
+`'stable_nonzero'`, or `'unreliable'` — the last one driven only by SD, never
+by a small mean.
+
+**A re-exported or copy-pasted measurement file can silently double-count as
+a second independent session**, inflating N and deflating the apparent
+spread of a "historical" feature. Before computing any cross-session
+repeatability or sign-count, run `tunelib.detect_duplicate_traces(traces)` —
+it hashes/compares each trace and groups byte-identical or near-identical
+(floating-point round-trip tolerance) captures, which must be counted once,
+not once per filename or date.
 
 ### Traps caught on an Alpine PXE-X121-12EV session (2026-08-05)
 
