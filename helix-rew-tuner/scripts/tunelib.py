@@ -1176,13 +1176,6 @@ def perceptual_score(freqs, dev_db, left_db=None, right_db=None, band=(60.0, 160
             'resonance': round(float(resonance), 4),
             'stereo': round(float(stereo), 4)}
 
-def smooth_bool_mask(mask, oct_frac=1 / 12.0, threshold=0.5):
-    y = np.asarray(mask, dtype=float)
-    w = max(1, int(round((1.0 / np.log10(LOGSTEP)) * np.log10(2 ** oct_frac))))
-    sm = np.convolve(y, np.ones(w) / w, mode='same')
-    return sm >= threshold
-
-
 def octave_smooth_log(freqs, y, oct_frac):
     w = max(1, int(round((1.0 / np.log10(LOGSTEP)) * np.log10(2 ** oct_frac))))
     return np.convolve(y, np.ones(w) / w, mode='same')

@@ -105,6 +105,19 @@ Run these with the user's files; they are the deterministic layer.
   to any DSP file**; every number is a thin wrapper around an already-tested
   `tunelib.py`/`afpx.py` function. `python pipeline.py selftest` self-tests
   on synthetic fixtures.
+- **`decay.py`** — waterfall/CSD decay analysis on an impulse-response `.wav`
+  (REW "Export IR" or similar), for when a problem is ringing/decay-shaped
+  rather than magnitude-shaped (see §Beyond magnitude, methodology.md).
+  `python decay.py t20 <ir.wav>` (RT20-style decay time per band),
+  `python decay.py csd <ir.wav>` (cumulative spectral decay slices), `python
+  decay.py compare <a.wav> <b.wav>` (before/after). Self-contained CLI, no
+  `tunelib`/`afpx` dependency.
+- **`repeatability.py`** — build a same-sitting noise-floor from repeat
+  sweeps and check a proposed deviation against it, when you need a real
+  measured floor instead of `historical_repeatability`'s cross-session
+  heuristic. `python repeatability.py floor <file> [<file> ...] [--json
+  out.json]`, then `python repeatability.py check --floor <floor.json> --dev
+  <hz:db> [...]`. Imports `measure.py` for loading.
 - **`pct6.py`** — **BETA, personal-use only** — decode/encode `.pct6` (DSP
   PC-Tool 6, no-password saves only). `decode()`/`encode()` give a byte-
   preserving (latin-1) text view safe to pass straight into `afpx.py`'s

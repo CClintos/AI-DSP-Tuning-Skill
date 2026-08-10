@@ -32,7 +32,6 @@
 #   python decay.py csd ir.wav --slices 12         # waterfall table
 #   python decay.py compare a.wav b.wav            # two IRs side by side
 import argparse
-import struct
 import sys
 import wave
 

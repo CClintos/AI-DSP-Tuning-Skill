@@ -122,6 +122,26 @@ repo and copy `helix-rew-tuner/` into `~/.claude/skills/helix-rew-tuner/` — no
 `.git` folder or repo-root files in that destination, just the skill folder's
 contents.
 
+`helix-rew-tuner.skill` is just a zip of the `helix-rew-tuner/` folder
+(`__pycache__` excluded) — there is no build step that regenerates it
+automatically, so **after any edit under `helix-rew-tuner/`, re-zip it**
+before committing:
+
+```
+cd helix-rew-tuner && python -c "
+import zipfile, os
+with zipfile.ZipFile('../helix-rew-tuner.skill', 'w', zipfile.ZIP_DEFLATED) as z:
+    for root, dirs, files in os.walk('.'):
+        dirs[:] = [d for d in dirs if d != '__pycache__']
+        for f in files:
+            fp = os.path.join(root, f)
+            z.write(fp, os.path.join('helix-rew-tuner', fp))
+"
+```
+
+An out-of-date `.skill` silently ships old doctrine/code to anyone who
+installs it that way, so treat this as part of the commit, not an afterthought.
+
 **Codex (or any `AGENTS.md`-reading agent):** clone this repo into (or
 alongside) the project you're working in. `AGENTS.md` at the repo root carries
 the same workflow and doctrine as `SKILL.md`, adapted to Codex's

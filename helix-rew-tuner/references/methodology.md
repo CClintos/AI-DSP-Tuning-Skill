@@ -211,7 +211,9 @@ while an RTA export is log/ppo) carry magnitude and phase on FFT-native bin
 spacing, so the impulse response can be reconstructed directly:
 `H(f) = 10^(SPL/20) * exp(j*phase)` placed at bin `round(f/df)` of an
 `rfft`-length array, then `irfft`. From there, a constant-Q gaussian bandpass in
-the frequency domain plus an envelope gives per-frequency decay time. Compare
+the frequency domain plus an envelope gives per-frequency decay time.
+`scripts/decay.py` implements this — `t20`/`csd`/`compare` subcommands work
+directly from an IR `.wav` (e.g. REW's "Export IR"). Compare
 the SAME frequency between the two sides (L vs R) rather than reading absolute
 decay numbers — that controls for cabin modes and for the measurement chain,
 and turns "is this ringing?" into a differential question with a clean control.
