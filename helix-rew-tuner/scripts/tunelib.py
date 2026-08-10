@@ -634,6 +634,228 @@ def target_anchor_offset(freqs, measured_db, target_db, confidence=None,
     return weighted_median(dev[sel], confidence[sel])
 
 # --------------------------------------------------------------------------
+# ANCHOR SENSITIVITY -- target_anchor_offset picks ONE wide band and falls
+# back if it's too sparse, but a single anchor choice can silently bake a
+# wrong conclusion into a candidate: a real project misjudged a 100 Hz excess
+# as +2.5 dB using a 300-1000 Hz anchor that itself contained a cancellation
+# null and a second candidate excess -- seven more defensible anchors gave
+# +1.3 to +1.6 dB, and the resulting filter recommendation changed (Q2/-2,
+# which worsened whole-curve tracking, vs Q4/-1.5, which improved it). This
+# runs several plausible anchor choices and reports the SPREAD, so that
+# sensitivity to an arbitrary choice is visible before it drives a filter,
+# instead of only ever seeing whichever one anchor happened to be used.
+def anchor_sensitivity_report(freqs, measured_db, target_db, candidate_band,
+                              confidence=None, anchor_bands_list=None,
+                              sensitive_range_db=1.0):
+    """candidate_band: the region the resulting filter would target (e.g. the
+    100 Hz feature) -- excluded from the default anchor choices so the
+    candidate can't anchor against itself. Returns each anchor's resulting
+    offset and candidate-band deviation, the range across all of them, and
+    `anchor_sensitive` (True when that range exceeds `sensitive_range_db`,
+    meaning the conclusion depends on which defensible anchor you picked --
+    don't tune from a single-anchor number when this is True)."""
+    freqs = np.asarray(freqs, dtype=float)
+    measured_db = np.asarray(measured_db, dtype=float)
+    target_db = np.asarray(target_db, dtype=float)
+    if anchor_bands_list is None:
+        candidates = [(300.0, 3000.0), (120.0, 1000.0), (1000.0, 6000.0),
+                     (200.0, 4000.0), (400.0, 4000.0), (150.0, 2000.0)]
+        anchor_bands_list = []
+        for lo, hi in candidates:
+            # skip/trim any default band that overlaps the candidate feature --
+            # anchoring against the thing you're about to judge is circular
+            if hi <= candidate_band[0] or lo >= candidate_band[1]:
+                anchor_bands_list.append((lo, hi))
+        if not anchor_bands_list:
+            anchor_bands_list = candidates
+    results = []
+    for band in anchor_bands_list:
+        offset = target_anchor_offset(freqs, measured_db, target_db,
+                                      confidence=confidence, anchor_bands=(band,))
+        dev = erb_smooth(freqs, measured_db - (target_db + offset))
+        sel = (freqs >= candidate_band[0]) & (freqs <= candidate_band[1])
+        if not np.any(sel):
+            continue
+        w = audibility_weight(freqs[sel]) if confidence is None \
+            else audibility_weight(freqs[sel]) * np.clip(confidence[sel], 0.0, 1.0)
+        cand_dev = float(np.average(dev[sel], weights=w))
+        results.append({'anchor_band': band, 'offset_db': round(offset, 2),
+                        'candidate_dev_db': round(cand_dev, 2)})
+    if not results:
+        raise ValueError('no anchor band produced a result -- candidate_band or '
+                         'anchor_bands_list leaves nothing usable')
+    vals = [r['candidate_dev_db'] for r in results]
+    lo_v, hi_v = min(vals), max(vals)
+    return {'results': results, 'min_db': round(lo_v, 2), 'max_db': round(hi_v, 2),
+            'range_db': round(hi_v - lo_v, 2),
+            'sign_consistent': bool(all(v > 0 for v in vals) or all(v < 0 for v in vals)),
+            'anchor_sensitive': bool((hi_v - lo_v) > sensitive_range_db)}
+
+# --------------------------------------------------------------------------
+# CAUSAL A/B DELTA -- the correct way to score "did this specific change do
+# what I think", as opposed to "how close to target is this curve" (a
+# different, unrelated question that target_anchor_offset answers). A causal
+# A/B on the SAME physical/measurement chain doesn't need a target at all:
+# mean(B) - mean(A) is the answer. The mistake this guards against is real:
+# independently anchoring A and B to a target BEFORE differencing them can
+# absorb part of a genuine common-mode change into each curve's own vertical
+# offset and hide it -- see TEST for a worked case where a real -1.5 dB
+# common-mode filter becomes invisible that way.
+def causal_ab_delta(freqs, curve_a, curve_b, smooth=True):
+    """curve_a/curve_b: the SAME measurement (System Sum, a solo, whatever) on
+    the same grid, before and after one change. No target, no anchor -- use
+    target_anchor_offset separately, on a DIFFERENT curve pair, for the
+    unrelated question of tonal accuracy vs target."""
+    d = np.asarray(curve_b, dtype=float) - np.asarray(curve_a, dtype=float)
+    return erb_smooth(freqs, d) if smooth else d
+
+# --------------------------------------------------------------------------
+# MODEL-DISCRIMINATION GATE -- picking the mechanism/model with the lower
+# residual is only meaningful if the two residuals differ by more than the
+# measurement's own uncertainty. A real case (2026-08-10): "mids+subs"
+# scored 0.46 dB rms and "mids-only" scored 0.30 dB against MMM solo data
+# whose own low-frequency path variance was ~0.8-0.95 dB -- a gap far
+# smaller than the noise floor of the data used to compute it. The lower
+# number was reported as the answer ("mids-only fits better") and became the
+# basis for a false implementation diagnosis. Both a fixed-mic re-test and a
+# PC-Tool screenshot later showed the filter was on every intended path.
+def models_discriminable(residual_a_db, residual_b_db, uncertainty_db,
+                         margin=1.0):
+    """Before preferring the model with the smaller residual, check the gap
+    against the relevant measurement uncertainty for the SAME data used to
+    compute both residuals (same band, same metric, same protocol -- see
+    'Repeatability is not one number' in methodology.md). Returns
+    'discriminable' only if |residual_a - residual_b| exceeds
+    margin * uncertainty_db; otherwise 'not_discriminable', in which case
+    neither model should be asserted over the other from this dataset."""
+    gap = abs(float(residual_a_db) - float(residual_b_db))
+    threshold = margin * float(uncertainty_db)
+    discriminable = gap > threshold
+    if discriminable:
+        preferred = 'a' if residual_a_db < residual_b_db else 'b'
+        verdict = 'discriminable'
+        reason = ('gap %.2f dB exceeds %.2f x uncertainty (%.2f dB) -- model %s is '
+                  'supported' % (gap, margin, uncertainty_db, preferred))
+    else:
+        preferred = None
+        verdict = 'not_discriminable'
+        reason = ('gap %.2f dB does not exceed %.2f x uncertainty (%.2f dB) -- these '
+                  'models cannot be told apart from this dataset; do not assert either '
+                  'one, and do not build further conclusions on the smaller residual'
+                  % (gap, margin, uncertainty_db))
+    return {'verdict': verdict, 'preferred_model': preferred, 'gap_db': round(gap, 3),
+            'threshold_db': round(threshold, 3), 'reason': reason}
+
+# --------------------------------------------------------------------------
+# FORBIDDEN INFERENCE GUARD -- a fixed-position coherent-sum prediction must
+# never override a Moving Mic Method (MMM) magnitude A/B result. MMM is the
+# magnitude/tonal authority (see methodology.md's "Measurement method
+# selection"); a fixed point is diagnostic-only for phase. The failure mode
+# this exists for is specific and real: a delay/APF candidate whose predicted
+# improvement sits close to a cycle-slip / period-ambiguity interval can look
+# clearly beneficial at one coherent point and simply not survive spatial
+# averaging.
+def mmm_overrides_fixed_point(fixed_point_predicted_db, mmm_measured_db,
+                              mmm_threshold_db=0.0):
+    """If the fixed-point model predicts a magnitude GAIN but MMM does not
+    confirm at least mmm_threshold_db of it, reject the tonal claim --
+    regardless of how confident the fixed-point number looks. The phase-domain
+    result (e.g. a delay finding) may still be valid for timing; only the
+    TONAL claim is rejected here."""
+    predicted_gain = fixed_point_predicted_db > 0
+    mmm_confirms = mmm_measured_db > mmm_threshold_db
+    if predicted_gain and not mmm_confirms:
+        verdict, reason = 'reject_tonal_claim', (
+            'fixed-point predicted %+.2f dB but MMM measured %+.2f dB -- MMM is the '
+            'magnitude authority here; the phase-domain result may still be valid for '
+            'timing, but do not claim a tonal benefit' % (fixed_point_predicted_db, mmm_measured_db))
+    else:
+        verdict, reason = 'accept_tonal_claim', 'MMM does not contradict the fixed-point prediction'
+    return {'verdict': verdict, 'reason': reason,
+            'fixed_point_predicted_db': round(float(fixed_point_predicted_db), 2),
+            'mmm_measured_db': round(float(mmm_measured_db), 2)}
+
+# --------------------------------------------------------------------------
+# DUPLICATE TRACE DETECTION -- a re-exported or copy-pasted measurement file
+# can end up counted as a second independent session, quietly inflating N and
+# deflating the apparent spread of a "historical" feature. A real case: a
+# final-state capture contained a trace byte-identical to one from an earlier
+# A/B test.
+def detect_duplicate_traces(traces, rtol=1e-9, atol=1e-6):
+    """traces: {label: (freqs, values)}. Returns groups of labels whose
+    (freqs, values) match within tolerance -- these are the SAME capture
+    under different names/dates and must be counted once, not once per label,
+    for any session-count/SD/repeatability calculation. Tight tolerance by
+    design: this catches exact or floating-point-round-trip duplicates, not
+    merely similar-looking measurements (two real, independent sessions of a
+    stable feature are expected to differ by measurement noise)."""
+    labels = list(traces.keys())
+    used = set()
+    groups = []
+    for i, a in enumerate(labels):
+        if a in used:
+            continue
+        fa, va = traces[a]
+        fa, va = np.asarray(fa, dtype=float), np.asarray(va, dtype=float)
+        grp = [a]
+        for b in labels[i + 1:]:
+            if b in used:
+                continue
+            fb, vb = traces[b]
+            fb, vb = np.asarray(fb, dtype=float), np.asarray(vb, dtype=float)
+            if (len(fa) == len(fb) and np.allclose(fa, fb, rtol=rtol, atol=atol)
+                    and np.allclose(va, vb, rtol=rtol, atol=atol)):
+                grp.append(b)
+                used.add(b)
+        if len(grp) > 1:
+            groups.append(grp)
+            used.add(a)
+    return groups
+
+# --------------------------------------------------------------------------
+# STABLE-NEAR-ZERO vs UNRELIABLE -- |mean|/SD is a tempting trust gate and a
+# real anti-pattern: a band with mean=+0.1 dB, SD=0.2 dB is VERY stable and
+# nearly balanced (a strong, useful finding), but a |mean|/SD-style gate reads
+# its small mean as low "signal" and can exclude it from scoring as
+# "unreliable" -- exactly backwards. Repeatability (how much values scatter)
+# and effect size (how far from zero the mean is) are different questions;
+# answer them separately and never collapse them into one ratio.
+def historical_repeatability(values, stable_sd_db=0.3, meaningful_db=0.5):
+    """values: per-session measurements of the same quantity (e.g. R-L at one
+    frequency across N independent sessions -- run detect_duplicate_traces
+    first so a re-exported file isn't counted twice). Returns mean, SD (n-1),
+    and one of three verdicts: 'stable_near_zero' (low SD, small mean -- a
+    real, repeatable near-balance, not a weak result), 'stable_nonzero' (low
+    SD, meaningful mean -- a real, repeatable effect), or 'unreliable' (high
+    SD -- the actual reason to distrust a band; a small mean is never that
+    reason on its own).
+
+    The default stable_sd_db=0.3 is NOT a universal floor -- call this
+    separately per metric/band/protocol and do not reuse one call's SD for a
+    different quantity. A real case (2026-08-10): an SD of 0.17 dB from four
+    cross-session System-Sum-vs-target captures was reused as the acceptance
+    threshold for a same-sitting low-frequency absolute-level A/A repeat,
+    which then measured 0.95 dB -- the two were different quantities (the
+    historical run mixed level and shape variance; the same-sitting run
+    isolated level alone). A small-N (here N=4) cross-session SD is a weak
+    estimate of variance in general and should not be promoted to a
+    same-sitting acceptance gate for a differently-scoped measurement without
+    re-deriving it from same-session data first."""
+    v = np.asarray(values, dtype=float)
+    if len(v) < 2:
+        raise ValueError('need >=2 independent sessions to assess repeatability')
+    mean, sd = float(np.mean(v)), float(np.std(v, ddof=1))
+    repeatable = sd <= stable_sd_db
+    if repeatable and abs(mean) < meaningful_db:
+        verdict = 'stable_near_zero'
+    elif repeatable:
+        verdict = 'stable_nonzero'
+    else:
+        verdict = 'unreliable'
+    return {'mean_db': round(mean, 3), 'sd_db': round(sd, 3), 'n': len(v),
+            'repeatable': bool(repeatable), 'verdict': verdict}
+
+# --------------------------------------------------------------------------
 # VOICING -- the single most audible tuning layer (overall tonal balance),
 # expressed as the four knobs people actually voice by rather than as
 # individual filters. voice_target() shapes the GOAL; the measurement-driven
@@ -2469,5 +2691,84 @@ if __name__ == '__main__':
         'a band narrow enough to sit near a single cycle must flag the real cycle-ambiguity here'
     print('TEST39c delay_sweep ambiguity flag: wide band (2000-4000 Hz) correctly '
           'confident, narrow band near one cycle (2100-2300 Hz) correctly flagged ambiguous')
+
+    # ---- TEST40: anchor sensitivity -- default wide bands agree, a bad narrow
+    # anchor overlapping a null is flagged sensitive against clean ones --------
+    tgt40 = np.zeros_like(freqs)
+    meas40 = (peaking_db(freqs, 100.0, 3.0, 1.5)
+             - peaking_db(freqs, 450.0, 4.0, 8.0)
+             + peaking_db(freqs, 700.0, 3.0, 3.0))
+    r40a = anchor_sensitivity_report(freqs, meas40, tgt40, candidate_band=(80.0, 130.0))
+    print('\nTEST40a anchor sensitivity (default wide bands): range=%.2fdB sensitive=%s'
+          % (r40a['range_db'], r40a['anchor_sensitive']))
+    assert not r40a['anchor_sensitive'] and r40a['sign_consistent']
+    r40b = anchor_sensitivity_report(freqs, meas40, tgt40, candidate_band=(80.0, 130.0),
+                                     anchor_bands_list=[(400.0, 500.0), (1000.0, 3000.0), (150.0, 350.0)])
+    print('TEST40b anchor sensitivity (one anchor dominated by a null): range=%.2fdB sensitive=%s'
+          % (r40b['range_db'], r40b['anchor_sensitive']))
+    assert r40b['anchor_sensitive'] and r40b['range_db'] > 3.0
+
+    # ---- TEST41: causal A/B delta survives independent-re-anchor blindness -----
+    tgt41 = -0.9 * np.log2(freqs / 1000.0)
+    A41 = tgt41.copy()
+    B41 = tgt41 - 1.5                                   # a real -1.5dB common-mode cut
+    i1k = int(np.argmin(np.abs(freqs - 1000.0)))
+    off_a = target_anchor_offset(freqs, A41, tgt41)
+    off_b = target_anchor_offset(freqs, B41, tgt41)
+    wrong_hidden = (B41 - (tgt41 + off_b)) - (A41 - (tgt41 + off_a))
+    right_delta = causal_ab_delta(freqs, A41, B41)
+    print('\nTEST41 causal A/B: independent-re-anchor hides it at %+.2fdB, '
+          'causal_ab_delta finds %+.2fdB (real change -1.5dB)'
+          % (wrong_hidden[i1k], right_delta[i1k]))
+    assert abs(wrong_hidden[i1k]) < 0.05, 'the wrong pattern should hide the real change'
+    assert abs(right_delta[i1k] - (-1.5)) < 0.1, 'causal_ab_delta must recover the real change'
+
+    # ---- TEST42: MMM overrides a fixed-point tonal prediction -------------------
+    rej = mmm_overrides_fixed_point(1.5, -0.3)
+    acc = mmm_overrides_fixed_point(1.5, 1.2)
+    acc2 = mmm_overrides_fixed_point(-2.0, -1.8)   # predicted a cut, not a gain -- not this guard's concern
+    print('\nTEST42 MMM-overrides-fixed-point: reject=%s accept=%s accept(no-gain-claimed)=%s'
+          % (rej['verdict'], acc['verdict'], acc2['verdict']))
+    assert rej['verdict'] == 'reject_tonal_claim'
+    assert acc['verdict'] == 'accept_tonal_claim'
+    assert acc2['verdict'] == 'accept_tonal_claim'
+
+    # ---- TEST43: duplicate trace detection --------------------------------------
+    f43 = freqs
+    trace_x = peaking_db(f43, 1000.0, 2.0, -3.0)
+    traces43 = {
+        'FinalState_FR': (f43, trace_x),
+        'ABTest315_FR_B': (f43, trace_x.copy()),          # byte-identical re-export
+        'RealSession2': (f43, trace_x + np.random.RandomState(1).normal(0, 0.15, len(f43))),
+    }
+    dupes = detect_duplicate_traces(traces43)
+    print('\nTEST43 duplicate detection:', dupes)
+    assert len(dupes) == 1 and set(dupes[0]) == {'FinalState_FR', 'ABTest315_FR_B'}
+    assert not any('RealSession2' in g for g in dupes), 'a genuinely different session must not be flagged'
+
+    # ---- TEST44: stable-near-zero must NOT read as unreliable -------------------
+    near_zero = [0.05, 0.15, -0.05, 0.2, 0.1, -0.1]     # mean~0.1, SD~0.12
+    rep44a = historical_repeatability(near_zero)
+    print('\nTEST44a stable-near-zero: %r' % rep44a)
+    assert rep44a['verdict'] == 'stable_near_zero', \
+        'a low-SD near-zero band must read as a real finding, not unreliable'
+    scattered = [1.5, -2.0, 0.5, -1.8, 2.2, -0.3]        # high SD regardless of mean
+    rep44b = historical_repeatability(scattered)
+    print('TEST44b genuinely scattered: %r' % rep44b)
+    assert rep44b['verdict'] == 'unreliable'
+    real_effect = [1.4, 1.6, 1.5, 1.55, 1.45]            # low SD, real nonzero mean
+    rep44c = historical_repeatability(real_effect)
+    print('TEST44c stable nonzero: %r' % rep44c)
+    assert rep44c['verdict'] == 'stable_nonzero'
+
+    # ---- TEST45: model-discrimination gate -- a lower residual is not a
+    # finding unless it clears the data's own uncertainty (2026-08-10 case:
+    # 0.46 vs 0.30 dB rms against ~0.8-0.95 dB LF path noise) -------------------
+    r45a = models_discriminable(0.46, 0.30, uncertainty_db=0.85)
+    print('\nTEST45a not discriminable (real project numbers): %r' % r45a)
+    assert r45a['verdict'] == 'not_discriminable' and r45a['preferred_model'] is None
+    r45b = models_discriminable(2.4, 0.3, uncertainty_db=0.85)
+    print('TEST45b clearly discriminable: %r' % r45b)
+    assert r45b['verdict'] == 'discriminable' and r45b['preferred_model'] == 'b'
 
     print('\nALL TESTS PASSED')

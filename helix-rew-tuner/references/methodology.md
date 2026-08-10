@@ -7,40 +7,52 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 45
-- Sweep capture setup — line 117
-- Beyond magnitude — decay (time-domain) and distortion axes — line 164
-- Deviation analysis — line 244
-- Analysis traps (anchoring, sum-vs-solo, coherence wobble, stale decoded fields, imaging, sub coupling, ties) — line 284
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 47
+- Sweep capture setup — line 131
+- Beyond magnitude — decay (time-domain) and distortion axes — line 178
+- Deviation analysis — line 258
+- Analysis traps (anchoring, causal A/B, anchor sensitivity, sum-vs-solo,
+  coherence wobble, stale decoded fields, imaging, sub coupling, ties,
+  stable-near-zero, duplicates) — line 325
   - Traps from the Alpine session: null-averaging read as level, judging
     inherited EQ, flat interference offsets, MMM level comparability,
-    fractional-octave smearing, zero-band fits, crossover skirts — line 475
-- When the answer is physical, not electrical — line 554
-- Voicing — the most audible decision — line 628
-- Classify the problem (the core skill) — line 659
-  - The interference audit — line 678
-  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 686
-  - Minimum-phase / EQ-ability — line 719
-  - Quantify single-position phase reliability — line 726
-  - Multi-position variance — line 766
-- The crossover action-ladder — line 804
-- Shelf cookbook (incl. judging a shelf emulation) — line 865
-- All-pass cookbook — line 898
-- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 941
-- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1032
-- Verification & honesty — line 1090
-- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1148
-- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1179
-- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1221
-- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1279
-- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1315
-- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1342
+    fractional-octave smearing, zero-band fits, crossover skirts — line 536
+- When the answer is physical, not electrical — line 615
+- Voicing — the most audible decision — line 689
+- Classify the problem (the core skill) — line 720
+  - The interference audit — line 739
+  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 747
+  - Minimum-phase / EQ-ability — line 780
+  - Quantify single-position phase reliability — line 787
+  - Multi-position variance — line 827
+- The crossover action-ladder — line 865
+- Shelf cookbook (incl. judging a shelf emulation) — line 926
+- All-pass cookbook — line 959
+- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 1002
+- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1093
+- Verification & honesty — line 1151
+- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1209
+- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1240
+- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1282
+- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1340
+- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1376
+- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1403
 - Electrical-vs-measured decomposition must be tune-matched, and may not be
-  recoverable at all — line 1380
-- Width/Q from a plot: pick one definition and don't switch mid-analysis — line 1402
-- A filter's benefit must clear the untouched-channel drift floor, not just be positive — line 1419
-- Nearfield-vs-seat shape comparison as a cheap cancellation test — line 1437
-- Common-mode (System Sum vs target) is a first-class objective, not a fallback — line 1456
+  recoverable at all — line 1441
+- Width/Q from a plot: pick one definition and don't switch mid-analysis — line 1463
+- A filter's benefit must clear the untouched-channel drift floor, not just be positive — line 1480
+- Nearfield-vs-seat shape comparison as a cheap cancellation test — line 1508
+- Common-mode (System Sum vs target) is a first-class objective, not a fallback
+  (+ a System Sum deficit alone is not proof of a common-mode cause) — line 1527
+- Fixed mic vs MMM: "what to fix" vs "did it land" — line 1567
+- Prediction and measurement must go through the identical operator — line 1606
+- Model-discrimination gate — a smaller residual is not a finding by itself — line 1644
+- Nearfield has a claim ceiling: source-local, not exact physical cause — line 1669
+- Deep/narrow notch boost guardrail — stable does not mean boostable — line 1689
+- Nearfield aesthetics do not override a seat-validated filter — line 1713
+- Retraction discipline: a disproven claim invalidates what was built on it — line 1736
+- Rear-fill / ambience channels need their own measurement discipline — line 1758
+- Stopping is a valid, and often correct, outcome — line 1797
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -113,6 +125,18 @@ the same tune, a large disagreement between them in a given band is itself
 diagnostic: check for ambient masking in the MMM capture and whether the
 sweep-only feature is position-stable (2-3 positions) or a likely near-field
 artifact, before trusting either one in isolation.
+
+**A fixed-point coherent-sum prediction must never override an MMM magnitude
+result — this is a hard rule, not a preference.** If a fixed-position model
+predicts a tonal gain from a delay/APF change but the MMM A/B shows no
+improvement (or a regression), **reject the tonal claim**, no matter how good
+the fixed-point number looks. `tunelib.mmm_overrides_fixed_point(
+fixed_point_predicted_db, mmm_measured_db)` encodes this so it isn't a
+judgment call each time. The phase-domain finding can still be diagnostically
+valid (e.g. for timing) — only the *tonal* claim is rejected. This specific
+failure is worth watching for: a delay whose predicted improvement sits close
+to a cycle-slip / period-ambiguity interval can look clearly beneficial at one
+coherent point and simply not survive spatial averaging.
 
 ## Sweep capture setup (before you have data to analyze)
 
@@ -280,6 +304,33 @@ untouched frequency inherited that shift. **When scoring a re-measure, align
 levels using frequencies the write did NOT touch** (here, a clean 2–10 kHz region),
 not the same fixed mid-band used for target-deviation anchoring — those are two
 different jobs and can need two different anchor choices.
+
+**For a causal A/B (did THIS specific change do what I think), use
+`tunelib.causal_ab_delta(freqs, before, after)` instead of reconstructing this
+by hand.** It's deliberately just `after − before`, no target and no anchor at
+all — a causal A/B on the same measurement chain doesn't need one.
+Independently anchoring "before" and "after" to a target before differencing
+them is the exact anti-pattern above in a different outfit: it can absorb a
+real common-mode change into each curve's own offset and hide it completely
+(a real −1.5 dB common-mode cut compared this way reads as **0.00 dB** of
+change — verified, see TEST39). `target_anchor_offset` still answers a
+different, legitimate question (how close is this curve to target); don't use
+it to answer "what changed."
+
+**Before trusting a feature's magnitude enough to size a filter from it, check
+whether the anchor choice itself is doing the work.** A real case: a 100 Hz
+excess read as +2.5 dB using one defensible 300–1000 Hz anchor band — which
+happened to contain both a cancellation null and a second, unrelated excess —
+and +1.3 to +1.6 dB using seven other defensible anchors. The filter changed
+from `100/Q2/−2` (which *worsened* whole-curve tracking) to `100/Q4/−1.5`
+(which improved it) depending on which was trusted.
+`tunelib.anchor_sensitivity_report(freqs, measured_db, target_db,
+candidate_band)` runs several anchor bands (excluding the candidate feature
+itself, to avoid the circularity of anchoring against the thing being judged)
+and reports the range. `anchor_sensitive: True` means the conclusion depends
+on an arbitrary choice — don't size a filter from it yet; find out why the
+anchors disagree (usually a null or a second feature sitting inside one of
+them) before trusting any single number.
 
 ## Analysis traps — conclusions that are confidently wrong, not just imprecise
 
@@ -471,6 +522,26 @@ the noise floor or presenting three-decimal scores as if they were decisive. Sam
 discipline `predicted_vs_measured`'s `consistent_db` tolerance already applies to
 the predict-vs-remeasure comparison — crude and directional on purpose, not a
 precision instrument.
+
+**A low-SD near-zero mean is a strong, repeatable finding — not a weak or
+unreliable one.** `|mean|/SD` is a tempting trust gate across repeated
+sessions and a real anti-pattern: a band reading mean=+0.1 dB, SD=0.2 dB
+across several independent sessions is *very* stable and nearly balanced,
+but a `|mean|/SD`-style gate reads its small mean as low "signal" and can
+exclude it from scoring as unreliable — exactly backwards. Repeatability
+(how much values scatter session to session) and effect size (how far from
+zero the mean is) are different questions; `tunelib.historical_repeatability
+(values)` answers them separately and returns `'stable_near_zero'`,
+`'stable_nonzero'`, or `'unreliable'` — the last one driven only by SD, never
+by a small mean.
+
+**A re-exported or copy-pasted measurement file can silently double-count as
+a second independent session**, inflating N and deflating the apparent
+spread of a "historical" feature. Before computing any cross-session
+repeatability or sign-count, run `tunelib.detect_duplicate_traces(traces)` —
+it hashes/compares each trace and groups byte-identical or near-identical
+(floating-point round-trip tolerance) captures, which must be counted once,
+not once per filename or date.
 
 ### Traps caught on an Alpine PXE-X121-12EV session (2026-08-05)
 
@@ -1475,3 +1546,269 @@ tuning investigation has been running on one axis (L/R, a single band, a single
 driver pair) for several sessions, periodically re-score the other axis (System
 Sum vs target) from scratch** rather than assuming it was already covered earlier
 in the project.
+
+**Caveat added 2026-08-10, from the very next thing that went wrong with this
+advice: a System Sum deficit is not automatically evidence of a common-mode
+cause.** A stable ~5 dB System Sum shortfall around 7 kHz (SD 0.11 dB across three
+sessions — by the standard above, an extremely trustworthy number) was one step
+from becoming a common-mode boost proposal (`+6 dB`, high Q, on both tweeters).
+Nearfield captures on both tweeters showed the deficit was **entirely one driver**:
+present in the left tweeter's own nearfield response (−5.05 dB, matching the seat's
+−5.09 dB to 0.04 dB) and **absent in the right's** (+0.09 dB). The total-sum number
+was real and repeatable; the mechanism it implied was wrong. **Before labeling any
+System Sum deficit "common-mode," inspect the contributors** (L and R separately,
+or the relevant driver pair) to confirm they actually share the deficit. A total
+that's low can be low because both sides are low equally, or because one side is
+very low and the other is fine — only the first case is a common-mode filter
+candidate. See also "Nearfield claim ceiling" and "Deep/narrow notch boost
+guardrail" below, which cover what to do once contributor inspection finds a
+source-local cause instead.
+
+## Fixed mic vs MMM is a second, orthogonal authority question — "what to fix" vs "did it land"
+
+The existing "Measurement method selection" section (sweep vs MMM) answers *which
+method is authoritative for a given research question*, but it doesn't cover a
+distinction that caused a real, fully-formed wrong conclusion: **MMM and a fixed
+mic answer different questions, and using MMM for the wrong one produces confident,
+specific, wrong answers — not just noisy ones.**
+
+**MMM answers "what should be fixed?"** — tonal balance, L/R spectral balance,
+System Sum vs target: anything where the listening objective is inherently spatial.
+
+**A fixed mic answers "did a known DSP change actually land?"** A filter is an
+electrical fact that applies identically at every point in the cabin, so verifying
+it needs *repeatability*, not spatial averaging. If the acoustic path is `R(f)`
+and the pre-change source response is `S(f)`, then `A = R·S`; if the change adds a
+known transfer `H`, then `B = R·H·S`, so with the mic and everything else
+unchanged, `B/A = H` exactly — the room response and any unchanged crossover
+cancel in the ratio. MMM's spatial averaging doesn't get you anything extra for
+this question and costs you the one thing you need, which is a low noise floor.
+
+**Real case (2026-08-10), the full failure chain:** a `100 Hz / Q4 / −1.5 dB`
+band was added to a sub channel low-passed at 80 Hz. An MMM solo A/B suggested the
+sub delivered only ~19% of the intended cut. That was treated as a real finding,
+which led to inventing a mechanism ("PC-Tool silently clamps/rejects a PEQ whose
+centre lies outside the channel's own passband") to explain it. **Both halves were
+wrong.** A PC-Tool screenshot showed the band present and enabled. A fixed-mic
+A/B (mic on a tripod, untouched between captures) measured **−1.53 dB against
+−1.50 dB predicted, 95% delivered, with an untouched control band at +0.02 dB** —
+the implementation was correct the entire time. The MMM result was noise: the
+project's own measured low-frequency MMM path variance that day was ~0.8–0.95 dB,
+comparable to the 1.5 dB effect being measured.
+
+**Rule:** for "did the write land?", use a fixed mic (tripod, untouched between
+captures, ideally A→B→B→A), compare the whole measured B−A transfer against the
+exact predicted transfer, and do not infer a routing/tool/DSP fault from an MMM
+result unless the effect is far above MMM's *measured* (not assumed) variance for
+that band. If a fixed-mic check is unavailable, label the finding "unresolved,"
+not "the filter didn't land."
+
+## Prediction and measurement must go through the identical operator
+
+Comparing a raw filter transfer to a *processed* (smoothed, baseline-fit,
+prominence-scored) measurement is not apples-to-apples, and the direction of the
+resulting error is not obvious in advance.
+
+**Real case 1 (2026-08-10):** a `100 Hz / Q4.0 / −1.5 dB` filter's raw centre
+depth is −1.50 dB. Comparing that raw number to an ERB-smoothed measured change
+made the measurement look like it delivered only 51% of the filter (measured
+−0.58 dB vs "predicted" −1.15 dB, itself already a robust-regression operator
+applied only to the raw filter). Running the *filter* through the *same* ERB
+smoothing before comparing gives −0.84 dB predicted — the measurement then lands
+at 69% with the residual gap inside the pair-to-pair repeat spread. The 51%
+number implied a real, physically impossible anomaly (a uniform electrical cut
+cannot be diluted by spatial averaging — if a filter attenuates by 1.5 dB at every
+point, the power average over any set of points also drops by 1.5 dB); the 69%
+number showed there was nothing to explain.
+
+**Real case 2, same day, opposite direction:** an `8000 Hz / Q12 / −3 dB` filter's
+measured effect at 8 kHz (−1.87 dB) was compared to its raw −3.00 dB prediction and
+described as "shallower than predicted, consistent with 1/3-octave smoothing" —
+directionally reasonable-sounding, but never actually computed. Running the
+predicted transfer through the same 1/3-octave smoothing gives −1.20 dB — the
+measurement in fact *exceeded* the (correctly processed) prediction. The hand-wave
+had the right instinct and the wrong sign.
+
+**Rule:** whenever a predicted transfer will be compared to a measurement that has
+been smoothed, baseline-fit, or scored by any custom operator, run the *predicted*
+transfer through the *identical* operator before comparing. This risk is largest
+exactly where it's easiest to overlook: when the filter's own bandwidth is
+comparable to or narrower than the operator's effective bandwidth (ERB widens
+in absolute Hz at low frequency, so even Q3–5 filters below ~200 Hz are affected;
+narrow high-Q HF filters like `Q12` are affected by any octave-fraction smoothing).
+`erb_smooth()` and any 1/N-octave smoother in this toolkit apply equally to a
+synthetic filter-response curve as to a measured one — use them on both sides of
+a comparison, never one side only. See `models_discriminable()` for the related
+rule about comparing residuals computed on inconsistent bases.
+
+## Model-discrimination gate — a smaller residual is not a finding by itself
+
+Choosing between two competing explanations (which channel got a filter, which
+topology fits the data, which mechanism caused a deficit) by picking whichever has
+the lower fit residual is only valid if the two residuals differ by more than the
+uncertainty of the data used to compute them.
+
+**Real case (2026-08-10):** an MMM-derived comparison scored "mids+subs" at
+0.46 dB rms and "mids-only" at 0.30 dB rms, and the lower number was reported as
+"mids-only fits better." The measurement's own low-frequency path noise that
+session was ~0.8–0.95 dB — larger than either residual, let alone their 0.16 dB
+gap. The conclusion was unsupportable from the data used to reach it, and it
+became load-bearing for a wrong implementation diagnosis (see the fixed-mic
+section above).
+
+**Rule, and helper:** before preferring the model with the smaller residual, call
+`tunelib.models_discriminable(residual_a_db, residual_b_db, uncertainty_db)`. It
+returns `not_discriminable` unless the gap between the two residuals exceeds the
+supplied uncertainty (by a configurable margin, default 1×) — in which case the
+correct statement is "these models cannot be told apart from this dataset," not a
+preference for the smaller number. The `uncertainty_db` argument must be the
+measured variance for the *same* band/metric/protocol used to compute both
+residuals, not a number borrowed from a different measurement (see
+`historical_repeatability`'s docstring on the same point).
+
+## Nearfield has a claim ceiling: source-local, not exact physical cause
+
+Nearfield-vs-seat comparison (see "Nearfield-vs-seat shape comparison" above) is
+excellent for answering *whether* a feature originates at the driver or is created
+between the driver and the seat. It does **not**, by itself, identify *which*
+physical mechanism at the driver is responsible.
+
+**Real case (2026-08-10):** a left tweeter showed deep notches at 4.6 and 7.2 kHz,
+confirmed present in its own nearfield capture and absent on the right tweeter.
+That is solid evidence of "left tweeter, physical" — but driver aim, mounting,
+grille diffraction, a cavity resonance, and unit-to-unit manufacturing variation
+are all consistent with the same nearfield signature, and nothing in a magnitude-only
+nearfield capture distinguishes between them.
+
+**Rule:** the supportable claim from a present-nearfield, absent-on-the-other-side
+result is "this has a confirmed source-local component; the exact physical cause
+is unresolved" — not a specific mechanism (aiming, defective unit, etc.) unless
+something further (a driver swap, a mounting change with a re-measure, physical
+inspection) actually isolates it.
+
+## Deep/narrow notch boost guardrail — stable does not mean boostable
+
+A notch that is deep, narrow, and highly repeatable is *more* suspicious as a
+boost target, not less — those are exactly the properties of a directivity null,
+installation cavity resonance, or driver radiation limit, none of which respond
+usefully to electrical boost.
+
+**Real case (2026-08-10):** the 7.2 kHz System Sum deficit above (−5.32 dB,
+SD 0.11 dB, ratio 48 — by every repeatability rule in this file, about as
+trustworthy a number as this project ever produced) was one step from a proposed
+`7400 Hz / Q7 / +6 dB` common-mode correction before nearfield data showed it was
+a single driver's own radiation response, not a target/tonal deficit. Boosting a
+driver by 6 dB at a frequency where it measures 5–11 dB down *at the driver itself*
+would have driven it harder exactly where it isn't radiating toward the listener —
+distortion and heat, not output.
+
+**Rule:** before proposing a boost at a deep/narrow feature, however clean the
+repeatability statistics look, check (in order): is it present nearfield (source-
+local, not cabin)? is it present on both sides (physical asymmetry, not systemic)?
+does the target/reference curve actually call for output there, or is the "deficit"
+relative to a smooth target that was never validated at that resolution? A feature
+passing every repeatability test is a reason to trust the *measurement*, not a
+license to skip the mechanism check before writing a filter.
+
+## Nearfield aesthetics do not override a seat-validated filter
+
+Once a filter has been validated by an actual seat A/B (predicted vs measured
+agreement, controls checked), a *later* nearfield capture that makes the filter's
+centre frequency look visually mis-centred relative to the driver's raw acoustic
+shape is not grounds to re-fit it.
+
+**Real case (2026-08-10):** an FL tweeter `7100/Q1.6/−3` cut, previously validated
+by a seat MMM A/B that measured the predicted change to 0.19 dB rms, was checked
+against the same driver's nearfield acoustic shape (EQ chain subtracted). The
+filter's deepest cut landed where the driver was nearfield-quieter than the other
+side by 2.2 dB — on paper, a better-centred filter would sit 1–1.5 kHz lower. It
+was **not** refit: the seat is the authority for a balance decision the nearfield
+capture cannot make (nearfield isn't what's heard), the existing filter had actual
+outcome evidence behind it, and no new seat-level test existed to re-validate a
+change. The observation was recorded for if the driver's physical aim is ever
+changed, at which point the whole HF EQ region should be refit from fresh seat
+measurements rather than patched from nearfield reasoning alone.
+
+**Rule:** nearfield data can explain mechanism and flag a filter as *worth
+re-examining after further seat testing*. It cannot, by itself, justify changing
+a filter that has direct seat-level outcome evidence behind it.
+
+## Retraction discipline: a disproven claim invalidates what was built on it
+
+When a stronger measurement disproves an earlier conclusion, the earlier
+conclusion must be explicitly withdrawn — and so must anything reasoned from it,
+even findings that felt independent at the time.
+
+**Real case (2026-08-10):** "the sub channels never received the filter" (from
+MMM, see above) was the direct basis for "mids-only fits the System Sum better
+than mids+subs" (see the model-discrimination section) and for the PC-Tool
+clamping hypothesis (see the fixed-mic section). When the fixed-mic test and the
+PC-Tool screenshot disproved the first claim, all three had to be retracted
+together — not just the original one, quietly leaving the derived claims to stand
+on their own. A retraction message should say explicitly which downstream claims
+are being withdrawn along with the source claim, not just correct the immediate
+number.
+
+**Practical check:** before citing a prior finding in this project (this session's
+or an earlier one's), ask whether it depended on something that has since been
+re-measured or re-analyzed. If yes, re-verify the dependency before reusing the
+conclusion — don't assume a claim is still good just because nobody has revisited
+it.
+
+## Rear-fill / ambience channels need their own measurement discipline
+
+Rear-fill (or any channel deliberately fed a differential/ambience signal rather
+than full programme content) breaks two assumptions the rest of this methodology
+otherwise takes for granted.
+
+**The test stimulus is not representative of normal listening level.** An
+antiphase or differential test WAV used to get usable SNR out of a low-level
+ambience channel can be far louder, at that channel, than the channel ever plays
+during normal music. **Real case (2026-08-10):** rear channels were deliberately
+driven hard for measurement; the user flagged unprompted that this did not
+represent normal playback level. Shape and L/R-matching conclusions from such a
+capture remain valid (each channel normalized to its own in-band mean cancels the
+level); absolute rear-to-front level or "how audible are the rears" conclusions
+do not, and must not be drawn from a diagnostic-level capture.
+
+**A channel can have an objective matching problem with no declared target.**
+Rear fill usually has no tonal target curve (the front-stage/system target isn't
+the right reference for an ambience channel), but that doesn't mean nothing is
+measurable. **Real case, same session:** both rear drivers shared the same raw
+two-lobe response (~1130 Hz and ~1550 Hz peaks). The left channel had a filter
+correcting both lobes; the right had only one, leaving a structural, asymmetric
+gap that showed up as the single largest rear L/R error (+3.9 dB at 1140 Hz).
+Adding the missing filter to the right channel only, and verifying with the
+**untouched left channel as a same-sitting control**, closed the gap (R−L at
+1140 Hz: +3.9 → +0.1 dB; untouched-channel control drift: 0.34 dB). This is a
+useful general pattern for any one-sided correction, not just rears: change one
+side, leave the other alone, and use the unchanged side's movement as the
+uncertainty floor for the same session — cheaper and more direct than borrowing
+a floor from elsewhere.
+
+**What matching does not settle:** after the two channels were matched, both still
+carried the same ~4 dB *common* elevation across that region. That is a voicing
+question (rear ambience is deliberately not full-range-flat and has no declared
+target), not a matching one, and — per the diagnostic-level caveat above — the
+capture used to find the matching gap is not the right basis for a common-mode
+voicing decision either. Leave common rear voicing to normal-level listening
+unless a specific target philosophy is declared for the rear channels.
+
+## Stopping is a valid, and often correct, outcome
+
+A converged tune does not owe you another filter just because a scan still shows
+non-zero deviations. By the end of a long project, remaining "candidates" are
+often sign-alternating fine structure, source-local physical features unsuitable
+for boost (see above), crossover-region interference without clean magnitude
+authority, or changes smaller than the measurement's own repeatability — none of
+which are actionable, however real they are.
+
+**Real case (2026-08-10):** after a full-spectrum common-mode scan turned up seven
+candidate regions, six were closed on inspection (cabin cancellation, physical
+driver notches, or no stable feature) and the seventh (100 Hz) had already been
+addressed. The correct output was not "propose the eighth filter" — it was **"no
+further DSP change is justified from current evidence; the remaining open item is
+a listening decision, and one item is physical, not DSP."** A tuning session that
+converges to "stop" has succeeded; treat refusing an unsupported filter as an
+equally good outcome as finding a good one, and say so explicitly rather than
+manufacturing a marginal candidate to have something to propose.

@@ -51,7 +51,7 @@ Run these with the user's files; they are the deterministic layer.
   | `interference_audit` | real dip vs. destructive summation | §The interference audit |
   | `crossover_confidence` | one band-limited crossover go/no-go | §The crossover action-ladder |
   | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | §The crossover action-ladder |
-  | `delay_sweep`, `overlap_weighted_delay_gain` | in-band-only delay search (run alongside `polarity_delay_search` whenever either driver is band-limited — its damage-band safety net can hide a real gain there); maximin across multiple sessions; flags cycle-ambiguous results | §When `polarity_delay_search` says "nothing to gain" |
+  | `delay_sweep`, `overlap_weighted_delay_gain` | in-band-only delay search (run alongside `polarity_delay_search` whenever either driver is band-limited — its damage-band safety net can hide a real gain there); maximin across multiple sessions; flags cycle-ambiguous results | §When `polarity_delay_search` says |
   | `spatial_consistency`, `complex_vector_average` | multi-position averaging | §Multi-position variance |
   | `phase_linearity_residual` | single-position phase reliability | §Quantify single-position phase reliability |
   | `excess_gd_mask` | minimum-phase / EQ-ability classifier | §Minimum-phase |
@@ -60,6 +60,12 @@ Run these with the user's files; they are the deterministic layer.
   | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | §Two checks |
   | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | §Sweep capture setup |
   | `calibrate_solo_levels` | fix mismatched solo test levels | §Sweep capture setup |
+  | `anchor_sensitivity_report` | is a feature's magnitude an anchor artifact? | §Deviation analysis |
+  | `causal_ab_delta` | score a causal A/B — no target, no re-anchoring | §Deviation analysis |
+  | `mmm_overrides_fixed_point` | forbidden-inference guard (fixed-point can't beat MMM) | §Measurement method selection |
+  | `detect_duplicate_traces` | catch a re-exported file double-counted as a session | §Analysis traps |
+  | `historical_repeatability` | stable-near-zero ≠ unreliable, across sessions (NOT a universal SD floor — see its docstring) | §Analysis traps |
+  | `models_discriminable` | don't prefer the smaller residual unless the gap beats the data's own uncertainty | §Model-discrimination gate |
   | *(decay/ringing + distortion axes — when EQ isn't the right tool)* | waterfall/spectrogram, THD | §Beyond magnitude |
   | `tune_scorecard` (`_abs_rms_db` fields catch what a signed median can hide), `headroom_report` (clip_risk is PEQ-only — check the real output level, it's often a false alarm), `compression_check` | scoring, clip risk, level sanity | — |
   | `hpf_excursion_risk` | driver excursion check (needs a supplied Fs) | — |
