@@ -7,40 +7,40 @@ before correcting, and prefer doing less.**
 ## Contents (line numbers, for offset reads — this file is long; jump straight
 to the section you need instead of reading it whole)
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 47
-- Sweep capture setup — line 131
-- Beyond magnitude — decay (time-domain) and distortion axes — line 178
-- Deviation analysis — line 258
+- Measurement method selection — sweep vs Moving Mic (MMM) — line 57
+- Sweep capture setup — line 141
+- Beyond magnitude — decay (time-domain) and distortion axes — line 188
+- Deviation analysis — line 268
 - Analysis traps (anchoring, causal A/B, anchor sensitivity, sum-vs-solo,
   coherence wobble, stale decoded fields, imaging, sub coupling, ties,
-  stable-near-zero, duplicates) — line 325
+  stable-near-zero, duplicates) — line 335
   - Traps from the Alpine session: null-averaging read as level, judging
     inherited EQ, flat interference offsets, MMM level comparability,
-    fractional-octave smearing, zero-band fits, crossover skirts — line 536
-- When the answer is physical, not electrical — line 615
-- Voicing — the most audible decision — line 689
-- Classify the problem (the core skill) — line 720
-  - The interference audit — line 739
-  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 747
-  - Minimum-phase / EQ-ability — line 780
-  - Quantify single-position phase reliability — line 787
-  - Multi-position variance — line 827
-- The crossover action-ladder — line 865
-- Shelf cookbook (incl. judging a shelf emulation) — line 926
-- All-pass cookbook — line 959
-- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 1002
-- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1093
-- Verification & honesty — line 1151
-- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1209
-- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1240
-- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1282
-- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1340
-- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1376
-- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1403
+    fractional-octave smearing, zero-band fits, crossover skirts — line 546
+- When the answer is physical, not electrical — line 625
+- Voicing — the most audible decision — line 699
+- Classify the problem (the core skill) — line 730
+  - The interference audit — line 749
+  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 757
+  - Minimum-phase / EQ-ability — line 790
+  - Quantify single-position phase reliability — line 797
+  - Multi-position variance — line 837
+- The crossover action-ladder — line 875
+- Shelf cookbook (incl. judging a shelf emulation) — line 936
+- All-pass cookbook — line 969
+- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 1012
+- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1103
+- Verification & honesty — line 1161
+- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1219
+- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1250
+- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1292
+- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1350
+- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1386
+- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1413
 - Electrical-vs-measured decomposition must be tune-matched, and may not be
-  recoverable at all — line 1441
-- Width/Q from a plot: pick one definition and don't switch mid-analysis — line 1463
-- A filter's benefit must clear the untouched-channel drift floor, not just be positive — line 1480
+  recoverable at all — line 1451
+- Width/Q from a plot: pick one definition and don't switch mid-analysis — line 1473
+- A filter's benefit must clear the untouched-channel drift floor, not just be positive — line 1490
 - Nearfield-vs-seat shape comparison as a cheap cancellation test — line 1508
 - Common-mode (System Sum vs target) is a first-class objective, not a fallback
   (+ a System Sum deficit alone is not proof of a common-mode cause) — line 1527
