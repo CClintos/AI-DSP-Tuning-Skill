@@ -15,9 +15,19 @@ DEPENDENCIES = {
 }
 
 
-def _version_tuple(value):
-    parts = [int(part) for part in re.findall(r"\d+", str(value))[:3]]
-    return tuple((parts + [0, 0, 0])[:3])
+def _final_release_tuple(value):
+    """Parse a PEP 440 final/post release, rejecting unstable/local forms."""
+    match = re.fullmatch(
+        r"[vV]?(\d+(?:\.\d+)*)(?:\.post\d+)?", str(value).strip(), re.IGNORECASE)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def _release_at_least(release, minimum):
+    width = max(len(release), len(minimum))
+    return (release + (0,) * (width - len(release))
+            >= minimum + (0,) * (width - len(minimum)))
 
 
 def _required_text(version):
@@ -38,9 +48,13 @@ def _runtime_check(module_name, display_name, minimum, module_loader):
                        % (display_name, exc, install),
         }
     version = str(getattr(module, "__version__", "unknown"))
-    ok = version != "unknown" and _version_tuple(version) >= minimum
+    release = _final_release_tuple(version)
+    ok = release is not None and _release_at_least(release, minimum)
     message = "%s %s is ready (requires %s)." % (display_name, version, required)
-    if not ok:
+    if release is None:
+        message = ("%s %s is not a supported final release; %s is required. "
+                   "Run `%s`." % (display_name, version, required, install))
+    elif not ok:
         message = ("%s %s is too old; %s is required. Run `%s`."
                    % (display_name, version, required, install))
     return {"ok": ok, "version": version, "required": required,

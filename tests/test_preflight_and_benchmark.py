@@ -78,6 +78,40 @@ class PreflightTests(unittest.TestCase):
         self.assertIn("too old", report["runtime"]["scipy"]["message"])
         self.assertIn("python -m pip install -r", report["runtime"]["scipy"]["message"])
 
+    def test_prerelease_dependency_versions_are_not_reported_ready(self):
+        """Flattening PEP 440 suffixes must not admit prereleases as finals."""
+        preflight = load_script("preflight_prerelease_test", PREFLIGHT)
+
+        for version in ("1.9.0rc1", "1.9.0.dev0"):
+            with self.subTest(version=version):
+                def prerelease_scipy(name, injected=version):
+                    if name == "scipy":
+                        return types.SimpleNamespace(__version__=injected)
+                    return __import__(name)
+
+                report = preflight.collect_preflight(
+                    module_loader=prerelease_scipy)
+
+                self.assertFalse(report["ready"])
+                self.assertFalse(report["runtime"]["scipy"]["ok"])
+                self.assertIn("final release", report["runtime"]["scipy"]["message"])
+                self.assertIn("python -m pip install -r",
+                              report["runtime"]["scipy"]["message"])
+
+    def test_newer_final_dependency_version_is_reported_ready(self):
+        """Rejecting suffixes must not reject a newer ordinary final release."""
+        preflight = load_script("preflight_newer_final_test", PREFLIGHT)
+
+        def newer_scipy(name):
+            if name == "scipy":
+                return types.SimpleNamespace(__version__="1.10.0")
+            return __import__(name)
+
+        report = preflight.collect_preflight(module_loader=newer_scipy)
+
+        self.assertTrue(report["ready"])
+        self.assertTrue(report["runtime"]["scipy"]["ok"])
+
 
 class BenchmarkTests(unittest.TestCase):
     def test_missing_stable_peak_filter_is_reported_as_a_failed_guard(self):
