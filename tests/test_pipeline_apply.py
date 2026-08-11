@@ -628,6 +628,49 @@ class PipelineApplyTests(unittest.TestCase):
 
                 self.assertFalse(self.output.exists())
 
+    def test_validate_plan_refuses_exact_large_integer_delay_noop(self):
+        afpx.encode(
+            SYNTHETIC_AFPX.replace(
+                'T="0"/>', 'T="09007199254740993"/>'
+            ),
+            self.source,
+        )
+        plan = self.plan()
+        plan["edits"] = [{
+            "id": "same-large-delay",
+            "kind": "delay_samples",
+            "channel": 0,
+            "samples": 9007199254740993,
+        }]
+        plan["confirmations"] = {"same-large-delay": True}
+
+        with self.assertRaisesRegex(ValueError, "same-large-delay.*no-op"):
+            pipeline.validate_plan(plan, self.source)
+
+        self.assertFalse(self.output.exists())
+
+    def test_validate_plan_rejects_malformed_existing_delay(self):
+        afpx.encode(
+            SYNTHETIC_AFPX.replace('T="0"/>', 'T="not-an-integer"/>'),
+            self.source,
+        )
+        plan = self.plan()
+        plan["edits"] = [{
+            "id": "replace-malformed-delay",
+            "kind": "delay_samples",
+            "channel": 0,
+            "samples": 96,
+        }]
+        plan["confirmations"] = {"replace-malformed-delay": True}
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "replace-malformed-delay.*existing delay.*integer",
+        ):
+            pipeline.validate_plan(plan, self.source)
+
+        self.assertFalse(self.output.exists())
+
     def test_apply_plan_reports_malformed_source_path_as_value_error(self):
         cases = [
             ("missing", None),

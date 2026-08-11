@@ -229,9 +229,12 @@ def validate_plan(plan, source_path, source_bytes=None):
             if 0 <= channel < len(delay_tags):
                 existing = afpx.attrs(delay_tags[channel]).get('T')
                 try:
-                    existing_samples = float(existing)
-                except (TypeError, ValueError):
-                    existing_samples = None
+                    existing_samples = int(existing, 10)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        '%s: existing delay T=%r must be an integer'
+                        % (edit_id, existing)
+                    ) from exc
                 if existing_samples == samples:
                     raise ValueError('%s is a no-op; requested delay already matches'
                                      % edit_id)
