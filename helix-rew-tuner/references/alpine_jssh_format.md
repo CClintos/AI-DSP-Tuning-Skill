@@ -61,7 +61,8 @@ The source project's own verification discipline, inherited here:
   the intended fields changed** (`alpine_jssh.verify_write`, the Python
   equivalent of the source's `Confirm-AlpinePresetFileMatchesExpected`) —
   the same "don't silently trust, verify and refuse" discipline
-  `afpx.roundtrip_lint` uses for `.afpx`.
+  `afpx.roundtrip_lint` uses for `.afpx`. Crossover byte offsets can never be
+  declared intended; they are read-only.
 
 ## Schema
 
@@ -72,8 +73,8 @@ numbers). `channel_index_for(channel_number)` = `channel_number - 1` —
 confirmed) for CH4/CH6/CH8/CH9.
 
 **Only offsets 0–263 are mapped.** Offsets 264–295 are unknown/unconfirmed —
-every setter in `alpine_jssh.py` reads the existing block and writes back
-only the one byte it changes, never fabricates a block, so those unmapped
+every supported setter in `alpine_jssh.py` reads the existing block and writes
+back only the one byte it changes, never fabricates a block, so those unmapped
 bytes always ride through unchanged from whatever the source file had.
 
 ### PEQ bands (1–31), each 8 bytes at `(band-1)*8`
@@ -107,12 +108,23 @@ captured point changes that byte at all. Not understood; left out of both
 | 249 | polarity | 0 = 0°, 1 = 180° | CONFIRMED (two channels independently) |
 | 250–251 | channel gain | `stored = round((dB+60)*10)`, LE | CONFIRMED, byte-perfect |
 | 252–253 | delay | `stored = round(ms*96)`, LE | CONFIRMED, four exact matches |
-| 256–257 | HPF Hz | direct int, LE | CONFIRMED, three-for-three |
-| 258 | HPF type | 0=LR, 1=Butterworth, 2=Bessel | CONFIRMED, two clean transitions |
-| 259 | HPF slope | `stored=idx-1`, dB/oct=`(stored+1)*6` | CONFIRMED, two clean transitions |
-| 260–261 | LPF Hz | direct int, LE | CONFIRMED, one real set value |
-| 262 | LPF type | same codes as HPF type | **inferred** from structural parallel, not independently isolated |
-| 263 | LPF slope | same formula as HPF slope | CONFIRMED, two clean transitions |
+| 256–257 | HPF Hz | direct int, LE | CONFIRMED reader; **read-only** |
+| 258 | HPF type | 0=LR, 1=Butterworth, 2=Bessel | CONFIRMED reader; **read-only** |
+| 259 | HPF slope | `stored=idx-1`, dB/oct=`(stored+1)*6` | CONFIRMED reader; **read-only** |
+| 260–261 | LPF Hz | direct int, LE | CONFIRMED reader; **read-only** |
+| 262 | LPF type | same codes as HPF type | inferred reader; **read-only** |
+| 263 | LPF slope | same formula as HPF slope | CONFIRMED reader; **read-only** |
+
+### Crossover fields are inspection-only
+
+The repository-wide rule is unconditional: **never write or change a
+crossover, even when requested.** Alpine HPF/LPF frequency, filter-type, and
+slope getters remain available for channel inspection and role inference, but
+their setters have been removed. `set_channel_byte()` rejects offsets 256–263,
+and `verify_write()` refuses to authorize those offsets as expected changes,
+so neither a convenient setter nor the generic verified-write path can bypass
+the rule. Delay and PEQ setters remain available under their existing safety
+and confirmation requirements.
 
 ## Hardware limits — Alpine's, not Helix's
 

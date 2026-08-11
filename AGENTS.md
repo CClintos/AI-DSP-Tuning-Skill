@@ -134,6 +134,8 @@ Run these with the user's files; they are the deterministic layer.
   real preset; that reference owns the verified model scope, Alpine-specific
   limits, writable Q values, unsafe channel-gain caveat, edit-preservation
   rules, mandatory real-file preflight, and hardware read-back requirement.
+  Alpine crossover fields are read-only: there are no HPF/LPF frequency, type,
+  or slope setters, and its low-level writer/verifier refuse those byte offsets.
 
 For anything not covered by a script, write short Python that imports these —
 never hand-guess `.afpx`/`.pct6` bytes or filter codes.

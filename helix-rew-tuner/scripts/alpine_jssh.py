@@ -5,9 +5,10 @@
 # (an Alpine-specific tuning bridge) that reverse-engineered this format for
 # personal interoperability with hardware the author owns -- this project did
 # not perform that reverse-engineering itself, and inherits it at the same
-# confidence level the source documented, field by field. Every getter/setter
-# below carries the SAME "CONFIRMED" / "assumed, not yet isolated" marker the
-# source gave it -- do not read a comment here as more certain than that.
+# confidence level the source documented, field by field. Every reader and
+# supported setter below carries the SAME "CONFIRMED" / "assumed, not yet
+# isolated" marker the source gave it -- do not read a comment here as more
+# certain than that. Crossover fields are inspect-only and have no setters.
 #
 # THE CONTAINER FORMAT is well-verified: independently confirmed against six
 # real captured presets (every one decodes to valid JSON) and, separately, a
@@ -70,6 +71,7 @@ import numpy as _np       # selftest only (fit_peq end-to-end check)
 CHANNEL_BLOCK_LEN = 296       # confirmed length of one channel's value array
 N_PEQ_BANDS = 31              # confirmed max PEQ bands per channel
 PEQ_BAND_BYTES = 8            # confirmed per-band stride
+CROSSOVER_BYTE_OFFSETS = frozenset(range(256, 264))
 
 # Confirmed 13 points from real single-byte-change captures (code -> Q).
 # Deliberately a lookup table, not a formula -- code*Q drifts at both
@@ -82,8 +84,7 @@ PEQ_Q_TABLE = {14: 7.588, 20: 5.764, 31: 3.997, 42: 3.058, 53: 2.471,
                67: 1.983, 79: 1.700, 90: 1.500, 112: 1.200, 131: 1.023,
                134: 1.000, 187: 0.699, 250: 0.498}
 
-_FILTER_TYPE_CODE = {'LR': 0, 'Butterworth': 1, 'Bessel': 2}
-_FILTER_TYPE_NAME = {v: k for k, v in _FILTER_TYPE_CODE.items()}
+_FILTER_TYPE_NAME = {0: 'LR', 1: 'Butterworth', 2: 'Bessel'}
 
 # Alpine PXE-X121-12EV hardware limits. These are ALPINE's, NOT Helix's --
 # do NOT use tunelib.validate_peq_band here (that enforces Helix P SIX:
@@ -383,7 +384,13 @@ def set_channel_byte(obj, channel_index, byte_offset, value):
     did not reliably propagate back through Python's own list references
     either in some call patterns; this is the same read-modify-explicit-
     write-back shape as the confirmed-working PowerShell version, so every
-    setter here uses it rather than assuming a list is mutated by reference."""
+    setter here uses it rather than assuming a list is mutated by reference.
+    Crossover offsets are read-only repository-wide and are rejected here so
+    no higher-level or ad-hoc caller can bypass that policy."""
+    if byte_offset in CROSSOVER_BYTE_OFFSETS:
+        raise ValueError(
+            'Alpine crossover byte offset %d is read-only; crossovers cannot '
+            'be written or changed.' % byte_offset)
     block = obj['data']['output']['output'][channel_index]
     block[byte_offset] = int(value)
     obj['data']['output']['output'][channel_index] = block
@@ -459,13 +466,6 @@ def get_channel_hpf_hz(obj, channel_index):
     return block[256] + block[257] * 256
 
 
-def set_channel_hpf_hz(obj, channel_index, hz):
-    if not (10 <= hz <= 20000):
-        raise ValueError('HPF frequency %d Hz is outside a plausible 10-20000 Hz range.' % hz)
-    set_channel_byte(obj, channel_index, 256, hz & 0xFF)
-    set_channel_byte(obj, channel_index, 257, (hz >> 8) & 0xFF)
-
-
 def get_channel_lpf_hz(obj, channel_index):
     """CONFIRMED against one real set value: bytes 260-261, little-endian,
     direct Hz."""
@@ -473,21 +473,8 @@ def get_channel_lpf_hz(obj, channel_index):
     return block[260] + block[261] * 256
 
 
-def set_channel_lpf_hz(obj, channel_index, hz):
-    if not (10 <= hz <= 40000):
-        raise ValueError('LPF frequency %d Hz is outside a plausible 10-40000 Hz range.' % hz)
-    set_channel_byte(obj, channel_index, 260, hz & 0xFF)
-    set_channel_byte(obj, channel_index, 261, (hz >> 8) & 0xFF)
-
-
 def _filter_type_name(code):
     return _FILTER_TYPE_NAME.get(code, 'Unknown(%d)' % code)
-
-
-def _filter_type_code(name):
-    if name not in _FILTER_TYPE_CODE:
-        raise ValueError("Unknown filter type name %r -- expected LR, Butterworth or Bessel." % name)
-    return _FILTER_TYPE_CODE[name]
 
 
 def get_channel_hpf_type(obj, channel_index):
@@ -496,20 +483,10 @@ def get_channel_hpf_type(obj, channel_index):
     return _filter_type_name(channel_block(obj, channel_index)[258])
 
 
-def set_channel_hpf_type(obj, channel_index, type_name):
-    set_channel_byte(obj, channel_index, 258, _filter_type_code(type_name))
-
-
 def get_channel_hpf_slope_db_per_oct(obj, channel_index):
     """CONFIRMED via two clean single-byte transitions: byte 259,
     stored = slopeIndex-1, dB/oct = (stored+1)*6 (0-7 -> 6-48 dB/oct)."""
     return (channel_block(obj, channel_index)[259] + 1) * 6
-
-
-def set_channel_hpf_slope_db_per_oct(obj, channel_index, db_per_oct):
-    if db_per_oct % 6 != 0 or not (6 <= db_per_oct <= 48):
-        raise ValueError('HPF slope %d dB/octave must be a multiple of 6 between 6 and 48.' % db_per_oct)
-    set_channel_byte(obj, channel_index, 259, (db_per_oct // 6) - 1)
 
 
 def get_channel_lpf_type(obj, channel_index):
@@ -519,20 +496,10 @@ def get_channel_lpf_type(obj, channel_index):
     return _filter_type_name(channel_block(obj, channel_index)[262])
 
 
-def set_channel_lpf_type(obj, channel_index, type_name):
-    set_channel_byte(obj, channel_index, 262, _filter_type_code(type_name))
-
-
 def get_channel_lpf_slope_db_per_oct(obj, channel_index):
     """CONFIRMED via two clean single-byte transitions: byte 263, same
     formula as HPF slope."""
     return (channel_block(obj, channel_index)[263] + 1) * 6
-
-
-def set_channel_lpf_slope_db_per_oct(obj, channel_index, db_per_oct):
-    if db_per_oct % 6 != 0 or not (6 <= db_per_oct <= 48):
-        raise ValueError('LPF slope %d dB/octave must be a multiple of 6 between 6 and 48.' % db_per_oct)
-    set_channel_byte(obj, channel_index, 263, (db_per_oct // 6) - 1)
 
 
 # ---- PEQ bands (1-31) -------------------------------------------------------
@@ -883,8 +850,16 @@ def verify_write(source_path, out_path, expected_channel_indices, expected_byte_
     fall at .data.output.output[i][b] with i in expected_channel_indices and
     b in expected_byte_offsets -- anything else raises rather than let an
     unverified file be trusted. This is the same discipline
-    Confirm-AlpinePresetFileMatchesExpected enforces in the source project."""
+    Confirm-AlpinePresetFileMatchesExpected enforces in the source project.
+    Crossover offsets can never be declared expected: they are read-only."""
     import re
+    requested_crossover_offsets = sorted(
+        set(expected_byte_offsets) & CROSSOVER_BYTE_OFFSETS)
+    if requested_crossover_offsets:
+        raise ValueError(
+            'Alpine crossover byte offset(s) %s cannot be authorized for a '
+            'write; crossovers are read-only.'
+            % ', '.join(str(offset) for offset in requested_crossover_offsets))
     reloaded = decode(out_path)
     original_again = decode(source_path)
     diffs = diff_objects(original_again, reloaded)
@@ -921,8 +896,9 @@ def _make_synthetic_preset(n_channels=3):
     stored=round((dB+60)*10), so a zero byte pair decodes to -60 dB, not
     0 dB -- a zero-filled fixture reads back as every band cut to -60 dB
     and every channel muted-by-gain. A genuinely flat/unused band stores
-    600 (0x0258). This builds that true neutral state via the setters, so
-    tests measure real behaviour instead of an artefact of the fixture."""
+    600 (0x0258). This builds that true neutral state via supported setters,
+    with crossover bytes seeded directly for read-only inspection, so tests
+    measure real behaviour instead of an artefact of the fixture."""
     block = [0] * CHANNEL_BLOCK_LEN
     obj = {'data': {'output': {'output': [list(block) for _ in range(n_channels)]}},
           'data_info': {'data_upload_time': '2026-01-01T00:00:00'}}
@@ -931,12 +907,17 @@ def _make_synthetic_preset(n_channels=3):
         set_channel_delay_ms(obj, i, 0.0)
         set_channel_muted(obj, i, False)
         set_channel_inverted(obj, i, False)
-        set_channel_hpf_hz(obj, i, HPF_OFF_HZ)      # HPF off
-        set_channel_lpf_hz(obj, i, LPF_OFF_HZ)      # LPF off
-        set_channel_hpf_type(obj, i, 'LR')
-        set_channel_lpf_type(obj, i, 'LR')
-        set_channel_hpf_slope_db_per_oct(obj, i, 24)
-        set_channel_lpf_slope_db_per_oct(obj, i, 24)
+        # Seed read-only crossover bytes directly in this synthetic fixture.
+        # Production write helpers deliberately cannot touch offsets 256-263.
+        channel = channel_block(obj, i)
+        channel[256] = HPF_OFF_HZ & 0xFF
+        channel[257] = (HPF_OFF_HZ >> 8) & 0xFF
+        channel[258] = 0  # LR
+        channel[259] = 3  # 24 dB/oct
+        channel[260] = LPF_OFF_HZ & 0xFF
+        channel[261] = (LPF_OFF_HZ >> 8) & 0xFF
+        channel[262] = 0  # LR
+        channel[263] = 3  # 24 dB/oct
         for b in range(1, N_PEQ_BANDS + 1):
             set_band_gain_db(obj, i, b, 0.0)        # flat = stored 600, not 0
             set_band_q(obj, i, b, 1.0, snap=True)
@@ -974,17 +955,29 @@ def _selftest():
         except ValueError:
             pass
 
-        # HPF/LPF
-        set_channel_hpf_hz(obj, 0, 4500)
-        set_channel_hpf_type(obj, 0, 'Butterworth')
-        set_channel_hpf_slope_db_per_oct(obj, 0, 24)
+        # HPF/LPF are inspect-only. Seed captured-style bytes directly so the
+        # getters remain covered without exposing a production write surface.
+        xover = channel_block(obj, 0)
+        xover[256], xover[257] = 4500 & 0xFF, (4500 >> 8) & 0xFF
+        xover[258], xover[259] = 1, 3  # Butterworth, 24 dB/oct
         assert get_channel_hpf_hz(obj, 0) == 4500
         assert get_channel_hpf_type(obj, 0) == 'Butterworth'
         assert get_channel_hpf_slope_db_per_oct(obj, 0) == 24
-        set_channel_lpf_hz(obj, 0, 250)
-        set_channel_lpf_slope_db_per_oct(obj, 0, 30)
+        xover[260], xover[261] = 250 & 0xFF, (250 >> 8) & 0xFF
+        xover[263] = 4
         assert get_channel_lpf_hz(obj, 0) == 250
         assert get_channel_lpf_slope_db_per_oct(obj, 0) == 30
+        assert not any(name in globals() for name in (
+            'set_channel_hpf_hz', 'set_channel_lpf_hz',
+            'set_channel_hpf_type', 'set_channel_lpf_type',
+            'set_channel_hpf_slope_db_per_oct',
+            'set_channel_lpf_slope_db_per_oct'))
+        for offset in CROSSOVER_BYTE_OFFSETS:
+            try:
+                set_channel_byte(obj, 0, offset, 0)
+                raise AssertionError('crossover offset %d should be read-only' % offset)
+            except ValueError:
+                pass
 
         # PEQ band
         set_band_frequency_hz(obj, 1, 5, 1200)
@@ -1006,13 +999,13 @@ def _selftest():
         base = _make_synthetic_preset()
         encode(base, tmp)
         changed = copy.deepcopy(base)
-        set_channel_hpf_hz(changed, 0, 3000)
+        set_band_gain_db(changed, 0, 1, -3.0)
         out = Path('_alpine_jssh_selftest_out.jssh')
         encode(changed, out)
-        res = verify_write(tmp, out, expected_channel_indices=[0], expected_byte_offsets=[256, 257])
-        assert res['diff_count'] == 2, 'expected exactly 2 diffs (both HPF Hz bytes)'
+        res = verify_write(tmp, out, expected_channel_indices=[0], expected_byte_offsets=[2, 3])
+        assert res['diff_count'] == 1, '0 to -3 dB should change only the low PEQ gain byte'
         sneaky = copy.deepcopy(base)
-        set_channel_hpf_hz(sneaky, 0, 3000)
+        set_band_gain_db(sneaky, 0, 1, -3.0)
         # An unexpected out-of-scope change. Flip whatever the CURRENT value
         # is rather than hardcoding one -- twice now this assertion silently
         # passed-by-not-testing because the value written happened to equal
@@ -1022,7 +1015,7 @@ def _selftest():
         set_channel_muted(sneaky, 1, not get_channel_muted(sneaky, 1))
         encode(sneaky, out)
         try:
-            verify_write(tmp, out, expected_channel_indices=[0], expected_byte_offsets=[256, 257])
+            verify_write(tmp, out, expected_channel_indices=[0], expected_byte_offsets=[2, 3])
             raise AssertionError('verify_write should have caught the unexpected mute change')
         except ValueError:
             pass
@@ -1085,8 +1078,9 @@ def _selftest():
 
         # ---- channels(): the step-1 channel-map inspect ---------------------
         insp = _make_synthetic_preset(n_channels=2)
-        set_channel_hpf_hz(insp, 0, 3150); set_channel_lpf_hz(insp, 0, LPF_OFF_HZ)
-        set_channel_hpf_hz(insp, 1, HPF_OFF_HZ); set_channel_lpf_hz(insp, 1, 80)
+        insp0, insp1 = channel_block(insp, 0), channel_block(insp, 1)
+        insp0[256], insp0[257] = 3150 & 0xFF, (3150 >> 8) & 0xFF
+        insp1[260], insp1[261] = 80 & 0xFF, (80 >> 8) & 0xFF
         set_band_gain_db(insp, 0, 3, -2.0)
         chans = channels(insp)
         assert len(chans) == 2
@@ -1145,10 +1139,10 @@ def _selftest():
         tp = Path('_alpine_jssh_numfmt.jssh')
         tp.write_bytes(_xor_by_position(src.encode('utf-8')))
         mod = decode(tp)
-        set_channel_hpf_hz(mod, 0, 3000)
+        set_band_gain_db(mod, 0, 1, -3.0)
         outp = Path('_alpine_jssh_numfmt_out.jssh')
         encode(mod, outp)
-        verify_write(tp, outp, expected_channel_indices=[0], expected_byte_offsets=[256, 257])
+        verify_write(tp, outp, expected_channel_indices=[0], expected_byte_offsets=[2, 3])
         assert b'"v":1.0' in _xor_by_position(outp.read_bytes()), \
             'an untouched 1.0 elsewhere in the file must survive a write verbatim'
         tp.unlink(missing_ok=True); outp.unlink(missing_ok=True)

@@ -1,3 +1,4 @@
+import copy
 import hashlib
 import gc
 import json
@@ -16,6 +17,7 @@ SCRIPTS = ROOT / "helix-rew-tuner" / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
 import afpx  # noqa: E402
+import alpine_jssh  # noqa: E402
 import pipeline  # noqa: E402
 
 
@@ -139,6 +141,54 @@ class PipelineApplyTests(unittest.TestCase):
                 changed,
                 allow_xover=True,
             )
+
+    def test_low_level_writer_refuses_creating_any_crossover_type(self):
+        """A non-crossover slot must never be convertible into a crossover."""
+        for slot in (1, 2):  # existing PEQ and free slot
+            for type_code in sorted(afpx.CROSSOVER_TYPES):
+                with self.subTest(slot=slot, type_code=type_code):
+                    with self.assertRaisesRegex(ValueError, "crossover.*refus"):
+                        afpx.write_filter_slot(
+                            SYNTHETIC_AFPX,
+                            0,
+                            slot,
+                            type_code=type_code,
+                        )
+
+    def test_verify_slot_write_rejects_created_or_retuned_crossover(self):
+        """Expected target attributes must not hide crossover-state changes."""
+        cases = [
+            (
+                "free-to-hpf",
+                SYNTHETIC_AFPX.replace(
+                    '<Fil T="1" F="200.00"',
+                    '<Fil T="16" F="200.00"',
+                    1,
+                ),
+                2,
+                {"T": "16"},
+            ),
+            (
+                "retuned-hpf",
+                SYNTHETIC_AFPX.replace('F="80.00"', 'F="90.00"', 1),
+                0,
+                {"F": "90.00"},
+            ),
+        ]
+        for name, changed, slot, expected in cases:
+            with self.subTest(name=name):
+                result = afpx.verify_slot_write(
+                    SYNTHETIC_AFPX,
+                    changed,
+                    0,
+                    slot,
+                    expected,
+                )
+                self.assertFalse(result["pass"])
+                self.assertTrue(
+                    any("crossover" in error for error in result["errors"]),
+                    result,
+                )
 
     def test_validate_plan_refuses_unconfirmed_output_trim(self):
         plan = self.plan()
@@ -713,6 +763,53 @@ class PipelineApplyTests(unittest.TestCase):
                     pipeline.apply_plan(plan_path)
 
                 self.assertFalse(self.output.exists())
+
+
+class AlpineCrossoverSafetyTests(unittest.TestCase):
+    CROSSOVER_SETTERS = (
+        "set_channel_hpf_hz",
+        "set_channel_lpf_hz",
+        "set_channel_hpf_type",
+        "set_channel_lpf_type",
+        "set_channel_hpf_slope_db_per_oct",
+        "set_channel_lpf_slope_db_per_oct",
+    )
+
+    def test_alpine_exposes_no_named_crossover_setters(self):
+        """Restoring a convenient crossover setter must violate policy."""
+        for name in self.CROSSOVER_SETTERS:
+            with self.subTest(name=name):
+                self.assertFalse(hasattr(alpine_jssh, name), name)
+
+    def test_alpine_low_level_writer_refuses_crossover_byte_offsets(self):
+        """The generic byte writer must not bypass removed crossover setters."""
+        obj = alpine_jssh._make_synthetic_preset(n_channels=1)
+        for offset in range(256, 264):
+            with self.subTest(offset=offset):
+                before = alpine_jssh.channel_block(obj, 0)[offset]
+                with self.assertRaisesRegex(ValueError, "crossover"):
+                    alpine_jssh.set_channel_byte(obj, 0, offset, before ^ 1)
+                self.assertEqual(before, alpine_jssh.channel_block(obj, 0)[offset])
+
+    def test_alpine_verifier_cannot_authorize_crossover_offsets(self):
+        """Expected-byte declarations must not bless a crossover mutation."""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "source.jssh"
+            output = root / "output.jssh"
+            original = alpine_jssh._make_synthetic_preset(n_channels=1)
+            changed = copy.deepcopy(original)
+            alpine_jssh.channel_block(changed, 0)[256] ^= 1
+            alpine_jssh.encode(original, source)
+            alpine_jssh.encode(changed, output)
+
+            with self.assertRaisesRegex(ValueError, "crossover"):
+                alpine_jssh.verify_write(
+                    source,
+                    output,
+                    expected_channel_indices=[0],
+                    expected_byte_offsets=[256],
+                )
 
 
 if __name__ == "__main__":

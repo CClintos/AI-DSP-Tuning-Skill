@@ -129,12 +129,15 @@ slots 12 and 0.
 one slot in place: only the attributes you pass change, `FN`/`dF`/`I`/`FilBy`
 stay byte-identical, and no other slot moves. `type_code='1'` frees a slot
 (removal without deleting it, preserving slot count). It **unconditionally
-refuses every crossover slot**; there is no caller override, so a mis-indexed
-edit can't silently retune or disable driver protection. PEQ edits are checked
-against hardware limits. Verify with
+refuses every existing crossover slot and every attempted crossover
+`type_code` on a non-crossover slot**; there is no caller override, so a
+mis-indexed edit can't silently create, retune, or disable driver protection.
+PEQ edits are checked against hardware limits. Verify with
 `verify_slot_write`, which confirms the intended attributes landed, nothing
 else on that tag moved, every other slot in every channel is unchanged, and
-delays didn't shift.
+delays didn't shift. It also compares the complete semantic crossover state
+independently of the caller's expected attributes, so an expected `T="16"` or
+crossover-frequency change cannot be used to bless a forbidden write.
 
 This is the mechanism for expressing an edit precisely — not permission to make
 one. Relaxing, re-centring or removing an existing filter still needs measured

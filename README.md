@@ -357,11 +357,11 @@ only:**
   not a short repeating key) — genuinely reverse-engineered, not a guess: the
   source project verified it against six real captured presets, including one
   byte-for-byte match against Alpine's own output for an identical change.
-- **Per-field confidence varies** — every getter/setter in `alpine_jssh.py`
-  carries the same `CONFIRMED` / `assumed, not yet isolated` marker the source
-  documented, field by field; some (channel gain, delay, mute, polarity) are
-  byte-perfect confirmed, others (LPF filter type) are inferred from structural
-  symmetry and flagged as such.
+- **Per-field confidence varies** — every reader and supported setter in
+  `alpine_jssh.py` carries the same `CONFIRMED` / `assumed, not yet isolated`
+  marker the source documented, field by field. HPF/LPF frequency, type, and
+  slope remain readable for inspection but are unconditionally read-only;
+  delay and PEQ retain their verified write paths.
 - **Not yet independently re-verified from this Python port against a real
   file** — run `alpine_jssh.roundtrip_identical()` against your own real
   `.jssh` before trusting a generated file on real hardware; that's the actual

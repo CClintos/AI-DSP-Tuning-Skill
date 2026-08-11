@@ -412,6 +412,11 @@ def write_filter_slot(xml, channel_index, slot_index, F=None, Q=None, G=None,
             'ch%d slot %d is a crossover (T=%s) -- refusing to edit. Crossovers '
             'cannot be written or changed by this tool.'
             % (channel_index, slot_index, a.get('T')))
+    requested_type = str(type_code) if type_code is not None else a.get('T')
+    if requested_type in CROSSOVER_TYPES:
+        raise ValueError(
+            'ch%d slot %d requested crossover type T=%s -- refusing to create '
+            'or change a crossover.' % (channel_index, slot_index, requested_type))
 
     updates = {}
     if type_code is not None:
@@ -525,6 +530,8 @@ def verify_slot_write(old_xml, new_xml, channel_index, slot_index, expect):
                 errors.append('ch%d slot %d changed unexpectedly' % (ci, si))
     if semantic_delay_key(old_xml) != semantic_delay_key(new_xml):
         errors.append('delays changed -- a slot edit must not touch timing')
+    if semantic_xover_key(old_xml) != semantic_xover_key(new_xml):
+        errors.append('crossover filters changed -- a slot edit must preserve them')
     return {'pass': not errors, 'errors': errors}
 
 
@@ -903,6 +910,8 @@ def _selftest():
     # guards
     for bad, why in [
         (dict(channel_index=0, slot_index=0, F=90.0), 'crossover slot'),
+        (dict(channel_index=0, slot_index=1, type_code='16'), 'PEQ to crossover'),
+        (dict(channel_index=0, slot_index=3, type_code='16'), 'free to crossover'),
         (dict(channel_index=0, slot_index=99, F=90.0), 'slot out of range'),
         (dict(channel_index=9, slot_index=1, F=90.0), 'channel out of range'),
         (dict(channel_index=0, slot_index=1, G=99.0), 'gain over hardware limit'),
@@ -927,6 +936,10 @@ def _selftest():
     tampered = write_filter_slot(sxml, 0, 1, F=100.0).replace('F="103.00"', 'F="105.00"')
     assert not verify_slot_write(sxml, tampered, 0, 1, {'F': '100.00'})['pass'], \
         'must catch an unrelated slot changing'
+    created_xover = sxml.replace('<Fil T="1" F="250.00"',
+                                 '<Fil T="16" F="250.00"', 1)
+    assert not verify_slot_write(sxml, created_xover, 0, 3, {'T': '16'})['pass'], \
+        'expected target attributes must not hide crossover creation'
     print('afpx selftest: slot-write verification catches collateral edits OK')
 
     print('\nALL AFPX SELFTESTS PASSED')
