@@ -4,55 +4,48 @@ This is the judgment layer. The scripts give you numbers; this tells you what th
 mean and which action type each problem calls for. The overarching bias: **classify
 before correcting, and prefer doing less.**
 
-## Contents (line numbers, for offset reads — this file is long; jump straight
-to the section you need instead of reading it whole)
+## Contents
 
-- Measurement method selection — sweep vs Moving Mic (MMM) — line 57
-- Sweep capture setup — line 141
-- Beyond magnitude — decay (time-domain) and distortion axes — line 188
-- Deviation analysis — line 268
-- Analysis traps (anchoring, causal A/B, anchor sensitivity, sum-vs-solo,
-  coherence wobble, stale decoded fields, imaging, sub coupling, ties,
-  stable-near-zero, duplicates) — line 335
-  - Traps from the Alpine session: null-averaging read as level, judging
-    inherited EQ, flat interference offsets, MMM level comparability,
-    fractional-octave smearing, zero-band fits, crossover skirts — line 546
-- When the answer is physical, not electrical — line 625
-- Voicing — the most audible decision — line 699
-- Classify the problem (the core skill) — line 730
-  - The interference audit — line 749
-  - Two checks before trusting a proposed EQ band (+ out-of-band skirts) — line 757
-  - Minimum-phase / EQ-ability — line 790
-  - Quantify single-position phase reliability — line 797
-  - Multi-position variance — line 837
-- The crossover action-ladder — line 875
-- Shelf cookbook (incl. judging a shelf emulation) — line 936
-- All-pass cookbook — line 969
-- Imaging (incl. level-vs-timing for geometry, within-pair delay) — line 1012
-- Restraint (incl. why fixed-point summation optima don't survive MMM) — line 1103
-- Verification & honesty — line 1161
-- REW's IR-delay estimator locking onto the wrong cycle on a band-limited driver — line 1219
-- Recovering per-channel L/R responses from an N=L+R / V=L−R pair, no solos needed — line 1250
-- When `polarity_delay_search` says "nothing to gain," run `delay_sweep` (and how this was actually found) — line 1292
-- Bracket every A/B write A→B→B→A, and anchor on a band the write can't touch — line 1350
-- Why a system-sum scorecard is nearly blind to L/R channel imbalance (with the math) — line 1386
-- Extracting distortion/coherence from a REW `.mdat`, and listening-position THD traps — line 1413
-- Electrical-vs-measured decomposition must be tune-matched, and may not be
-  recoverable at all — line 1451
-- Width/Q from a plot: pick one definition and don't switch mid-analysis — line 1473
-- A filter's benefit must clear the untouched-channel drift floor, not just be positive — line 1490
-- Nearfield-vs-seat shape comparison as a cheap cancellation test — line 1508
-- Common-mode (System Sum vs target) is a first-class objective, not a fallback
-  (+ a System Sum deficit alone is not proof of a common-mode cause) — line 1527
-- Fixed mic vs MMM: "what to fix" vs "did it land" — line 1567
-- Prediction and measurement must go through the identical operator — line 1606
-- Model-discrimination gate — a smaller residual is not a finding by itself — line 1644
-- Nearfield has a claim ceiling: source-local, not exact physical cause — line 1669
-- Deep/narrow notch boost guardrail — stable does not mean boostable — line 1689
-- Nearfield aesthetics do not override a seat-validated filter — line 1713
-- Retraction discipline: a disproven claim invalidates what was built on it — line 1736
-- Rear-fill / ambience channels need their own measurement discipline — line 1758
-- Stopping is a valid, and often correct, outcome — line 1797
+- [Measurement method selection — sweep vs Moving Mic (MMM)](#measurement-method-selection-sweep-vs-moving-mic-mmm)
+- [Sweep capture setup](#sweep-capture-setup-before-you-have-data-to-analyze)
+- [Beyond magnitude — decay and distortion](#beyond-magnitude-the-decay-time-domain-and-distortion-axes)
+- [Deviation analysis](#deviation-analysis)
+- [Analysis traps](#analysis-traps-conclusions-that-are-confidently-wrong-not-just-imprecise)
+  - [Traps caught on an Alpine session](#traps-caught-on-an-alpine-pxe-x121-12ev-session-2026-08-05)
+- [When the answer is physical, not electrical](#when-the-answer-is-physical-not-electrical)
+- [Voicing](#voicing-the-most-audible-decision-and-its-about-the-target-not-the-filters)
+- [Classify the problem](#classify-the-problem-the-core-skill)
+  - [The interference audit](#the-interference-audit-magnitude-only-very-useful)
+  - [Two checks before trusting a proposed EQ band](#two-checks-to-run-before-trusting-any-proposed-eq-band)
+  - [Minimum-phase / EQ-ability](#minimum-phase-eq-ability)
+  - [Single-position phase reliability](#quantify-single-position-phase-reliability-before-trusting-it)
+  - [Multi-position variance](#multi-position-variance-eq-whats-common-ignore-what-moves)
+- [The crossover action-ladder](#the-crossover-action-ladder-cheapest-safest-first)
+- [Shelf cookbook](#shelf-cookbook-broad-tonal-balance-only)
+- [All-pass cookbook](#all-pass-cookbook-phase-only-use-sparingly)
+- [Imaging](#imaging)
+- [Restraint](#restraint-the-thing-that-beats-aggressive-auto-eq)
+- [Verification and honesty](#verification-honesty)
+- [REW IR-delay wrong-cycle trap](#rews-ir-delay-estimator-can-lock-onto-the-wrong-cycle-on-a-band-limited-driver)
+- [Recovering L/R responses without solo captures](#recovering-per-channel-lr-responses-from-a-common-source-pair-without-solo-captures)
+- [When `polarity_delay_search` finds no gain, run `delay_sweep`](#when-polarity_delay_search-says-nothing-to-gain-run-delay_sweep-and-how-this-was-actually-found)
+- [Bracket every A/B write and use an untouched anchor](#bracket-every-ab-write-abba-and-anchor-on-a-band-the-write-structurally-cannot-touch)
+- [Why a sum scorecard is blind to L/R imbalance](#a-whole-system-sum-scorecard-is-nearly-blind-to-a-channel-pair-lr-imbalance-the-math)
+- [Extracting distortion/coherence from a REW `.mdat`](#extracting-distortioncoherence-from-a-rew-mdat-when-only-text-exports-were-expected)
+- [Electrical-vs-measured decomposition](#electrical-vs-measured-decomposition-must-be-tune-matched-and-may-not-be-recoverable-at-all)
+- [Width/Q from a plot](#widthq-from-a-plot-pick-one-definition-and-dont-switch-mid-analysis)
+- [Clear the untouched-channel drift floor](#a-filters-benefit-must-clear-the-untouched-channel-drift-floor-not-just-be-positive)
+- [Nearfield-vs-seat cancellation test](#nearfield-vs-seat-shape-comparison-as-a-cheap-cancellation-test)
+- [Common-mode is a first-class objective](#common-mode-system-sum-vs-target-is-a-first-class-objective-not-a-fallback)
+- [Fixed mic vs MMM](#fixed-mic-vs-mmm-is-a-second-orthogonal-authority-question-what-to-fix-vs-did-it-land)
+- [Use the identical prediction and measurement operator](#prediction-and-measurement-must-go-through-the-identical-operator)
+- [Model-discrimination gate](#model-discrimination-gate-a-smaller-residual-is-not-a-finding-by-itself)
+- [Nearfield claim ceiling](#nearfield-has-a-claim-ceiling-source-local-not-exact-physical-cause)
+- [Deep/narrow notch boost guardrail](#deepnarrow-notch-boost-guardrail-stable-does-not-mean-boostable)
+- [Seat validation outranks nearfield aesthetics](#nearfield-aesthetics-do-not-override-a-seat-validated-filter)
+- [Retraction discipline](#retraction-discipline-a-disproven-claim-invalidates-what-was-built-on-it)
+- [Rear-fill / ambience measurement discipline](#rear-fill-ambience-channels-need-their-own-measurement-discipline)
+- [Stopping is a valid outcome](#stopping-is-a-valid-and-often-correct-outcome)
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 

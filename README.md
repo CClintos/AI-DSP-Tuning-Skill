@@ -122,32 +122,26 @@ repo and copy `helix-rew-tuner/` into `~/.claude/skills/helix-rew-tuner/` — no
 `.git` folder or repo-root files in that destination, just the skill folder's
 contents.
 
-`helix-rew-tuner.skill` is just a zip of the `helix-rew-tuner/` folder
-(`__pycache__` excluded) — there is no build step that regenerates it
-automatically, so **after any edit under `helix-rew-tuner/`, re-zip it**
-before committing:
+`helix-rew-tuner.skill` is a deterministic zip of the `helix-rew-tuner/`
+folder (`__pycache__` and bytecode excluded). After any edit under the skill,
+regenerate the archive and generated Codex wrapper, then check parity:
 
-```
-cd helix-rew-tuner && python -c "
-import zipfile, os
-with zipfile.ZipFile('../helix-rew-tuner.skill', 'w', zipfile.ZIP_DEFLATED) as z:
-    for root, dirs, files in os.walk('.'):
-        dirs[:] = [d for d in dirs if d != '__pycache__']
-        for f in files:
-            fp = os.path.join(root, f)
-            z.write(fp, os.path.join('helix-rew-tuner', fp))
-"
+```text
+python tools/build_skill.py --write
+python tools/build_skill.py --check
 ```
 
-An out-of-date `.skill` silently ships old doctrine/code to anyone who
-installs it that way, so treat this as part of the commit, not an afterthought.
+The writer uses sorted paths, fixed ZIP timestamps, and normalized text line
+endings, so identical sources produce identical package bytes on Windows and
+Linux. The check mode is read-only and fails on stale generated instructions,
+stale archive contents, invalid skill metadata, or broken methodology anchors.
 
 **Codex (or any `AGENTS.md`-reading agent):** clone this repo into (or
-alongside) the project you're working in. `AGENTS.md` at the repo root carries
-the same workflow and doctrine as `SKILL.md`, adapted to Codex's
-auto-loaded-instructions convention — no separate install step. It points into
-`helix-rew-tuner/scripts/` and `helix-rew-tuner/references/` for the actual
-analysis code and docs, same as the Claude skill does.
+alongside) the project you're working in. The generated root `AGENTS.md` adapts
+the canonical `references/core_workflow.md` doctrine to Codex's auto-loaded
+instructions convention — no separate install step. It points into
+`helix-rew-tuner/scripts/` and `helix-rew-tuner/references/` for the same
+analysis code and docs used by the installable skill.
 
 ## Best way to run it
 
@@ -229,35 +223,59 @@ Claude will:
    > "Tune my Helix DSP — here's my REW measurement, my `.afpx`, and my target
    > curve."
 
-4. Codex follows the identical seven-step workflow above — `AGENTS.md` carries
-   the same doctrine as `SKILL.md`, calling into the same `scripts/tunelib.py`,
-   `afpx.py`, `measure.py`, and `pipeline.py` via its shell tool. The only
-   difference is which agent is driving; the analysis, the restraint rules, and
-   the write/verify discipline don't change.
+4. Codex follows the identical seven-step workflow above — generated
+   `AGENTS.md` and the installable `SKILL.md` both route to the canonical
+   `references/core_workflow.md`, which calls into the same scripts and
+   references. The only difference is which agent is driving; the analysis,
+   restraint rules, and write/verify discipline don't change.
 
 ## What's in the box
 
 ```
 helix-rew-tuner/
-├── SKILL.md                          the workflow Claude follows
+├── SKILL.md                          skill metadata + platform routing
+├── requirements.txt                 minimum runtime dependencies
+├── agents/openai.yaml               Codex skill catalogue metadata
 ├── scripts/
 │   ├── tunelib.py                    verified DSP + acoustic-analysis core (self-tests)
 │   ├── afpx.py                       decode / inspect / channel-detect / write-lint
 │   ├── measure.py                    load REW exports & .mdat, validate axis, targets
 │   ├── pipeline.py                   one deterministic analysis CLI -> one JSON report
 │   ├── pct6.py                       BETA, personal-use-only .pct6 decode/encode
-│   └── alpine_jssh.py                BETA, personal-use-only Alpine .jssh decode/encode
+│   ├── alpine_jssh.py                BETA, personal-use-only Alpine .jssh decode/encode
+│   ├── preflight.py                  read-only dependency and path readiness check
+│   ├── benchmark.py                  deterministic optimizer regression benchmark
+│   ├── decay.py                      decay / ringing analysis helpers
+│   └── repeatability.py              repeat-capture drift and consistency helpers
 ├── references/
 │   ├── afpx_format.md                the .afpx binary + filter-code spec
 │   ├── pct6_format.md                the .pct6 container format + BETA caveats
 │   ├── alpine_jssh_format.md         the Alpine .jssh container format + BETA caveats
+│   ├── core_workflow.md              canonical workflow shared by agent wrappers
 │   ├── methodology.md                how to decide what to fix (the doctrine)
-│   └── helix_hardware.md             filter modes, limits, model caveats
+│   ├── helix_hardware.md             filter modes, limits, model caveats
+│   └── tune_plan_schema.md            versioned plan/apply JSON contract
 └── assets/
     └── default_incar_target.txt      a sensible default target curve (override any time)
+
+tools/
+└── build_skill.py                    generated-wrapper/package drift check and writer
+
+tests/
+├── test_build_skill.py               build, metadata, anchor, and archive parity tests
+├── test_pipeline_apply.py            deterministic tune plan/apply integration tests
+├── test_preflight_and_benchmark.py   install and optimizer benchmark tests
+└── test_tunelib_regressions.py       acoustic-analysis and optimizer regressions
 ```
 
-Every script self-tests standalone, no real measurement/tune files needed:
+Run the complete unit/integration suite with:
+
+```text
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+The self-test-capable DSP/file scripts also run standalone without real
+measurement or tune files:
 
 ```
 python helix-rew-tuner/scripts/tunelib.py    # -> ALL TESTS PASSED
@@ -265,6 +283,15 @@ python helix-rew-tuner/scripts/afpx.py selftest
 python helix-rew-tuner/scripts/pct6.py selftest
 python helix-rew-tuner/scripts/alpine_jssh.py selftest
 python helix-rew-tuner/scripts/pipeline.py selftest
+```
+
+Preflight, benchmark, and generated-package checks are separate executable
+gates:
+
+```text
+python helix-rew-tuner/scripts/preflight.py --json
+python helix-rew-tuner/scripts/benchmark.py --json
+python tools/build_skill.py --check
 ```
 
 ## Safety & scope
