@@ -593,6 +593,62 @@ class PipelineApplyTests(unittest.TestCase):
 
                 self.assertFalse(self.output.exists())
 
+    def test_validate_plan_refuses_semantic_noops_with_equivalent_xml_numbers(self):
+        cases = [
+            (
+                "delay-leading-zero",
+                SYNTHETIC_AFPX.replace('T="0"/>', 'T="00"/>'),
+                {
+                    "id": "same-delay-repr",
+                    "kind": "delay_samples",
+                    "channel": 0,
+                    "samples": 0,
+                },
+            ),
+            (
+                "trim-short-one",
+                SYNTHETIC_AFPX.replace('L="1.0"', 'L="1"'),
+                {
+                    "id": "same-trim-repr",
+                    "kind": "output_trim",
+                    "channel": 0,
+                    "trim_db": 0.0,
+                },
+            ),
+        ]
+        for name, source_xml, edit in cases:
+            with self.subTest(name=name):
+                afpx.encode(source_xml, self.source)
+                plan = self.plan()
+                plan["edits"] = [edit]
+                plan["confirmations"] = {edit["id"]: True}
+
+                with self.assertRaisesRegex(ValueError, "%s.*no-op" % edit["id"]):
+                    pipeline.validate_plan(plan, self.source)
+
+                self.assertFalse(self.output.exists())
+
+    def test_apply_plan_reports_malformed_source_path_as_value_error(self):
+        cases = [
+            ("missing", None),
+            ("wrong-type", 123),
+            ("not-found", str(self.root / "missing.afpx")),
+        ]
+        for name, source_path in cases:
+            with self.subTest(name=name):
+                plan = self.peq_plan()
+                if source_path is None:
+                    del plan["source_path"]
+                else:
+                    plan["source_path"] = source_path
+                plan_path = self.root / (name + ".json")
+                plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "source_path"):
+                    pipeline.apply_plan(plan_path)
+
+                self.assertFalse(self.output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

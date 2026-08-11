@@ -225,6 +225,16 @@ def validate_plan(plan, source_path, source_bytes=None):
             target_keys.add(key)
             if confirmations.get(edit_id) is not True:
                 raise ValueError('%s requires explicit per-change confirmation' % edit_id)
+            delay_tags = afpx.delay_tags(working_xml)
+            if 0 <= channel < len(delay_tags):
+                existing = afpx.attrs(delay_tags[channel]).get('T')
+                try:
+                    existing_samples = float(existing)
+                except (TypeError, ValueError):
+                    existing_samples = None
+                if existing_samples == samples:
+                    raise ValueError('%s is a no-op; requested delay already matches'
+                                     % edit_id)
             candidate_xml = afpx.write_delay_samples(working_xml, channel, samples)
             if candidate_xml == working_xml:
                 raise ValueError('%s is a no-op; requested delay already matches'
@@ -242,6 +252,9 @@ def validate_plan(plan, source_path, source_bytes=None):
             target_keys.add(key)
             if confirmations.get(edit_id) is not True:
                 raise ValueError('%s requires explicit per-change confirmation' % edit_id)
+            if trim_db == 0.0:
+                raise ValueError('%s is a no-op; zero dB output trim changes nothing'
+                                 % edit_id)
             candidate_xml = afpx.write_output_trim(working_xml, {channel: trim_db})
             if candidate_xml == working_xml:
                 raise ValueError('%s is a no-op; requested output trim changes nothing'
@@ -324,9 +337,14 @@ def apply_plan(plan_path):
     for key in ('source_path', 'output_path'):
         if isinstance(plan.get(key), str) and not os.path.isabs(plan[key]):
             plan[key] = os.path.join(plan_dir, plan[key])
-    with open(plan['source_path'], 'rb') as fh:
+    source_path = plan.get('source_path') if isinstance(plan, dict) else None
+    if not isinstance(source_path, str) or not source_path:
+        raise ValueError('source_path must be a non-empty string')
+    if not os.path.isfile(source_path):
+        raise ValueError('source_path is not a file: %s' % source_path)
+    with open(source_path, 'rb') as fh:
         source_bytes = fh.read()
-    normalized = validate_plan(plan, plan['source_path'], source_bytes=source_bytes)
+    normalized = validate_plan(plan, source_path, source_bytes=source_bytes)
     source_xml = afpx.decode_bytes(source_bytes, normalized['source_path'])
     intended_xml, _ = _apply_edits(source_xml, normalized['edits'])
 

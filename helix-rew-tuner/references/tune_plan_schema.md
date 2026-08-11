@@ -23,7 +23,10 @@ Version 1 is a JSON object with exactly these fields:
 Unknown fields, edit kinds, duplicate edit IDs, duplicate targets, empty edit
 lists, nonexistent slots/channels, and unsupported filter types are refused.
 Every edit must change its in-memory input; no-op filter-slot, delay, and output
-trim requests are refused during validation before a file is staged.
+trim requests are refused during validation before a file is staged. Delay
+equality is numeric (`"00"` and `0` are the same sample count), and a relative
+`0.0` dB trim is always a no-op regardless of how the stored linear level is
+spelled in XML.
 Crossover and polarity edits are not part of version 1 and are always refused.
 
 ## Edit objects
