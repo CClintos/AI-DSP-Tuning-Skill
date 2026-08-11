@@ -20,8 +20,14 @@ import zlib
 def decode(path):
     with open(path, 'rb') as fh:
         raw = fh.read()
+    return decode_bytes(raw, path)
+
+
+def decode_bytes(raw, source='<bytes>'):
+    """Decode one immutable AFPX byte snapshot."""
+    raw = bytes(raw)
     if len(raw) < 5:
-        raise ValueError('file too short to be a valid .afpx: %s' % path)
+        raise ValueError('file too short to be a valid .afpx: %s' % source)
     declared = struct.unpack('>I', raw[:4])[0]
     xml = zlib.decompress(raw[4:]).decode('utf-8', 'replace')
     if declared != len(xml.encode('utf-8')):

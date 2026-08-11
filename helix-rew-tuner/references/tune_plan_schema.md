@@ -3,8 +3,8 @@
 The tune-plan path is the deterministic write boundary for Helix `.afpx` files.
 It never modifies the source or overwrites an existing output. `pipeline.py
 apply` validates the complete plan and source hash before creating a temporary
-file, decodes and verifies that file, and only then moves it to the requested
-new output path.
+file, decodes and verifies that file, and only then exclusively creates the
+requested new output path.
 
 ## Required top-level fields
 
@@ -22,6 +22,8 @@ Version 1 is a JSON object with exactly these fields:
 
 Unknown fields, edit kinds, duplicate edit IDs, duplicate targets, empty edit
 lists, nonexistent slots/channels, and unsupported filter types are refused.
+Every edit must change its in-memory input; no-op filter-slot, delay, and output
+trim requests are refused during validation before a file is staged.
 Crossover and polarity edits are not part of version 1 and are always refused.
 
 ## Edit objects
@@ -106,9 +108,12 @@ After adding reviewed edits and per-change confirmations, apply it:
 python helix-rew-tuner/scripts/pipeline.py apply --plan .\tune-plan.json
 ```
 
-Immediately before exclusive output creation, apply re-hashes the source and
-refuses if it changed during validation/application. Exclusive creation also
-refuses an output path that appears after validation instead of replacing it.
+Apply reads one immutable source-byte snapshot. The plan hash is checked against
+that snapshot, and both validation and application decode those exact bytes.
+Immediately before exclusive output creation, apply also re-hashes the current
+source path and refuses if it changed during validation/application; this final
+check is a mutation guard and never becomes the apply input. Exclusive creation
+also refuses an output path that appears after validation instead of replacing it.
 Apply prints a JSON manifest with source/output hashes, normalized edits, each
 matching writer verification, `roundtrip_lint`, and
 `"predicted_not_measured": true`. Loading the output into the DSP and

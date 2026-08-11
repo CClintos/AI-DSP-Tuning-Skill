@@ -479,8 +479,10 @@ class PipelineApplyTests(unittest.TestCase):
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         real_validate = pipeline.validate_plan
 
-        def validate_then_mutate(candidate, source_path):
-            normalized = real_validate(candidate, source_path)
+        def validate_then_mutate(candidate, source_path, source_bytes=None):
+            normalized = real_validate(
+                candidate, source_path, source_bytes=source_bytes
+            )
             afpx.encode(SYNTHETIC_AFPX.replace('L="1.0"', 'L="0.5"'), self.source)
             return normalized
 
@@ -512,8 +514,10 @@ class PipelineApplyTests(unittest.TestCase):
         real_validate = pipeline.validate_plan
         real_replace = os.replace
 
-        def validate_then_create_collision(candidate, source_path):
-            normalized = real_validate(candidate, source_path)
+        def validate_then_create_collision(candidate, source_path, source_bytes=None):
+            normalized = real_validate(
+                candidate, source_path, source_bytes=source_bytes
+            )
             self.output.write_bytes(b"race winner")
             return normalized
 
@@ -525,6 +529,69 @@ class PipelineApplyTests(unittest.TestCase):
                     pipeline.apply_plan(plan_path)
 
         self.assertEqual(self.output.read_bytes(), b"race winner")
+
+    def test_apply_plan_uses_hash_bound_snapshot_when_source_mutates_and_restores(self):
+        plan = self.peq_plan()
+        plan_path = self.root / "reversible-mutation-plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        original_bytes = self.source.read_bytes()
+        mutated_path = self.root / "mutated.afpx"
+        afpx.encode(SYNTHETIC_AFPX.replace('L="1.0"', 'L="0.5"'), mutated_path)
+        mutated_bytes = mutated_path.read_bytes()
+        real_validate = pipeline.validate_plan
+        real_sha256_file = pipeline._sha256_file
+
+        def validate_then_mutate(candidate, source_path, source_bytes=None):
+            if source_bytes is None:
+                normalized = real_validate(candidate, source_path)
+            else:
+                normalized = real_validate(
+                    candidate, source_path, source_bytes=source_bytes
+                )
+            self.source.write_bytes(mutated_bytes)
+            return normalized
+
+        def restore_before_hash(path):
+            if Path(path) == self.source and self.source.read_bytes() == mutated_bytes:
+                self.source.write_bytes(original_bytes)
+            return real_sha256_file(path)
+
+        with mock.patch.object(pipeline, "validate_plan", side_effect=validate_then_mutate):
+            with mock.patch.object(pipeline, "_sha256_file", side_effect=restore_before_hash):
+                manifest = pipeline.apply_plan(plan_path)
+
+        output_xml = afpx.decode(self.output)
+        self.assertEqual(afpx.read_output_levels(output_xml)[0]["L"], 1.0)
+        self.assertEqual(
+            manifest["source_sha256"], hashlib.sha256(original_bytes).hexdigest()
+        )
+        self.assertEqual(self.source.read_bytes(), original_bytes)
+
+    def test_validate_plan_refuses_noop_delay_and_output_trim(self):
+        cases = [
+            ({
+                "id": "same-delay",
+                "kind": "delay_samples",
+                "channel": 0,
+                "samples": 0,
+            }, "same-delay"),
+            ({
+                "id": "same-trim",
+                "kind": "output_trim",
+                "channel": 0,
+                "trim_db": 0.0,
+            }, "same-trim"),
+        ]
+        for edit, edit_id in cases:
+            with self.subTest(edit_id=edit_id):
+                plan = self.plan()
+                plan["edits"] = [edit]
+                plan["confirmations"] = {edit_id: True}
+
+                with self.assertRaisesRegex(ValueError, "%s.*no-op" % edit_id):
+                    pipeline.validate_plan(plan, self.source)
+
+                self.assertFalse(self.output.exists())
 
 
 if __name__ == "__main__":

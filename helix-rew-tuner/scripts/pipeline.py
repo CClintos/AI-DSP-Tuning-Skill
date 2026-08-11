@@ -59,7 +59,11 @@ def _sha256_file(path):
     return digest.hexdigest()
 
 
-def validate_plan(plan, source_path):
+def _sha256_bytes(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def validate_plan(plan, source_path, source_bytes=None):
     """Validate and normalize an AFPX tune plan without writing files."""
     if not isinstance(plan, dict):
         raise ValueError('plan must be a JSON object')
@@ -98,7 +102,12 @@ def validate_plan(plan, source_path):
     if (not isinstance(supplied_hash, str) or len(supplied_hash) != 64 or
             any(ch not in '0123456789abcdefABCDEF' for ch in supplied_hash)):
         raise ValueError('source_sha256 must be 64 hexadecimal characters')
-    actual_hash = _sha256_file(source_path)
+    if source_bytes is None:
+        with open(source_path, 'rb') as fh:
+            source_bytes = fh.read()
+    else:
+        source_bytes = bytes(source_bytes)
+    actual_hash = _sha256_bytes(source_bytes)
     if supplied_hash.lower() != actual_hash:
         raise ValueError('source_sha256 does not match source file')
 
@@ -111,7 +120,7 @@ def validate_plan(plan, source_path):
     if os.path.exists(output_path):
         raise ValueError('output_path already exists; refusing to overwrite: %s' % output_path)
 
-    source_xml = afpx.decode(source_path)
+    source_xml = afpx.decode_bytes(source_bytes, source_path)
     confirmations = plan['confirmations']
     protected_types = {'3', '4', '19', '20'}
     normalized_edits = []
@@ -216,7 +225,11 @@ def validate_plan(plan, source_path):
             target_keys.add(key)
             if confirmations.get(edit_id) is not True:
                 raise ValueError('%s requires explicit per-change confirmation' % edit_id)
-            working_xml = afpx.write_delay_samples(working_xml, channel, samples)
+            candidate_xml = afpx.write_delay_samples(working_xml, channel, samples)
+            if candidate_xml == working_xml:
+                raise ValueError('%s is a no-op; requested delay already matches'
+                                 % edit_id)
+            working_xml = candidate_xml
             normalized_edit['samples'] = samples
             delay_channels.add(channel)
         else:
@@ -229,7 +242,11 @@ def validate_plan(plan, source_path):
             target_keys.add(key)
             if confirmations.get(edit_id) is not True:
                 raise ValueError('%s requires explicit per-change confirmation' % edit_id)
-            working_xml = afpx.write_output_trim(working_xml, {channel: trim_db})
+            candidate_xml = afpx.write_output_trim(working_xml, {channel: trim_db})
+            if candidate_xml == working_xml:
+                raise ValueError('%s is a no-op; requested output trim changes nothing'
+                                 % edit_id)
+            working_xml = candidate_xml
             normalized_edit['trim_db'] = trim_db
         normalized_edits.append(normalized_edit)
 
@@ -307,8 +324,10 @@ def apply_plan(plan_path):
     for key in ('source_path', 'output_path'):
         if isinstance(plan.get(key), str) and not os.path.isabs(plan[key]):
             plan[key] = os.path.join(plan_dir, plan[key])
-    normalized = validate_plan(plan, plan['source_path'])
-    source_xml = afpx.decode(normalized['source_path'])
+    with open(plan['source_path'], 'rb') as fh:
+        source_bytes = fh.read()
+    normalized = validate_plan(plan, plan['source_path'], source_bytes=source_bytes)
+    source_xml = afpx.decode_bytes(source_bytes, normalized['source_path'])
     intended_xml, _ = _apply_edits(source_xml, normalized['edits'])
 
     output_dir = os.path.dirname(normalized['output_path']) or os.curdir
