@@ -9,6 +9,7 @@ import sys
 import types
 import unittest
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -193,6 +194,36 @@ class BenchmarkTests(unittest.TestCase):
                     self.assertGreaterEqual(metrics["headroom_cost_db"], 0.0)
                 self.assertGreaterEqual(
                     comparison["robust"]["worst_position_change_db"], -0.25)
+
+    def test_legacy_comparison_fits_mean_trace_not_median_trace(self):
+        """The legacy baseline must retain fit_peq's historical mean input."""
+        benchmark = load_script("benchmark_mean_baseline_test", BENCHMARK)
+        freqs = benchmark.np.array([100.0, 200.0, 400.0])
+        deviations = benchmark.np.array([
+            [0.0, 0.0, 0.0],
+            [0.0, 3.0, 0.0],
+            [0.0, 9.0, 0.0],
+        ])
+        captured = {}
+
+        def legacy_spy(_freqs, trace, *_args, **_kwargs):
+            captured["trace"] = benchmark.np.asarray(trace).copy()
+            return [], {}
+
+        def robust_stub(*_args, **_kwargs):
+            return [], {}
+
+        with mock.patch.object(benchmark.tunelib, "fit_peq",
+                               side_effect=legacy_spy):
+            benchmark._compare_fitters(
+                freqs, deviations, (100.0, 400.0), n_bands_max=1,
+                robust_fitter=robust_stub,
+            )
+
+        expected_mean = benchmark.np.mean(deviations, axis=0)
+        median = benchmark.np.median(deviations, axis=0)
+        self.assertFalse(benchmark.np.array_equal(expected_mean, median))
+        benchmark.np.testing.assert_allclose(captured["trace"], expected_mean)
 
     def test_failed_guard_makes_main_return_nonzero_and_names_the_failure(self):
         """Ignoring a false guard must not produce a successful process status."""

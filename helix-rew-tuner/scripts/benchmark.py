@@ -77,9 +77,9 @@ def _compare_fitters(freqs, deviations, fit_band, n_bands_max, mask=None,
                      conf=None, robust_fitter=tunelib.fit_peq_robust,
                      improve_pct=3.0, max_worst_loss_db=0.25):
     deviations = np.atleast_2d(np.asarray(deviations, dtype=float))
-    median_trace = np.median(deviations, axis=0)
+    mean_trace = np.mean(deviations, axis=0)
     legacy_bands, _legacy_report = tunelib.fit_peq(
-        freqs, median_trace, fit_band, n_bands_max=n_bands_max,
+        freqs, mean_trace, fit_band, n_bands_max=n_bands_max,
         mask=mask, conf=conf, improve_pct=improve_pct)
     robust_bands, robust_report = robust_fitter(
         freqs, deviations, fit_band, n_bands_max=n_bands_max,
