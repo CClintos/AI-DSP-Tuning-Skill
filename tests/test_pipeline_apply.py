@@ -1,12 +1,14 @@
 import hashlib
 import gc
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 import warnings
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,6 +25,8 @@ SYNTHETIC_AFPX = (
     '<Fil T="17" F="100.00" Q="1" G="-2" dF="100" FN="2" I="0" FilBy="0"/>'
     '<Fil T="1" F="200.00" Q="1" G="0" dF="200" FN="3" I="0" FilBy="0"/>'
     '<Fil T="1" F="25.00" Q="1" G="0" dF="25" FN="4" I="0" FilBy="0"/>'
+    '<Fil T="1" F="20000.00" Q="1" G="0" dF="20000" FN="5" I="0" FilBy="0"/>'
+    '<Fil T="1" F="800.00" Q="1" G="0" dF="800" FN="6" I="0" FilBy="0"/>'
     '<Vol T="15" L="1.0" i="0"/>'
     '<T PM="1" P="0" T="0"/>'
     '</OC></ATF>'
@@ -407,6 +411,120 @@ class PipelineApplyTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     pipeline.validate_plan(plan, self.source)
                 self.assertFalse(self.output.exists())
+
+    def test_validate_plan_refuses_illegal_shelf_and_allpass_parameters(self):
+        cases = [
+            ("shelf-q", 3, "3", {"F": 80.0, "Q": 99.0, "G": 2.0}, "shelf Q"),
+            ("shelf-gain", 3, "3", {"F": 80.0, "Q": 0.7, "G": 100.0}, "shelf gain"),
+            ("shelf-step", 3, "3", {"F": 80.0, "Q": 0.7, "G": 1.1}, "0.25"),
+            ("apf1-gain", 2, "19", {"F": 400.0, "G": 5.0}, "all-pass gain"),
+            ("apf1-q", 2, "19", {"F": 400.0, "Q": 1.0, "G": 0.0}, "no Q"),
+            ("apf2-gain", 5, "20", {"F": 800.0, "Q": 9.0, "G": 5.0}, "all-pass gain"),
+            ("apf2-q", 5, "20", {"F": 800.0, "Q": 0.0, "G": 0.0}, "positive"),
+        ]
+        for edit_id, slot, type_code, values, message in cases:
+            with self.subTest(edit_id=edit_id):
+                plan = self.plan()
+                plan["edits"] = [{
+                    "id": edit_id,
+                    "kind": "filter_slot",
+                    "channel": 0,
+                    "slot": slot,
+                    "type_code": type_code,
+                    **values,
+                }]
+                plan["confirmations"] = {edit_id: True}
+
+                with self.assertRaisesRegex(ValueError, message):
+                    pipeline.validate_plan(plan, self.source)
+
+                self.assertFalse(self.output.exists())
+
+    def test_apply_plan_accepts_legal_low_high_shelf_and_both_allpass_orders(self):
+        cases = [
+            ("low-shelf", 3, "3", {"F": 80.0, "Q": 0.7, "G": 2.0}),
+            ("high-shelf", 4, "4", {"F": 8000.0, "Q": 0.5, "G": -2.25}),
+            ("apf1", 2, "19", {"F": 400.0, "G": 0.0}),
+            ("apf2", 5, "20", {"F": 800.0, "Q": 9.0, "G": 0.0}),
+        ]
+        for edit_id, slot, type_code, values in cases:
+            with self.subTest(edit_id=edit_id):
+                output = self.root / (edit_id + ".afpx")
+                plan = self.plan()
+                plan["output_path"] = str(output)
+                plan["edits"] = [{
+                    "id": edit_id,
+                    "kind": "filter_slot",
+                    "channel": 0,
+                    "slot": slot,
+                    "type_code": type_code,
+                    **values,
+                }]
+                plan["confirmations"] = {edit_id: True}
+                plan_path = self.root / (edit_id + ".json")
+                plan_path.write_text(json.dumps(plan), encoding="utf-8")
+
+                manifest = pipeline.apply_plan(plan_path)
+
+                tag = afpx.attrs(afpx.filters(afpx.channel_blocks(afpx.decode(output))[0])[slot])
+                self.assertEqual(tag["T"], type_code)
+                self.assertEqual(tag["G"], "%g" % values["G"])
+                if "Q" in values:
+                    self.assertEqual(tag["Q"], "%g" % values["Q"])
+                self.assertTrue(manifest["verification"]["edits"][0]["result"]["pass"])
+
+    def test_apply_plan_refuses_source_mutation_after_validation(self):
+        plan = self.peq_plan()
+        plan_path = self.root / "mutating-plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        real_validate = pipeline.validate_plan
+
+        def validate_then_mutate(candidate, source_path):
+            normalized = real_validate(candidate, source_path)
+            afpx.encode(SYNTHETIC_AFPX.replace('L="1.0"', 'L="0.5"'), self.source)
+            return normalized
+
+        with mock.patch.object(pipeline, "validate_plan", side_effect=validate_then_mutate):
+            with self.assertRaisesRegex(ValueError, "source.*changed"):
+                pipeline.apply_plan(plan_path)
+
+        self.assertFalse(self.output.exists())
+
+    def test_validate_plan_refuses_noop_slot_edit_before_writing(self):
+        plan = self.plan()
+        plan["edits"] = [{
+            "id": "same-gain",
+            "kind": "filter_slot",
+            "channel": 0,
+            "slot": 1,
+            "G": -2.0,
+        }]
+
+        with self.assertRaisesRegex(ValueError, "same-gain.*no-op"):
+            pipeline.validate_plan(plan, self.source)
+
+        self.assertFalse(self.output.exists())
+
+    def test_apply_plan_does_not_replace_output_created_after_validation(self):
+        plan = self.peq_plan()
+        plan_path = self.root / "collision-plan.json"
+        plan_path.write_text(json.dumps(plan), encoding="utf-8")
+        real_validate = pipeline.validate_plan
+        real_replace = os.replace
+
+        def validate_then_create_collision(candidate, source_path):
+            normalized = real_validate(candidate, source_path)
+            self.output.write_bytes(b"race winner")
+            return normalized
+
+        with mock.patch.object(pipeline, "validate_plan", side_effect=validate_then_create_collision):
+            # Emulate POSIX rename semantics, where rename(source, existing)
+            # replaces the destination instead of raising as it does on Windows.
+            with mock.patch.object(pipeline.os, "rename", side_effect=real_replace):
+                with self.assertRaises(FileExistsError):
+                    pipeline.apply_plan(plan_path)
+
+        self.assertEqual(self.output.read_bytes(), b"race winner")
 
 
 if __name__ == "__main__":

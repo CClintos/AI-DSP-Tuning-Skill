@@ -49,8 +49,13 @@ remain unchanged. Supported type codes are free/off (`1`), PEQ (`17`), low and
 high shelf (`3`, `4`), and first- and second-order all-pass (`19`, `20`).
 Crossovers (`9`, `15`, `16`) cannot be targeted or created. PEQ values must be
 within 20-20000 Hz, Q 0.5-15, and gain -15 to +6 dB. Low/high shelves are
-limited to the existing `dF=25`/`dF=20000` end slots. Editing or creating a
-shelf or all-pass is protected and requires `confirmations[edit.id] = true`.
+limited to the existing `dF=25`/`dF=20000` end slots, Q 0.1-2, gain -15 to +6
+dB, and 0.25 dB gain steps. A first-order all-pass (`19`) accepts no Q edit; its
+stored Q is non-functional and gain must be 0 dB. A second-order all-pass (`20`)
+requires positive Q (there is deliberately no invented upper cap) and 0 dB
+gain. All writable active filters require a 20-20000 Hz frequency. Editing or
+creating a shelf or all-pass is protected and requires
+`confirmations[edit.id] = true`.
 
 ### Delay in samples
 
@@ -101,6 +106,9 @@ After adding reviewed edits and per-change confirmations, apply it:
 python helix-rew-tuner/scripts/pipeline.py apply --plan .\tune-plan.json
 ```
 
+Immediately before exclusive output creation, apply re-hashes the source and
+refuses if it changed during validation/application. Exclusive creation also
+refuses an output path that appears after validation instead of replacing it.
 Apply prints a JSON manifest with source/output hashes, normalized edits, each
 matching writer verification, `roundtrip_lint`, and
 `"predicted_not_measured": true`. Loading the output into the DSP and

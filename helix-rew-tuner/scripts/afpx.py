@@ -9,6 +9,7 @@
 #   python afpx.py channels <file.afpx> --json     # machine-readable channel map
 import argparse
 import json
+import math
 import re
 import struct
 import sys
@@ -417,14 +418,13 @@ def write_filter_slot(xml, channel_index, slot_index, F=None, Q=None, G=None,
         updates['G'] = ('%g' % float(G))
     if not updates:
         raise ValueError('nothing to change -- pass at least one of F/Q/G/type_code')
-    if 'T' in updates and updates['T'] == '17':
-        validate_peq_band_attrs(updates.get('F', a.get('F')),
-                                updates.get('Q', a.get('Q')),
-                                updates.get('G', a.get('G')))
-    elif a.get('T') == '17':
-        validate_peq_band_attrs(updates.get('F', a.get('F')),
-                                updates.get('Q', a.get('Q')),
-                                updates.get('G', a.get('G')))
+    target_type = updates.get('T', a.get('T'))
+    if target_type == '19' and Q is not None:
+        raise ValueError('1st-order all-pass has no Q; omit Q for T=19')
+    validate_filter_band_attrs(target_type,
+                               updates.get('F', a.get('F')),
+                               updates.get('Q', a.get('Q')),
+                               updates.get('G', a.get('G')))
 
     new_tag = old_tag
     for k, v in updates.items():
@@ -449,6 +449,43 @@ def validate_peq_band_attrs(F, Q, G):
         raise ValueError('Q %g out of range 0.5..15' % Q)
     if not (-15.0 <= G <= 6.0):
         raise ValueError('G %g dB out of hardware range -15..+6' % G)
+
+
+def validate_filter_band_attrs(type_code, F, Q, G):
+    """Validate the live parameters for writable Helix filter types.
+
+    T=19 deliberately ignores its stored Q because PC-Tool exposes no Q for a
+    first-order all-pass; write_filter_slot separately refuses an explicitly
+    requested Q edit for that type.
+    """
+    if type_code not in {'17', '3', '4', '19', '20'}:
+        return
+    try:
+        F, G = float(F), float(G)
+        Q_value = float(Q)
+    except (TypeError, ValueError):
+        raise ValueError('filter F/Q/G must be numeric')
+    if not all(math.isfinite(v) for v in (F, Q_value, G)):
+        raise ValueError('filter F/Q/G must be finite')
+    if not (20.0 <= F <= 20000.0):
+        raise ValueError('F %g Hz out of range 20..20000' % F)
+    if type_code == '17':
+        validate_peq_band_attrs(F, Q_value, G)
+    elif type_code in {'3', '4'}:
+        if not (0.1 <= Q_value <= 2.0):
+            raise ValueError('shelf Q %g out of range 0.1..2' % Q_value)
+        if not (-15.0 <= G <= 6.0):
+            raise ValueError('shelf gain %g dB out of Helix range -15..+6' % G)
+        if abs(G * 4.0 - round(G * 4.0)) > 1e-9:
+            raise ValueError('shelf gain must use 0.25 dB steps: %g' % G)
+    elif type_code == '19':
+        if G != 0.0:
+            raise ValueError('all-pass gain must be exactly 0 dB')
+    elif type_code == '20':
+        if Q_value <= 0.0:
+            raise ValueError('2nd-order all-pass Q must be positive')
+        if G != 0.0:
+            raise ValueError('all-pass gain must be exactly 0 dB')
 
 
 def verify_slot_write(old_xml, new_xml, channel_index, slot_index, expect):

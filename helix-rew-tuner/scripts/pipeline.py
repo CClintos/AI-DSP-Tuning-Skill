@@ -7,13 +7,12 @@
 # noticing) and each invocation cost tokens the same handful of numbers
 # doesn't need to repay every session.
 #
-# This is a REPORTING layer only -- it decides and writes nothing to any DSP
-# file. Judgment (what to actually DO about a flagged region) still lives in
-# methodology.md and the conversation; this just makes the numbers behind
-# that judgment identical and cheap to produce every time, with zero
-# duplicated math -- everything here is a thin, deterministic wrapper around
-# tunelib.py/measure.py/afpx.py functions that are already independently
-# tested by their own self-tests.
+# `analyze` is reporting-only. `plan` creates a reviewable JSON draft, while
+# `apply` is the explicit, fail-closed write boundary for a confirmed plan.
+# Judgment (what to actually DO about a flagged region) still lives in
+# methodology.md and the conversation; this module keeps both the analysis
+# numbers and approved writes deterministic by delegating to the independently
+# tested tunelib.py/measure.py/afpx.py functions.
 #
 # python pipeline.py analyze --measurement <export.txt> --target <target.txt|default> [options]
 # python pipeline.py plan --source <input.afpx> --output <new.afpx> --out <plan.json>
@@ -198,8 +197,12 @@ def validate_plan(plan, source_path):
             if 'type_code' in raw_edit:
                 kwargs['type_code'] = target_type
                 normalized_edit['type_code'] = target_type
-            working_xml = afpx.write_filter_slot(
+            candidate_xml = afpx.write_filter_slot(
                 working_xml, channel, slot, **kwargs)
+            if candidate_xml == working_xml:
+                raise ValueError('%s is a no-op; requested slot values already match'
+                                 % edit_id)
+            working_xml = candidate_xml
             if old_type in protected_types or target_type in protected_types:
                 if confirmations.get(edit_id) is not True:
                     raise ValueError('%s requires explicit per-change confirmation' % edit_id)
@@ -326,8 +329,9 @@ def apply_plan(plan_path):
                             for edit in normalized['edits']))
         if not lint['pass']:
             raise ValueError('roundtrip_lint failed: %s' % '; '.join(lint['errors']))
-        os.rename(temp_path, normalized['output_path'])
-        temp_path = None
+        if _sha256_file(normalized['source_path']) != normalized['source_sha256']:
+            raise ValueError('source file changed after plan validation; refusing output')
+        afpx.encode_new(emitted_xml, normalized['output_path'])
     finally:
         if temp_path is not None and os.path.exists(temp_path):
             os.unlink(temp_path)
