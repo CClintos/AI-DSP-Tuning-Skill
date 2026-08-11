@@ -6,6 +6,8 @@ description: >-
   `.pct6` tune files; or handling supported beta Alpine `.jssh` presets,
   crossover, imaging, bass, phase, level, target-curve, or measurement-quality
   problems.
+metadata:
+  version: "1.0.0"
 ---
 
 # Helix / REW measurement-driven auto-tuner

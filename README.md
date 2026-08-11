@@ -122,6 +122,12 @@ The full Helix filter set, each used for what it's good at:
 
 ## Install
 
+`SKILL.md`'s frontmatter carries a `metadata.version` field (currently
+`1.0.0`) so you can tell whether an already-installed copy is current — open
+your installed `SKILL.md` and compare its version against this repo's; if
+it's older, redownload/re-copy per below. There's no auto-update; this skill
+has no persistent connection back to GitHub once installed.
+
 **Claude (skill):** download [`helix-rew-tuner.skill`](helix-rew-tuner.skill)
 and install it through Claude's skill flow (the file card shows **Save skill**
 when your account allows skill creation). The `.skill` is self-contained — it
@@ -196,6 +202,12 @@ text` does the same thing one measurement at a time — select a measurement, ex
 repeat.)
 
 ## Use
+
+Expect a few short confirmations, not one big auto-apply. Your original tune
+file is never modified — every write creates a new, separate output file, so
+there's nothing to undo in PC-Tool if a proposal doesn't work out — and each
+proposed edit is confirmed individually before it's written. A basic tune is
+normally a handful of quick yes/no exchanges as you go.
 
 ### On Claude
 
@@ -324,6 +336,13 @@ whitespace drift.
 
 ## Safety & scope
 
+- **Your original tune file is never modified.** Every write creates a new,
+  separate output file — `pipeline.py apply` refuses to overwrite an existing
+  path — so your source `.afpx`/`.pct6`/`.jssh` is exactly as it was if you
+  don't like a proposal; there's nothing to undo in PC-Tool.
+- **Every proposed edit is confirmed individually before it's written** —
+  nothing is ever applied in bulk from one "yes, tune it." Expect a handful of
+  short confirmations for a basic tune, not one big automatic apply.
 - **Crossovers are never changed**, and a delay is written only after you've seen the
   specific number and explicitly confirmed that one change — never automatically from
   a search result.

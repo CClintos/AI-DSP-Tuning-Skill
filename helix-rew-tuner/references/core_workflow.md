@@ -154,10 +154,28 @@ never hand-guess `.afpx`/`.pct6` bytes or filter codes.
 
 ## Workflow
 
+### 0. Preflight — once per environment, before intake
+
+If this is the first tune session in this environment (a fresh Claude Code
+project, a new machine, a container you haven't used this skill in before) —
+or you're simply unsure whether Python/NumPy/SciPy are set up here — run
+`python preflight.py --json` before anything else. It's read-only and checks
+Python version, both dependencies, and the required skill paths in one call.
+If it reports any failure, tell the user plainly what's missing (usually
+`python -m pip install -r requirements.txt`) and stop there — don't start
+intake against a broken environment. Skip this step in a later session in an
+environment you already confirmed working.
+
 ### 1. Intake — establish the system (ask, don't assume)
 
 Nothing here is hardcoded. Before analyzing, confirm with the user:
 
+- **Set expectations up front, in your very first reply, once:** the
+  original tune file is never modified — every write creates a new, separate
+  output file, so there is nothing to undo in PC-Tool if a proposal doesn't
+  pan out — and every proposed edit is confirmed individually before it's
+  written. A basic tune is normally a handful of short yes/no confirmations
+  as you go, not one big automatic apply.
 - **Check for a prior session file first, before asking anything else.**
   Look for `<afpx_path>.tuner_session.json` next to the tune file (e.g.
   `mytune.afpx.tuner_session.json`) — a small JSON record of a previous

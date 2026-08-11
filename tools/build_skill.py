@@ -17,7 +17,9 @@ ARCHIVE_NAME = f"{SKILL_DIR_NAME}.skill"
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 TEXT_SUFFIXES = {".json", ".md", ".py", ".toml", ".txt", ".yaml", ".yml"}
 
-SKILL_WRAPPER = """\
+SKILL_VERSION = "1.0.0"
+
+SKILL_WRAPPER = f"""\
 ---
 name: helix-rew-tuner
 description: >-
@@ -26,6 +28,8 @@ description: >-
   `.pct6` tune files; or handling supported beta Alpine `.jssh` presets,
   crossover, imaging, bass, phase, level, target-curve, or measurement-quality
   problems.
+metadata:
+  version: "{SKILL_VERSION}"
 ---
 
 # Helix / REW measurement-driven auto-tuner
@@ -43,7 +47,8 @@ the format-specific preflight, writable-limit, Q-snap, preservation, and
 hardware read-back requirements in `references/alpine_jssh_format.md`.
 """
 
-OPENAI_METADATA = """\
+OPENAI_METADATA = f"""\
+version: "{SKILL_VERSION}"
 interface:
   display_name: "Helix REW Tuner"
   short_description: "Diagnose and tune car DSPs from REW data"
