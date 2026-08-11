@@ -112,6 +112,13 @@ The full Helix filter set, each used for what it's good at:
   export (`Freq  SPL  Phase`) is preferred; `.mdat` also works (with axis validation).
 - A **target curve** (`frequency  level` text file). One is bundled as a default;
   bring your own (ResoNix, Harman in-car, a house curve, flat) any time.
+- **Python 3.10+ with NumPy and SciPy** on whatever machine/container your agent
+  runs its shell tool in (`pip install -r helix-rew-tuner/requirements.txt`) —
+  the skill executes real Python locally, it doesn't just describe the analysis.
+  If you're not sure your environment is ready, run
+  `python helix-rew-tuner/scripts/preflight.py --json` first; it checks the
+  Python version, both dependencies, and file layout without touching any
+  tune or measurement file.
 
 ## Install
 
