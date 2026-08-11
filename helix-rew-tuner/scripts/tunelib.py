@@ -162,6 +162,28 @@ def audibility_score(freqs, dev_db, band=(60.0, 16000.0), mask=None, conf=None):
         return float('inf')
     return float(np.sqrt(np.sum((sm[sel] * w) ** 2) / den))
 
+
+def _peq_filter_penalties(bands, boost_penalty, hf_q_penalty,
+                          hf_q_knee, transition_hz):
+    """Shared boost/high-Q taxes for the single- and multi-position fitters."""
+    penalties = []
+    for F, Q, G in bands:
+        penalties.append(boost_penalty * max(0.0, G))
+        hf = 1.0 / (1.0 + np.exp(-(np.log2(F / transition_hz)) * 6.0))
+        penalties.append(hf_q_penalty * hf * max(0.0, Q - hf_q_knee))
+    return np.asarray(penalties, dtype=float)
+
+
+def _quantize_peq_bands(bands, min_gain):
+    """Snap a candidate to the same steps returned by ``fit_peq``."""
+    quantized = []
+    for F, Q, G in bands:
+        band = (round(float(F), 1), round(float(Q), 2),
+                round(float(G) * 4.0) / 4.0)
+        if abs(band[2]) >= min_gain:
+            quantized.append(band)
+    return quantized
+
 # --------------------------------------------------------------------------
 # 3) JOINT PEQ FIT (the TuneEQ-beater)
 def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
@@ -268,12 +290,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     def penalties(bands):
         # CONSTANT length (2 terms/band) so least_squares' finite-diff Jacobian
         # never sees the vector change size when a band's F is perturbed.
-        p = []
-        for F, Q, G in bands:
-            p.append(boost_penalty * max(0.0, G))                    # boost tax
-            hf = 1.0 / (1.0 + np.exp(-(np.log2(F / transition_hz)) * 6.0))  # smooth gate ~transition
-            p.append(hf_q_penalty * hf * max(0.0, Q - hf_q_knee))    # narrow-HF tax
-        return np.array(p) if p else np.zeros(0)
+        return _peq_filter_penalties(
+            bands, boost_penalty, hf_q_penalty, hf_q_knee, transition_hz)
 
     def resid(params):
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
@@ -389,6 +407,191 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         report['partner_mismatch_before'] = round(base_partner, 3)
         report['partner_mismatch_after'] = round(partner_mismatch(bands), 3)
     return bands, report
+
+
+def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
+                   mask=None, conf=None, g_lim=(-15.0, 3.0),
+                   q_lim=(0.5, 8.0), min_gain=1.0, improve_pct=6.0,
+                   boost_penalty=0.5, hf_q_penalty=0.4, hf_q_knee=4.0,
+                   transition_hz=1000.0, selection_tax_weight=0.25,
+                   null_boost_penalty=0.8, tail_weight=0.75,
+                   max_worst_loss_db=0.25, verbose=False):
+    """Fit one quantized PEQ cascade across multiple measured positions.
+
+    ``deviations_db`` is shaped ``(positions, frequencies)``. ``mask`` and
+    ``conf`` may be shared one-dimensional measurement-authority arrays or
+    per-position arrays of the same shape. The joint residual contains every
+    position, the signed positional median, and a differentiable upper-tail
+    term so a majority of easy positions cannot hide one poor seat.
+
+    Every candidate is snapped to the returned hardware steps before the
+    parsimony and worst-position gates. A candidate is rejected when any
+    position's audibility score is more than ``max_worst_loss_db`` worse than
+    its no-EQ baseline.
+    """
+    from scipy.optimize import least_squares
+
+    freqs = np.asarray(freqs, dtype=float)
+    deviations = np.asarray(deviations_db, dtype=float)
+    if deviations.ndim != 2 or deviations.shape[1] != len(freqs):
+        raise ValueError('deviations_db must have shape (positions, frequencies)')
+    if deviations.shape[0] < 2:
+        raise ValueError('fit_peq_robust requires at least two positions')
+
+    shape = deviations.shape
+
+    def authority_array(values, name, default, dtype):
+        if values is None:
+            return np.full(shape, default, dtype=dtype)
+        values = np.asarray(values, dtype=dtype)
+        if values.shape == (len(freqs),):
+            return np.broadcast_to(values, shape).copy()
+        if values.shape != shape:
+            raise ValueError('%s must match frequencies or deviations_db' % name)
+        return values.copy()
+
+    masks = authority_array(mask, 'mask', True, bool)
+    confidence = np.clip(authority_array(conf, 'conf', 1.0, float), 0.0, 1.0)
+    inband = (freqs >= fit_band[0]) & (freqs <= fit_band[1])
+    authority = masks & inband[None, :] & np.isfinite(deviations)
+    weights = audibility_weight(freqs)[None, :] * confidence * authority
+    if np.any(np.sum(weights ** 2, axis=1) <= 1e-12):
+        raise ValueError('each position needs authoritative samples in fit_band')
+
+    def raw_bands(params):
+        return [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
+                for i in range(len(params) // 3)]
+
+    def params_for(bands):
+        return np.asarray(sum(([np.log10(F), Q, G] for F, Q, G in bands), []),
+                          dtype=float)
+
+    def smooth_upper_tail(values, beta=4.0):
+        values = np.asarray(values, dtype=float)
+        vmax = float(np.max(values))
+        return vmax + float(np.log(np.mean(np.exp(beta * (values - vmax)))) / beta)
+
+    def position_scores(bands):
+        correction = cascade_db(freqs, bands)
+        return np.asarray([
+            audibility_score(freqs, deviations[i] + correction, band=fit_band,
+                              mask=masks[i], conf=confidence[i])
+            for i in range(shape[0])
+        ])
+
+    def robust_score(scores):
+        median = float(np.median(scores))
+        tail_excess = max(0.0, smooth_upper_tail(scores) - median)
+        return median + tail_weight * tail_excess
+
+    def penalties(bands):
+        return _peq_filter_penalties(
+            bands, boost_penalty, hf_q_penalty, hf_q_knee, transition_hz)
+
+    def null_cost(bands):
+        if mask is None or null_boost_penalty <= 0:
+            return 0.0
+        excluded = (~masks) & inband[None, :]
+        excluded_freq = np.any(excluded, axis=0)
+        if not np.any(excluded_freq):
+            return 0.0
+        spill = cascade_db(freqs, bands)[excluded_freq]
+        return null_boost_penalty * float(np.mean(np.maximum(spill, 0.0)))
+
+    def selection_score(bands):
+        filt_penalties = penalties(bands)
+        tax = (float(np.sqrt(np.mean(filt_penalties ** 2)))
+               if len(filt_penalties) else 0.0)
+        return (robust_score(position_scores(bands))
+                + selection_tax_weight * tax + null_cost(bands))
+
+    def resid(params):
+        bands = raw_bands(params)
+        errors = deviations + cascade_db(freqs, bands)[None, :]
+        weighted = errors * weights
+        median_error = np.median(errors, axis=0)
+        median_weight = np.median(weights, axis=0)
+        # sqrt(x**2 + eps) is a smooth absolute value. Log-mean-exp is a
+        # smooth maximum, so this tail stays differentiable for least_squares.
+        smooth_abs = np.sqrt(weighted ** 2 + 1e-8)
+        peak = np.max(smooth_abs, axis=0)
+        tail = peak + np.log(np.mean(
+            np.exp(4.0 * (smooth_abs - peak[None, :])), axis=0)) / 4.0
+        parts = [weighted.ravel() / np.sqrt(shape[0]),
+                 median_error * median_weight,
+                 tail_weight * tail,
+                 penalties(bands)]
+        return np.concatenate(parts)
+
+    before_scores = position_scores([])
+    base_score = robust_score(before_scores)
+    accepted = []
+    current_score = base_score
+    current_selection = base_score
+    rejected_worst = False
+    rejected_candidate_loss = 0.0
+    lo_f = np.log10(fit_band[0] * 1.02)
+    hi_f = np.log10(fit_band[1] * 0.98)
+
+    for _ in range(n_bands_max):
+        current_error = deviations + cascade_db(freqs, accepted)[None, :]
+        median_error = erb_smooth(freqs, np.median(current_error, axis=0))
+        seed_weight = np.median(weights, axis=0)
+        seed_basis = np.abs(median_error) * seed_weight
+        i0 = int(np.argmax(seed_basis))
+        if seed_basis[i0] <= 0:
+            break
+        seed = [np.log10(freqs[i0]), 1.5,
+                float(np.clip(-median_error[i0], g_lim[0], g_lim[1]))]
+        trial = np.concatenate([params_for(accepted), seed])
+        count = len(trial) // 3
+        lower = np.tile([lo_f, q_lim[0], g_lim[0]], count)
+        upper = np.tile([hi_f, q_lim[1], g_lim[1]], count)
+        fit = least_squares(resid, np.clip(trial, lower, upper),
+                            bounds=(lower, upper), method='trf', max_nfev=400)
+        candidate = _quantize_peq_bands(raw_bands(fit.x), min_gain)
+        if candidate == accepted:
+            break
+        candidate_scores = position_scores(candidate)
+        candidate_score = robust_score(candidate_scores)
+        candidate_selection = selection_score(candidate)
+        raw_gain_pct = 100.0 * (current_score - candidate_score) / max(current_score, 1e-9)
+        select_gain_pct = (100.0 * (current_selection - candidate_selection)
+                           / max(current_selection, 1e-9))
+        worst_loss = float(np.max(candidate_scores - before_scores))
+        if verbose:
+            print('  robust band %d: score %.3f -> %.3f (%.1f%%) | worst loss %.3f dB'
+                  % (len(candidate), current_score, candidate_score,
+                     raw_gain_pct, worst_loss))
+        if worst_loss > max_worst_loss_db + 1e-12:
+            rejected_worst = True
+            rejected_candidate_loss = worst_loss
+            break
+        if raw_gain_pct < improve_pct or select_gain_pct < improve_pct:
+            break
+        accepted = candidate
+        current_score = candidate_score
+        current_selection = candidate_selection
+
+    after_scores = position_scores(accepted)
+    worst_position_loss = max(0.0, float(np.max(after_scores - before_scores)))
+    report = {
+        'score_before': round(base_score, 3),
+        'score_after': round(robust_score(after_scores), 3),
+        'median_score_before': round(float(np.median(before_scores)), 3),
+        'median_score_after': round(float(np.median(after_scores)), 3),
+        'worst_score_before': round(float(np.max(before_scores)), 3),
+        'worst_score_after': round(float(np.max(after_scores)), 3),
+        'position_scores_before': [round(float(v), 3) for v in before_scores],
+        'position_scores_after': [round(float(v), 3) for v in after_scores],
+        'worst_position_loss_db': round(worst_position_loss, 3),
+        'rejected_worst_position': rejected_worst,
+        'rejected_candidate_worst_loss_db': round(rejected_candidate_loss, 3),
+        'selection_score_before': round(base_score, 3),
+        'selection_score_after': round(selection_score(accepted), 3),
+        'bands_used': len(accepted),
+    }
+    return accepted, report
 
 # --------------------------------------------------------------------------
 # 3c) INTERFERENCE / SUMMATION AUDIT — added 2026-07-03 (Fable pass).
@@ -1672,26 +1875,49 @@ def prediction_confidence(freqs, driver_a, driver_b, measured_together_db, band)
 # band -- use it when you need to know WHERE, not just how much.)
 def tune_scorecard(freqs, traces, target_db,
                    img_band=(200.0, 6000.0), mid_bal_band=(200.0, 2000.0),
-                   tw_bal_band=(2800.0, 16000.0), inband=(60.0, 16000.0)):
+                   tw_bal_band=(2800.0, 16000.0), inband=(60.0, 16000.0),
+                   mask=None, conf=None):
     """traces: dict with 'System Sum' and optionally 'FL Low','FR Low',
     'FL High','FR High' (predicted or measured SPL on `freqs`). Returns the
-    named metrics used for every tune-vs-tune decision."""
+    named metrics used for every tune-vs-tune decision. ``mask`` excludes
+    non-authoritative bins and ``conf`` continuously weights the remaining
+    bins, matching the authority controls used by the PEQ fitters."""
+    freqs = np.asarray(freqs, dtype=float)
+    authority_mask = (np.ones_like(freqs, dtype=bool) if mask is None
+                      else np.asarray(mask, dtype=bool))
+    authority_conf = (np.ones_like(freqs, dtype=float) if conf is None
+                      else np.clip(np.asarray(conf, dtype=float), 0.0, 1.0))
+    if authority_mask.shape != freqs.shape or authority_conf.shape != freqs.shape:
+        raise ValueError('mask and conf must match frequencies')
+
+    def metric_selection(band):
+        return (authority_mask & (authority_conf > 0.0)
+                & (freqs >= band[0]) & (freqs <= band[1]))
+
+    def authority_median(values, selection):
+        weights = authority_conf[selection]
+        if np.allclose(weights, weights[0]):
+            return float(np.median(values[selection]))
+        return weighted_median(values[selection], weights)
+
     dev = erb_smooth(freqs, traces['System Sum'] - target_db)
-    inb = (freqs >= inband[0]) & (freqs <= inband[1])
+    inb = metric_selection(inband)
     w = np.ones_like(freqs); w[(freqs >= img_band[0]) & (freqs <= img_band[1])] = 1.8
-    out = {'sum_rms_db': round(float(np.sqrt(np.mean(dev[inb] ** 2))), 2),
-           'sum_wrms_img_db': round(float(np.sqrt(np.sum((dev[inb] * w[inb]) ** 2) / np.sum(w[inb] ** 2))), 2),
-           'worst_dev_db': round(float(np.max(np.abs(dev[(freqs >= 100) & (freqs <= 8000)]))), 1)}
+    out = {'sum_rms_db': round(wrms(dev[inb], authority_conf[inb]), 2),
+           'sum_wrms_img_db': round(wrms(dev[inb], w[inb] * authority_conf[inb]), 2)}
+    worst_sel = metric_selection((100.0, 8000.0))
+    out['worst_dev_db'] = round(float(np.max(
+        np.abs(dev[worst_sel]) * authority_conf[worst_sel])), 1)
     if 'FL Low' in traces and 'FR Low' in traces:
         b = erb_smooth(freqs, traces['FL Low'] - traces['FR Low'])
-        s = (freqs >= mid_bal_band[0]) & (freqs <= mid_bal_band[1])
-        out['mid_balance_db'] = round(float(np.median(b[s])), 2)
-        out['mid_balance_abs_rms_db'] = round(float(np.sqrt(np.mean(b[s] ** 2))), 2)
+        s = metric_selection(mid_bal_band)
+        out['mid_balance_db'] = round(authority_median(b, s), 2)
+        out['mid_balance_abs_rms_db'] = round(wrms(b[s], authority_conf[s]), 2)
     if 'FL High' in traces and 'FR High' in traces:
         b = erb_smooth(freqs, traces['FL High'] - traces['FR High'])
-        s = (freqs >= tw_bal_band[0]) & (freqs <= tw_bal_band[1])
-        out['tweeter_balance_db'] = round(float(np.median(b[s])), 2)
-        out['tweeter_balance_abs_rms_db'] = round(float(np.sqrt(np.mean(b[s] ** 2))), 2)
+        s = metric_selection(tw_bal_band)
+        out['tweeter_balance_db'] = round(authority_median(b, s), 2)
+        out['tweeter_balance_abs_rms_db'] = round(wrms(b[s], authority_conf[s]), 2)
     return out
 
 
