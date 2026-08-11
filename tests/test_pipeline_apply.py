@@ -791,6 +791,30 @@ class AlpineCrossoverSafetyTests(unittest.TestCase):
                     alpine_jssh.set_channel_byte(obj, 0, offset, before ^ 1)
                 self.assertEqual(before, alpine_jssh.channel_block(obj, 0)[offset])
 
+    def test_alpine_low_level_writer_refuses_negative_crossover_aliases(self):
+        """Python negative indices must not alias protected crossover bytes."""
+        obj = alpine_jssh._make_synthetic_preset(n_channels=1)
+        aliases = [
+            offset - alpine_jssh.CHANNEL_BLOCK_LEN
+            for offset in sorted(alpine_jssh.CROSSOVER_BYTE_OFFSETS)
+        ]
+        for alias in aliases:
+            with self.subTest(alias=alias):
+                before = list(alpine_jssh.channel_block(obj, 0))
+                with self.assertRaisesRegex(ValueError, "byte_offset.*0.*295"):
+                    alpine_jssh.set_channel_byte(obj, 0, alias, 255)
+                self.assertEqual(before, alpine_jssh.channel_block(obj, 0))
+
+    def test_alpine_low_level_writer_validates_general_offset_bounds(self):
+        """Offsets outside the fixed channel block must fail consistently."""
+        for offset in (-1, alpine_jssh.CHANNEL_BLOCK_LEN):
+            with self.subTest(offset=offset):
+                obj = alpine_jssh._make_synthetic_preset(n_channels=1)
+                before = list(alpine_jssh.channel_block(obj, 0))
+                with self.assertRaisesRegex(ValueError, "byte_offset.*0.*295"):
+                    alpine_jssh.set_channel_byte(obj, 0, offset, 255)
+                self.assertEqual(before, alpine_jssh.channel_block(obj, 0))
+
     def test_alpine_verifier_cannot_authorize_crossover_offsets(self):
         """Expected-byte declarations must not bless a crossover mutation."""
         with tempfile.TemporaryDirectory() as directory:

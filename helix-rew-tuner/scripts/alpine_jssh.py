@@ -387,6 +387,11 @@ def set_channel_byte(obj, channel_index, byte_offset, value):
     setter here uses it rather than assuming a list is mutated by reference.
     Crossover offsets are read-only repository-wide and are rejected here so
     no higher-level or ad-hoc caller can bypass that policy."""
+    if (isinstance(byte_offset, bool) or not isinstance(byte_offset, int)
+            or not (0 <= byte_offset < CHANNEL_BLOCK_LEN)):
+        raise ValueError(
+            'byte_offset %r is outside the valid channel-block range 0..%d.'
+            % (byte_offset, CHANNEL_BLOCK_LEN - 1))
     if byte_offset in CROSSOVER_BYTE_OFFSETS:
         raise ValueError(
             'Alpine crossover byte offset %d is read-only; crossovers cannot '
