@@ -121,20 +121,54 @@ class BuildSkillTests(unittest.TestCase):
         self.assertIn("helix-rew-tuner.skill is stale", result.stdout + result.stderr)
         self.assertEqual(before, archive.read_bytes())
 
-    def test_invalid_skill_metadata_is_rejected(self) -> None:
-        """Failing open on malformed frontmatter must not publish an invalid skill."""
+    def test_unexpected_skill_metadata_key_is_rejected_without_mutation(self) -> None:
+        """Accepting extra frontmatter keys must let unsupported metadata ship."""
+        self.write_outputs()
         skill_md = self.root / "helix-rew-tuner" / "SKILL.md"
         skill_md.write_text(
-            VALID_SKILL.replace("name: helix-rew-tuner", "name: Wrong Name"),
+            skill_md.read_text(encoding="utf-8").replace(
+                "---\n\n# Helix", "unexpected_key: true\n---\n\n# Helix"
+            ),
+            encoding="utf-8",
+        )
+        before = skill_md.read_bytes()
+
+        result = self.run_build("--check")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("SKILL.md is stale", result.stdout + result.stderr)
+        self.assertEqual(before, skill_md.read_bytes())
+
+    def test_malformed_openai_metadata_is_rejected_without_mutation(self) -> None:
+        """Checking only required fields must accept otherwise malformed YAML."""
+        self.write_outputs()
+        metadata = self.root / "helix-rew-tuner" / "agents" / "openai.yaml"
+        metadata.write_text(
+            metadata.read_text(encoding="utf-8") + "broken: [\n", encoding="utf-8"
+        )
+        before = metadata.read_bytes()
+
+        result = self.run_build("--check")
+
+        self.assertEqual(1, result.returncode)
+        self.assertIn("agents/openai.yaml is stale", result.stdout + result.stderr)
+        self.assertEqual(before, metadata.read_bytes())
+
+    def test_skill_without_canonical_workflow_route_is_rejected(self) -> None:
+        """Valid frontmatter alone must not allow a wrapper to bypass doctrine."""
+        self.write_outputs()
+        skill_md = self.root / "helix-rew-tuner" / "SKILL.md"
+        text = skill_md.read_text(encoding="utf-8")
+        self.assertIn("references/core_workflow.md", text)
+        skill_md.write_text(
+            text.replace("references/core_workflow.md", "references/methodology.md"),
             encoding="utf-8",
         )
 
         result = self.run_build("--check")
 
         self.assertEqual(1, result.returncode)
-        self.assertIn("invalid SKILL.md metadata", result.stdout + result.stderr)
-        self.assertFalse((self.root / "AGENTS.md").exists())
-        self.assertFalse((self.root / "helix-rew-tuner.skill").exists())
+        self.assertIn("SKILL.md is stale", result.stdout + result.stderr)
 
     def test_unresolved_methodology_anchor_is_rejected(self) -> None:
         """Dropping anchor validation must let broken navigation ship."""
@@ -166,6 +200,7 @@ class BuildSkillTests(unittest.TestCase):
             self.assertEqual(sorted(names), names)
             self.assertTrue(names)
             self.assertTrue(all(info.date_time == (1980, 1, 1, 0, 0, 0) for info in infos))
+            self.assertTrue(all(info.compress_type == zipfile.ZIP_STORED for info in infos))
             self.assertTrue(all(name.startswith("helix-rew-tuner/") for name in names))
 
     def test_archive_is_independent_of_text_checkout_line_endings(self) -> None:
@@ -180,6 +215,22 @@ class BuildSkillTests(unittest.TestCase):
         self.write_outputs()
 
         self.assertEqual(first, archive.read_bytes())
+
+    def test_check_accepts_platform_line_endings_in_generated_text(self) -> None:
+        """Raw wrapper comparison must report a CRLF checkout as stale."""
+        self.write_outputs()
+        generated_text = (
+            self.root / "AGENTS.md",
+            self.root / "helix-rew-tuner" / "SKILL.md",
+            self.root / "helix-rew-tuner" / "agents" / "openai.yaml",
+        )
+        for path in generated_text:
+            lf_bytes = path.read_bytes().replace(b"\r\n", b"\n")
+            path.write_bytes(lf_bytes.replace(b"\n", b"\r\n"))
+
+        result = self.run_build("--check")
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
 
     def test_check_accepts_fresh_generated_outputs(self) -> None:
         """A checker that cannot accept its own build output is unusable in CI."""

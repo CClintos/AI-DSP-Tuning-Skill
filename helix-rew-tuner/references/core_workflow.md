@@ -308,11 +308,13 @@ car.
 - Only write PEQ (`T=17`), and — when justified and the user agrees — shelves
   (`T=3/4`, end slots only) and all-passes (`T=19/20`). Use the verified writers in
   `tunelib.py`.
-- **Never change crossovers or delays unless the user explicitly asks.** Preserve
-  them byte-for-byte; verify with `afpx.roundtrip_lint` (semantic, tolerant of
-  PC-Tool attribute reordering).
-- After writing, decode the new file back and confirm: header valid, delays +
-  crossovers unchanged, only the intended slots changed, all gains within limits.
+- **Never write or change crossovers, even if the user asks.** Preserve them
+  unconditionally. Preserve delays unless the user explicitly confirms the
+  specific delay write under the conditions below. Verify preservation with
+  `afpx.roundtrip_lint` (semantic, tolerant of PC-Tool attribute reordering).
+- After writing, decode the new file back and confirm: header valid, crossovers
+  unchanged, delays unchanged except for an exactly confirmed delay write, only
+  the intended slots changed, and all gains within limits.
 - **Writing a delay is allowed, but only under all of these conditions —
   `afpx.write_delay_samples` being available doesn't lower the bar:**
   1. A specific number came out of `polarity_delay_search` (ideally with
@@ -372,7 +374,9 @@ reverted band without telling the user why.
    claim was disproven 2026-07-11 (see `helix_hardware.md`); high Q is often
    correct for a narrow null, and its real cost is group delay, not legality.
    `validate_peq_band` enforces the PEQ limits — use it.
-4. **Preserve crossovers and delays** unless explicitly told otherwise.
+4. **Never write or change crossovers.** Preserve them unconditionally. Preserve
+   delays unless the user explicitly confirms the specific delay write under
+   step 5's conditions; the confirmation exception applies to delay only.
 5. **Classify before correcting.** Never boost a null or a reflection. Never EQ a
    phase problem.
 6. **Never combine a phase-domain write (polarity/delay/APF) with a PEQ write in

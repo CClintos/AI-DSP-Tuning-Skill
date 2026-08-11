@@ -131,10 +131,11 @@ python tools/build_skill.py --write
 python tools/build_skill.py --check
 ```
 
-The writer uses sorted paths, fixed ZIP timestamps, and normalized text line
-endings, so identical sources produce identical package bytes on Windows and
-Linux. The check mode is read-only and fails on stale generated instructions,
-stale archive contents, invalid skill metadata, or broken methodology anchors.
+The writer uses stored (uncompressed) entries, sorted paths, fixed ZIP
+timestamps, fixed file modes, and normalized text line endings, so identical
+sources produce identical package bytes across supported runtimes. The check
+mode is read-only and fails on stale generated instructions or metadata, stale
+archive contents, or broken methodology anchors.
 
 **Codex (or any `AGENTS.md`-reading agent):** clone this repo into (or
 alongside) the project you're working in. The generated root `AGENTS.md` adapts
