@@ -118,6 +118,28 @@ class PipelineApplyTests(unittest.TestCase):
 
         self.assertFalse(self.output.exists())
 
+    def test_low_level_writer_has_no_crossover_escape_hatch(self):
+        """Reintroducing an opt-in must not make crossover writes possible."""
+        with self.assertRaises((TypeError, ValueError)):
+            afpx.write_filter_slot(
+                SYNTHETIC_AFPX,
+                0,
+                0,
+                F=90.0,
+                allow_crossover=True,
+            )
+
+    def test_roundtrip_lint_has_no_crossover_escape_hatch(self):
+        """A caller override must not allow changed crossovers to verify."""
+        changed = SYNTHETIC_AFPX.replace('F="80.00"', 'F="90.00"', 1)
+
+        with self.assertRaises((TypeError, ValueError)):
+            afpx.roundtrip_lint(
+                SYNTHETIC_AFPX,
+                changed,
+                allow_xover=True,
+            )
+
     def test_validate_plan_refuses_unconfirmed_output_trim(self):
         plan = self.plan()
         plan["edits"] = [{

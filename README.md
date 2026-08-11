@@ -1,5 +1,7 @@
 # AI DSP Tuning Skill
 
+[![Validate](https://github.com/CClintos/AI-DSP-Tuning-Skill/actions/workflows/validate.yml/badge.svg)](https://github.com/CClintos/AI-DSP-Tuning-Skill/actions/workflows/validate.yml)
+
 A measurement-driven tuning assistant for **Helix / Audiotec Fischer car-audio
 DSPs** (P SIX, DSP.3, M-SIX, V-SIX, …). Works as an installable
 [Claude](https://claude.ai) skill or, via `AGENTS.md`, with
@@ -54,10 +56,10 @@ off** — RTA has no noise rejection the way a sweep's deconvolution does, so a 
 can otherwise read as falsely filled by cabin noise.
 
 **Writes safely and verifies.** Stays inside the DSP's hardware limits, leaves your
-crossovers and delays untouched unless you ask, and decodes every file it writes back
-to confirm only the intended changes landed. A delay can be written directly once
-you've confirmed a specific number — never automatically — and that write is verified
-too.
+crossovers untouched unconditionally, and decodes every file it writes back to
+confirm only the intended changes landed. A delay can be written directly once
+you've confirmed a specific number — never automatically — and that write is
+verified too.
 
 **Keeps you honest, both before and after.** Predictions from a single measurement
 aren't the final word — it hands back a re-measure and listening checklist targeting
@@ -99,8 +101,8 @@ The full Helix filter set, each used for what it's good at:
 - **Shape-anchored level** — it matches the shape of your target and lets overall
   level float, so swapping in a different curve changes the voicing, not the tune.
 - **Within limits, verified** — every gain respects the DSP's hardware limits,
-  crossovers and delays are left as you set them unless you ask, and every written
-  file is decoded back and checked.
+  crossovers are never written or changed, delays require confirmation of the
+  specific value, and every written file is decoded back and checked.
 
 ## What you need
 
@@ -203,7 +205,8 @@ Claude will:
    the goal, not the correction, comes first.
 4. Classify each problem region and propose a conservative, budgeted set of edits,
    showing predicted before → after with a confidence level per claim.
-5. Write a verified `.afpx` (preserving your crossovers and delays untouched).
+5. Write a verified `.afpx` (always preserving crossovers, and preserving delays
+   except for a specifically confirmed delay write).
 6. Give you a re-measure + listening checklist targeting exactly what's still
    unproven — because the loaded, re-measured result is the only real proof.
 7. When that re-measure comes back, check each written band against it instead of
@@ -284,6 +287,8 @@ python helix-rew-tuner/scripts/afpx.py selftest
 python helix-rew-tuner/scripts/pct6.py selftest
 python helix-rew-tuner/scripts/alpine_jssh.py selftest
 python helix-rew-tuner/scripts/pipeline.py selftest
+python helix-rew-tuner/scripts/decay.py selftest
+python helix-rew-tuner/scripts/repeatability.py selftest
 ```
 
 Preflight, benchmark, and generated-package checks are separate executable
@@ -294,6 +299,11 @@ python helix-rew-tuner/scripts/preflight.py --json
 python helix-rew-tuner/scripts/benchmark.py --json
 python tools/build_skill.py --check
 ```
+
+GitHub Actions runs this full release gate on Windows and Linux with Python
+3.10 and 3.13 for every push and pull request. It also compiles all Python
+sources, runs the official skill validator, and rejects generated-package or
+whitespace drift.
 
 ## Safety & scope
 

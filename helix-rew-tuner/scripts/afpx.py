@@ -385,14 +385,14 @@ def verify_delay_write(old_xml, new_xml, channel_index, expected_samples):
 # removed is a judgement call that still needs measured justification and the
 # same per-change user confirmation as any other write.
 def write_filter_slot(xml, channel_index, slot_index, F=None, Q=None, G=None,
-                      type_code=None, allow_crossover=False):
+                      type_code=None):
     """Rewrite one filter slot's attributes in place. Only the attributes you
     pass are changed; everything else on that tag (FN, dF, I, FilBy, ...) is
     left byte-identical, and no other slot or channel is touched.
 
-    Set type_code='1' to FREE a slot (removal). Refuses to touch a crossover
-    slot unless allow_crossover=True, so a mis-indexed edit can't silently
-    retune a crossover -- crossovers remain user-initiated only.
+    Set type_code='1' to FREE a slot (removal). Refuses every crossover-slot
+    edit unconditionally, so neither a mis-indexed edit nor a caller override
+    can silently retune or disable driver protection.
 
     Returns the new XML. Verify with verify_slot_write()."""
     blocks = channel_blocks(xml)
@@ -407,11 +407,11 @@ def write_filter_slot(xml, channel_index, slot_index, F=None, Q=None, G=None,
     m = fil_ms[slot_index]
     old_tag = m.group(0)
     a = attrs(old_tag)
-    if a.get('T') in CROSSOVER_TYPES and not allow_crossover:
+    if a.get('T') in CROSSOVER_TYPES:
         raise ValueError(
             'ch%d slot %d is a crossover (T=%s) -- refusing to edit. Crossovers '
-            'are user-initiated only; pass allow_crossover=True if that is '
-            'genuinely what was confirmed.' % (channel_index, slot_index, a.get('T')))
+            'cannot be written or changed by this tool.'
+            % (channel_index, slot_index, a.get('T')))
 
     updates = {}
     if type_code is not None:
@@ -665,14 +665,14 @@ def verify_output_trim_write(old_xml, new_xml, trims_db, tol_db=0.01):
     return {'pass': not errors, 'errors': errors}
 
 
-def roundtrip_lint(old_xml, new_xml, expect_changed=None,
-                   allow_delay=False, allow_xover=False):
-    """Verify a write: delays + crossovers preserved (semantically), header
-    valid on re-encode, and only the intended slots changed. Returns a dict."""
+def roundtrip_lint(old_xml, new_xml, expect_changed=None, allow_delay=False):
+    """Verify a write: crossovers are always preserved; delays are preserved
+    unless the verified write is an explicitly confirmed delay. Also checks a
+    valid header and only the intended slots changed. Returns a dict."""
     errors = []
     if not allow_delay and semantic_delay_key(old_xml) != semantic_delay_key(new_xml):
         errors.append('delay tags changed')
-    if not allow_xover and semantic_xover_key(old_xml) != semantic_xover_key(new_xml):
+    if semantic_xover_key(old_xml) != semantic_xover_key(new_xml):
         errors.append('crossover filters changed')
     # count changed PEQ/shelf/APF slots (FN-insensitive).
     # FAIL CLOSED on structure changes: a plain zip() silently truncates to the
@@ -914,9 +914,14 @@ def _selftest():
             raise AssertionError('%s should have raised' % why)
         except ValueError:
             pass
-    # crossover edit allowed only when explicitly opted in
-    assert write_filter_slot(sxml, 0, 0, F=90.0, allow_crossover=True) != sxml
-    print('afpx selftest: rejects crossover/out-of-range/illegal edits; opt-in works OK')
+    # A former allow_crossover keyword was an unsafe escape hatch. It no longer
+    # belongs to the API, and attempted legacy use must still fail closed.
+    try:
+        write_filter_slot(sxml, 0, 0, F=90.0, allow_crossover=True)
+        raise AssertionError('legacy crossover opt-in should have raised')
+    except TypeError:
+        pass
+    print('afpx selftest: rejects crossover/out-of-range/illegal edits; no crossover escape hatch OK')
 
     # verification must catch collateral damage
     tampered = write_filter_slot(sxml, 0, 1, F=100.0).replace('F="103.00"', 'F="105.00"')

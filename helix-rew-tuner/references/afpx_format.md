@@ -66,7 +66,7 @@ failure mode is documented for `T=19` all-pass Q below.
 |---|---------|------------------|
 | `1` | free / off slot (`G="0"`) | any |
 | `17` | **Parametric EQ** — the normal band; obeys PC-Tool AutoSort | any (use middle slots) |
-| `15` / `16` | LP / HP crossover — **do not touch** unless asked | fixed |
+| `15` / `16` | LP / HP crossover — **never write or change** | fixed |
 | `3` | **Low shelf** (active when `G≠0`) | band 1 / `dF="25"` only |
 | `4` | **High shelf** (active when `G≠0`) | band 30 / `dF="20000"` only |
 | `19` | **1st-order all-pass** (`G=0`, no real Q — PC-Tool shows "N/A for 1st order") | any slot incl. middle |
@@ -128,9 +128,10 @@ slots 12 and 0.
 `write_filter_slot(xml, channel_index, slot_index, F=/Q=/G=/type_code=)` edits
 one slot in place: only the attributes you pass change, `FN`/`dF`/`I`/`FilBy`
 stay byte-identical, and no other slot moves. `type_code='1'` frees a slot
-(removal without deleting it, preserving slot count). It **refuses to touch a
-crossover** unless `allow_crossover=True`, so a mis-indexed edit can't silently
-retune one. PEQ edits are checked against hardware limits. Verify with
+(removal without deleting it, preserving slot count). It **unconditionally
+refuses every crossover slot**; there is no caller override, so a mis-indexed
+edit can't silently retune or disable driver protection. PEQ edits are checked
+against hardware limits. Verify with
 `verify_slot_write`, which confirms the intended attributes landed, nothing
 else on that tag moved, every other slot in every channel is unchanged, and
 delays didn't shift.

@@ -43,9 +43,9 @@ Four per-band EQ modes: **Parametric**, **FineEQ**, **Allpass**, **Shelf**.
 
 Butterworth / Bessel / Tschebyscheff / Linkwitz / Self-Define characteristics,
 slopes up to −42 dB/oct (64-bit DSP units — internal sample rate varies by model,
-see Delay & polarity below). **Leave crossovers alone unless the user explicitly
-asks to change them** — a crossover change needs live re-measurement to validate
-and is outside the safe auto-write path.
+see Delay & polarity below). **Never write or change crossovers, even when the
+user asks.** The tuner preserves them unconditionally; crossover design and
+validation remain outside its write path.
 
 ## Delay & polarity
 
