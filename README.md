@@ -205,8 +205,9 @@ Claude will:
    the goal, not the correction, comes first.
 4. Classify each problem region and propose a conservative, budgeted set of edits,
    showing predicted before → after with a confidence level per claim.
-5. Write a verified `.afpx` (always preserving crossovers, and preserving delays
-   except for a specifically confirmed delay write).
+5. Write a verified `.afpx` only through `pipeline.py plan` followed by
+   `pipeline.py apply`, always preserving crossovers and requiring a specific
+   confirmation for every edit.
 6. Give you a re-measure + listening checklist targeting exactly what's still
    unproven — because the loaded, re-measured result is the only real proof.
 7. When that re-measure comes back, check each written band against it instead of
@@ -233,6 +234,15 @@ Claude will:
    references. The only difference is which agent is driving; the analysis,
    restraint rules, and write/verify discipline don't change.
 
+Every AFPX file write uses the versioned
+[`tune_plan_schema.md`](helix-rew-tuner/references/tune_plan_schema.md): the
+plan binds `source_sha256`, a distinct not-yet-existing `output_path`, all
+edits, and per-edit `confirmations`. `pipeline.py apply` exclusively creates
+the output and prints a verification manifest with hashes, normalized edits,
+and decoded write checks. Direct `afpx.py` write helpers are implementation/reference only.
+A phase-domain plan (delay or T=19/20 APF) is
+applied and remeasured before a new plan can contain EQ-domain PEQ or shelves.
+
 ## What's in the box
 
 ```
@@ -242,11 +252,11 @@ helix-rew-tuner/
 ├── agents/openai.yaml               Codex skill catalogue metadata
 ├── scripts/
 │   ├── tunelib.py                    verified DSP + acoustic-analysis core (self-tests)
-│   ├── afpx.py                       decode / inspect / channel-detect / write-lint
+│   ├── afpx.py                       decode / inspect / internal write verification
 │   ├── measure.py                    load REW exports & .mdat, validate axis, targets
-│   ├── pipeline.py                   one deterministic analysis CLI -> one JSON report
-│   ├── pct6.py                       BETA, personal-use-only .pct6 decode/encode
-│   ├── alpine_jssh.py                BETA, personal-use-only Alpine .jssh decode/encode
+│   ├── pipeline.py                   analysis plus required AFPX plan/apply boundary
+│   ├── pct6.py                       BETA source-bound .pct6 decode/encode
+│   ├── alpine_jssh.py                BETA source-bound Alpine .jssh decode/encode
 │   ├── preflight.py                  read-only dependency and path readiness check
 │   ├── benchmark.py                  deterministic optimizer regression benchmark
 │   ├── decay.py                      decay / ringing analysis helpers
@@ -336,10 +346,14 @@ cracking tool:**
 - **No-password saves only.** Password-protected `.pct6` files use a different,
   unidentified scheme and aren't supported — the decoder raises a clear error
   rather than returning garbage if it doesn't see valid tune XML come out.
-- **Verified against real files on PC-Tool 6.01.08 only.** The container key is
-  version-fragile — Audiotec Fischer could change it in a future release
+- **Verified against real no-password files on PC-Tool 6.01.08 and 6.03.04.**
+  This is limited container evidence, not a promise for every device or future
+  build. The container key is version-fragile — Audiotec Fischer could change it in a future release
   without notice. Always check that a decode actually produces plausible
   `<ATF ...>` XML before trusting it on a PC-Tool version you haven't tried.
+- The only file-producing helper/CLI is source-bound: it compares the complete
+  crossover state at each original channel/slot and exclusively creates a new
+  output. Raw unchecked container encoders are internal only.
 - Read [`references/pct6_format.md`](helix-rew-tuner/references/pct6_format.md)
   in full before touching a real `.pct6` file — it covers the container format,
   provenance, and what's different from `.afpx` (more channels, less-verified
@@ -362,6 +376,9 @@ only:**
   marker the source documented, field by field. HPF/LPF frequency, type, and
   slope remain readable for inspection but are unconditionally read-only;
   delay and PEQ retain their verified write paths.
+- Alpine output is source-bound too: the helper/CLI compares all crossover
+  bytes at their original channel and exclusively creates a distinct output;
+  there is no public raw encoder bypass.
 - **Not yet independently re-verified from this Python port against a real
   file** — run `alpine_jssh.roundtrip_identical()` against your own real
   `.jssh` before trusting a generated file on real hardware; that's the actual

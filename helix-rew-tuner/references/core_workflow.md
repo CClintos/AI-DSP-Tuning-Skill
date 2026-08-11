@@ -61,12 +61,10 @@ Run these with the user's files; they are the deterministic layer.
   | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | §Shelf cookbook, §All-pass cookbook |
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
   crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
-  `write_delay_samples`/`verify_delay_write` can write a confirmed delay
-  directly — a real, tested capability, but it does NOT change the standing
-  rule that delay writes need explicit per-change user confirmation first
-  (see workflow step 5 and `helix_hardware.md`).
+  Direct `afpx.py` write helpers are implementation/reference only; never call
+  them as a user-facing file-output route.
   `channels()[ch]['slots']` gives every filter's stable `slot_index`/`fn`;
-  `write_filter_slot`/`verify_slot_write` edit an EXISTING filter by
+  the internal `write_filter_slot`/`verify_slot_write` pair edits an EXISTING filter by
   `(channel, slot)` — the only safe way to re-centre, relax or remove one,
   since matching by nearest frequency is ambiguous on real tunes (see
   `afpx_format.md`). Editing an existing band still needs the same measured
@@ -76,9 +74,9 @@ Run these with the user's files; they are the deterministic layer.
   `afpx_format.md` for the fewer-Vol-tags-than-channels gotcha). Reading it is
   mandatory before reporting any `headroom_report` clip risk (that flag is
   PEQ-only and usually a false alarm once the existing trim is counted);
-  writing is attenuation-only by construction (≤0 dB, ≥−6 dB, relative to
-  current) and still needs per-change confirmation. `python afpx.py selftest`
-  self-tests both write paths on synthetic XML.
+  its internal writer is attenuation-only by construction (≤0 dB, ≥−6 dB,
+  relative to current). `python afpx.py selftest` self-tests these implementation
+  primitives on synthetic XML; it does not replace the plan/apply boundary.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
   resample onto a common grid, load target curves.
 - **`pipeline.py`** — one deterministic entry point for step 2-3's analysis
@@ -88,10 +86,16 @@ Run these with the user's files; they are the deterministic layer.
   <file> | --voice tilt=X bass=Y presence=Z air=W]` → one JSON report: tilt,
   threshold-flagged deviation regions (not raw per-bin arrays), plus
   `spatial_consistency`/`interference_audit`/`crossover_confidence`/gating
-  results for whichever inputs were given. **Reporting only — writes nothing
-  to any DSP file**; every number is a thin wrapper around an already-tested
-  `tunelib.py`/`afpx.py` function. `python pipeline.py selftest` self-tests
-  on synthetic fixtures.
+  results for whichever inputs were given. Analysis writes nothing to a DSP
+  file. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
+  and review `references/tune_plan_schema.md`, then populate the plan's
+  `source_sha256`, distinct not-yet-existing `output_path`, edits, and
+  per-edit `confirmations`; finally run `pipeline.py apply`. Apply exclusively
+  creates a new output, re-decodes it, and returns the verification manifest.
+  Any phase-domain edit (delay or T=19/20 APF) must be applied and remeasured
+  before a fresh plan may contain EQ-domain edits (T=17 PEQ or T=3/4 shelves).
+  `python pipeline.py selftest` self-tests analysis and documentation routing on
+  synthetic fixtures.
 - **`decay.py`** — waterfall/CSD decay analysis on an impulse-response `.wav`
   (REW "Export IR" or similar), for when a problem is ringing/decay-shaped
   rather than magnitude-shaped (see §Beyond magnitude, methodology.md).
@@ -105,12 +109,13 @@ Run these with the user's files; they are the deterministic layer.
   heuristic. `python repeatability.py floor <file> [<file> ...] [--json
   out.json]`, then `python repeatability.py check --floor <floor.json> --dev
   <hz:db> [...]`. Imports `measure.py` for loading.
-- **`pct6.py`** — **BETA, personal-use only** — decode/encode `.pct6` (DSP
-  PC-Tool 6, no-password saves only). `decode()`/`encode()` give a byte-
+- **`pct6.py`** — **BETA, personal-use only** — decode and source-bound encode
+  `.pct6` (DSP PC-Tool 6, no-password saves only). `decode()` gives a byte-
   preserving (latin-1) text view safe to pass straight into `afpx.py`'s
-  functions (`channels`, `roundtrip_lint`, etc.); `decode_bytes()`/
-  `encode_bytes()` give raw bytes for read-only inspection or a verified
-  round-trip check. **Never decode with `errors='replace'` for anything
+  read/inspection functions. `decode_bytes()` gives raw bytes for read-only
+  inspection. File creation is only through `write_preserving_crossovers`
+  (or the source-requiring `encode` CLI), which compares every crossover at
+  its original channel/slot and exclusively creates a new output. **Never decode with `errors='replace'` for anything
   that gets written back** — real files carry binary-ish attributes (e.g.
   `AV=`) that aren't reliably valid UTF-8, and `'replace'` silently
   corrupts them on re-encode. **Read `references/pct6_format.md` before
@@ -181,7 +186,7 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   **verify it actually produced `<ATF ...>` XML** before doing anything else —
   don't proceed on faith. If it raises (password-protected, or the key doesn't
   match this PC-Tool version), say so plainly and don't guess further; this
-  path is beta and unverified beyond one PC-Tool 6 version.
+  path is beta and only verified on no-password 6.01.08/6.03.04 samples.
   If given an Alpine **`.jssh`** instead, read
   `references/alpine_jssh_format.md` first, then `alpine_jssh.decode()` (it
   raises unless the result is valid JSON). Run
@@ -307,18 +312,22 @@ car.
 
 ### 5. Write — verified, conservative
 
-- Only write PEQ (`T=17`), and — when justified and the user agrees — shelves
-  (`T=3/4`, end slots only) and all-passes (`T=19/20`). Use the verified writers in
-  `tunelib.py`.
+- Every AFPX write goes through `pipeline.py plan` and `pipeline.py apply` under
+  `references/tune_plan_schema.md`. Put every proposed edit in the plan, keep the
+  generated `source_sha256`, choose a distinct not-yet-existing `output_path`,
+  and set `confirmations[edit.id]` to `true` only after the user confirms that
+  specific edit. Ordinary PEQ requires confirmation too. Review the printed
+  verification manifest before handing off the file.
+- Supported plan edits are PEQ (`T=17`), justified shelves (`T=3/4`, end slots
+  only), all-passes (`T=19/20`), confirmed delays, and attenuation-only output
+  trims. Direct `afpx.py` write helpers are implementation/reference only.
 - **Never write or change crossovers, even if the user asks.** Preserve them
   unconditionally. Preserve delays unless the user explicitly confirms the
-  specific delay write under the conditions below. Verify preservation with
-  `afpx.roundtrip_lint` (semantic, tolerant of PC-Tool attribute reordering).
-- After writing, decode the new file back and confirm: header valid, crossovers
-  unchanged, delays unchanged except for an exactly confirmed delay write, only
-  the intended slots changed, and all gains within limits.
+  specific delay write under the conditions below. Apply enforces source-bound
+  whole-file crossover preservation and exclusive output creation, then decodes
+  and verifies the emitted file.
 - **Writing a delay is allowed, but only under all of these conditions —
-  `afpx.write_delay_samples` being available doesn't lower the bar:**
+  the implementation helper being available doesn’t lower the bar:**
   1. A specific number came out of `polarity_delay_search` (ideally with
      `xcorr_agrees: True` — if it disagrees with the cross-check, say so and
      don't offer to write it) or was otherwise measured/confirmed.
@@ -326,18 +335,19 @@ car.
      unit's *confirmed* sample rate) and explicitly said to apply it — not a
      general "yes, tune it" earlier in the session. Ask again for this
      specific change, same as any other write.
-  3. After writing, run `afpx.verify_delay_write` — not just
-     `roundtrip_lint` — since it checks the exact value landed and nothing
-     else in the file moved, which a delay write specifically needs.
+  3. Put the exact sample count in a `delay_samples` plan edit and its explicit
+     confirmation in the plan. `pipeline.py apply` runs the specific delay
+     verifier and records its result in the verification manifest.
   4. The result is still a *prediction* until the user re-measures with it
      loaded — say so plainly, especially since this is a phase-domain change.
-- **An output trim (`afpx.write_output_trim`) is the one write that can't make
+- **An output trim is the one write that can’t make
   things worse level-wise** — it's attenuation-only by construction (≤0 dB,
   ≥−6 dB, relative to the channel's current level). That lowers the *risk*, not
   the *bar*: it's still an audible change to their tune, so it needs the same
   per-change confirmation, and you must show the current and resulting dB for
   each channel (not just the trim amount) so the user can see where it lands.
-  Verify with `afpx.verify_output_trim_write` afterwards. Never trim to "fix" a
+  Put it in an `output_trim` plan edit; apply runs the implementation verifier
+  and records it in the manifest. Never trim to "fix" a
   `clip_risk` flag you haven't checked against the real output level first.
 
 ### 6. Hand off — the real proof is the re-measure
@@ -381,12 +391,11 @@ reverted band without telling the user why.
    step 5's conditions; the confirmation exception applies to delay only.
 5. **Classify before correcting.** Never boost a null or a reflection. Never EQ a
    phase problem.
-6. **Never combine a phase-domain write (polarity/delay/APF) with a PEQ write in
-   the same crossover-adjacent region in the same pass.** A PEQ prediction there
-   is only valid against the *current* summed response — a phase fix changes
-   that summed response, so a PEQ fit before it is stale after it. Wait for a
-   re-measure (`predicted_vs_measured`) or say plainly the PEQ is provisional
-   pending one — see methodology.md's crossover ladder for why.
+6. **Never combine a phase-domain write (delay/APF) with an EQ-domain write
+   (PEQ/shelf) anywhere in one plan, even across channels.** A phase fix changes
+   the summed response that the EQ prediction used. Apply the phase-only plan,
+   remeasure, then create a fresh EQ-only plan — see methodology.md's crossover
+   ladder for why.
 7. **Restraint is a feature.** Fewer, broader filters that improve the whole-system
    score beat a pile of narrow fixes that flatter one trace. When unsure, do less.
 8. **Verify every write** and be honest about what is predicted vs measured.

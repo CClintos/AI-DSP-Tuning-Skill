@@ -36,17 +36,27 @@ def decode_bytes(raw, source='<bytes>'):
     return xml
 
 
-def encode(xml, path):
+def _encode_unchecked(xml, path):
+    """Internal fixture/temp codec. Public outputs must be source-bound."""
     payload = xml.encode('utf-8')
     with open(path, 'wb') as fh:
         fh.write(struct.pack('>I', len(payload)) + zlib.compress(payload, 9))
 
 
-def encode_new(xml, path):
-    """Encode to a path that must not already exist."""
+def _encode_exclusive_unchecked(xml, path):
+    """Internal exclusive codec used only after a source-bound safety check."""
     payload = xml.encode('utf-8')
     with open(path, 'xb') as fh:
         fh.write(struct.pack('>I', len(payload)) + zlib.compress(payload, 9))
+
+
+def write_preserving_crossovers(source_path, xml, output_path):
+    """Write one new AFPX only when every crossover stays in its source slot."""
+    source_xml = decode(source_path)
+    if semantic_xover_key(source_xml) != semantic_xover_key(xml):
+        raise ValueError(
+            'crossover state or channel/slot identity changed; refusing AFPX output')
+    _encode_exclusive_unchecked(xml, output_path)
 
 
 # ---------------------------------------------------------------- parsing
@@ -257,11 +267,16 @@ def semantic_delay_key(xml):
 
 
 def semantic_xover_key(xml):
-    """Order-independent signature of every crossover's full state. Uses the
+    """Channel/slot-bound signature of every crossover's full state. Uses the
     central CROSSOVER_TYPES/CROSSOVER_FIELDS so it can't drift out of step
     with what channel_summary() already treats as a crossover."""
-    return sorted(tuple((k, attrs(f).get(k)) for k in CROSSOVER_FIELDS)
-                  for f in filters(xml) if attrs(f).get('T') in CROSSOVER_TYPES)
+    return tuple(
+        (channel_index, slot_index,
+         tuple((key, attrs(filter_tag).get(key)) for key in CROSSOVER_FIELDS))
+        for channel_index, block in enumerate(channel_blocks(xml))
+        for slot_index, filter_tag in enumerate(filters(block))
+        if attrs(filter_tag).get('T') in CROSSOVER_TYPES
+    )
 
 
 # ---------------------------------------------------------------- delay write

@@ -39,12 +39,68 @@ def _frequencies():
     return np.geomspace(100.0, 10000.0, 401)
 
 
+def _fit_metrics(freqs, deviations, fit_band, bands, mask=None, conf=None):
+    """Comparable position outcomes for legacy and robust fitters."""
+    deviations = np.atleast_2d(np.asarray(deviations, dtype=float))
+    selected = (freqs >= fit_band[0]) & (freqs <= fit_band[1])
+    if mask is not None:
+        mask_array = np.asarray(mask, dtype=bool)
+        if mask_array.ndim == 1:
+            selected = selected & mask_array
+    weights = np.ones(len(freqs), dtype=float)
+    if conf is not None:
+        conf_array = np.asarray(conf, dtype=float)
+        if conf_array.ndim == 1:
+            weights *= np.clip(conf_array, 0.0, 1.0)
+    weights = weights[selected]
+    cascade = sum((tunelib.peaking_db(freqs, *band) for band in bands),
+                  np.zeros_like(freqs))
+
+    def score(trace):
+        values = np.asarray(trace)[selected]
+        denom = max(float(np.sum(weights)), 1e-12)
+        return float(np.sqrt(np.sum(weights * values ** 2) / denom))
+
+    before = [score(trace) for trace in deviations]
+    after = [score(trace + cascade) for trace in deviations]
+    improvements = np.asarray(before) - np.asarray(after)
+    return {
+        "median_improvement_db": round(float(np.median(improvements)), 3),
+        "worst_position_change_db": round(float(np.min(improvements)), 3),
+        "bands_used": len(bands),
+        "headroom_cost_db": round(float(sum(max(0.0, band[2]) for band in bands)), 3),
+        "refused": not bool(bands),
+    }
+
+
+def _compare_fitters(freqs, deviations, fit_band, n_bands_max, mask=None,
+                     conf=None, robust_fitter=tunelib.fit_peq_robust,
+                     improve_pct=3.0, max_worst_loss_db=0.25):
+    deviations = np.atleast_2d(np.asarray(deviations, dtype=float))
+    median_trace = np.median(deviations, axis=0)
+    legacy_bands, _legacy_report = tunelib.fit_peq(
+        freqs, median_trace, fit_band, n_bands_max=n_bands_max,
+        mask=mask, conf=conf, improve_pct=improve_pct)
+    robust_bands, robust_report = robust_fitter(
+        freqs, deviations, fit_band, n_bands_max=n_bands_max,
+        mask=mask, conf=conf, improve_pct=improve_pct,
+        max_worst_loss_db=max_worst_loss_db)
+    comparison = {
+        "legacy": _fit_metrics(
+            freqs, deviations, fit_band, legacy_bands, mask=mask, conf=conf),
+        "robust": _fit_metrics(
+            freqs, deviations, fit_band, robust_bands, mask=mask, conf=conf),
+    }
+    return legacy_bands, robust_bands, robust_report, comparison
+
+
 def stable_peaks_case(fitter=tunelib.fit_peq_robust):
     freqs = _frequencies()
     peak = tunelib.peaking_db(freqs, 800.0, 0.8, 4.0)
-    bands, report = fitter(
-        freqs, np.vstack([peak, 0.9 * peak, 1.1 * peak]),
-        (200.0, 6000.0), n_bands_max=2, improve_pct=3.0)
+    deviations = np.vstack([peak, 0.9 * peak, 1.1 * peak])
+    _legacy, bands, report, comparison = _compare_fitters(
+        freqs, deviations, (200.0, 6000.0), n_bands_max=2,
+        robust_fitter=fitter, improve_pct=3.0)
     minimum_improvement = min(
         before - after for before, after in zip(
             report["position_scores_before"], report["position_scores_after"]))
@@ -54,6 +110,7 @@ def stable_peaks_case(fitter=tunelib.fit_peq_robust):
             "bands": bands,
             "bands_used": report["bands_used"],
             "minimum_position_improvement_db": round(minimum_improvement, 3),
+            "legacy_vs_robust": comparison,
         },
         "guards": [
             make_guard("shared peak receives a filter", report["bands_used"], ">=", 1),
@@ -72,7 +129,7 @@ def wandering_nulls_case():
         freqs, traces, alignment_band=(200.0, 6000.0))
     aligned = np.vstack(traces) - np.asarray(
         consistency["level_offsets_db"])[:, None]
-    bands, report = tunelib.fit_peq_robust(
+    _legacy, bands, report, comparison = _compare_fitters(
         freqs, aligned, (200.0, 6000.0), mask=consistency["mask"],
         conf=consistency["conf"], n_bands_max=2, improve_pct=3.0)
     rejected_fraction = round(float(np.mean(~consistency["mask"])), 3)
@@ -84,6 +141,7 @@ def wandering_nulls_case():
             "bands_used": report["bands_used"],
             "boosts": boosts,
             "spatially_rejected_fraction": rejected_fraction,
+            "legacy_vs_robust": comparison,
         },
         "guards": [
             make_guard("wandering nulls lose authority", rejected_fraction, ">=", 0.1),
@@ -151,7 +209,7 @@ def worst_position_harm_case():
     permissive, permissive_report = tunelib.fit_peq_robust(
         freqs, deviations, (200.0, 6000.0), n_bands_max=1,
         improve_pct=3.0, max_worst_loss_db=10.0)
-    guarded, guarded_report = tunelib.fit_peq_robust(
+    _legacy, guarded, guarded_report, comparison = _compare_fitters(
         freqs, deviations, (200.0, 6000.0), n_bands_max=1,
         improve_pct=3.0, max_worst_loss_db=0.25)
     candidate_loss = permissive_report["worst_position_loss_db"]
@@ -163,6 +221,7 @@ def worst_position_harm_case():
             "guarded_bands": guarded,
             "rejected_candidate_worst_loss_db":
                 guarded_report["rejected_candidate_worst_loss_db"],
+            "legacy_vs_robust": comparison,
         },
         "guards": [
             make_guard("fixture exposes a harmful mean-improving candidate",

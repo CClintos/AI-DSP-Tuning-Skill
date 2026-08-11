@@ -122,12 +122,11 @@ def validate_plan(plan, source_path, source_bytes=None):
 
     source_xml = afpx.decode_bytes(source_bytes, source_path)
     confirmations = plan['confirmations']
-    protected_types = {'3', '4', '19', '20'}
     normalized_edits = []
     edit_ids = set()
     target_keys = set()
-    delay_channels = set()
-    filter_channels = set()
+    phase_edit_ids = set()
+    eq_edit_ids = set()
     working_xml = source_xml
 
     def integer_field(edit, key):
@@ -212,19 +211,18 @@ def validate_plan(plan, source_path, source_bytes=None):
                 raise ValueError('%s is a no-op; requested slot values already match'
                                  % edit_id)
             working_xml = candidate_xml
-            if old_type in protected_types or target_type in protected_types:
-                if confirmations.get(edit_id) is not True:
-                    raise ValueError('%s requires explicit per-change confirmation' % edit_id)
             normalized_edit['slot'] = slot
-            filter_channels.add(channel)
+            domain_types = {old_type, target_type}
+            if domain_types & {'19', '20'}:
+                phase_edit_ids.add(edit_id)
+            if domain_types & {'3', '4', '17'}:
+                eq_edit_ids.add(edit_id)
         elif kind == 'delay_samples':
             samples = integer_field(raw_edit, 'samples')
             key = (kind, channel)
             if key in target_keys:
                 raise ValueError('%s: duplicate delay target ch%d' % (edit_id, channel))
             target_keys.add(key)
-            if confirmations.get(edit_id) is not True:
-                raise ValueError('%s requires explicit per-change confirmation' % edit_id)
             delay_tags = afpx.delay_tags(working_xml)
             if 0 <= channel < len(delay_tags):
                 existing = afpx.attrs(delay_tags[channel]).get('T')
@@ -244,7 +242,7 @@ def validate_plan(plan, source_path, source_bytes=None):
                                  % edit_id)
             working_xml = candidate_xml
             normalized_edit['samples'] = samples
-            delay_channels.add(channel)
+            phase_edit_ids.add(edit_id)
         else:
             if 'trim_db' not in raw_edit:
                 raise ValueError('%s: trim_db is required' % edit_id)
@@ -253,8 +251,6 @@ def validate_plan(plan, source_path, source_bytes=None):
             if key in target_keys:
                 raise ValueError('%s: duplicate output trim target ch%d' % (edit_id, channel))
             target_keys.add(key)
-            if confirmations.get(edit_id) is not True:
-                raise ValueError('%s requires explicit per-change confirmation' % edit_id)
             if trim_db == 0.0:
                 raise ValueError('%s is a no-op; zero dB output trim changes nothing'
                                  % edit_id)
@@ -264,6 +260,8 @@ def validate_plan(plan, source_path, source_bytes=None):
                                  % edit_id)
             working_xml = candidate_xml
             normalized_edit['trim_db'] = trim_db
+        if confirmations.get(edit_id) is not True:
+            raise ValueError('%s requires explicit per-change confirmation' % edit_id)
         normalized_edits.append(normalized_edit)
 
     unknown_confirmations = set(confirmations) - edit_ids
@@ -272,10 +270,12 @@ def validate_plan(plan, source_path, source_bytes=None):
                          sorted(unknown_confirmations))
     if any(type(value) is not bool for value in confirmations.values()):
         raise ValueError('confirmation values must be JSON booleans')
-    overlap = delay_channels & filter_channels
-    if overlap:
-        raise ValueError('delay and filter edits on the same channel are refused: %s'
-                         % sorted(overlap))
+    if phase_edit_ids and eq_edit_ids:
+        raise ValueError(
+            'phase-domain and EQ-domain edits (including delay and filter edits '
+            'on the same channel) cannot share one plan; apply the '
+            'phase change, remeasure, then create a fresh EQ plan (phase=%s, EQ=%s)'
+            % (sorted(phase_edit_ids), sorted(eq_edit_ids)))
 
     return {
         'version': 1,
@@ -356,7 +356,7 @@ def apply_plan(plan_path):
     try:
         fd, temp_path = tempfile.mkstemp(prefix='.tune-plan-', suffix='.afpx', dir=output_dir)
         os.close(fd)
-        afpx.encode(intended_xml, temp_path)
+        afpx._encode_unchecked(intended_xml, temp_path)
         emitted_xml = afpx.decode(temp_path)
         replayed_xml, edit_results = _apply_edits(source_xml, normalized['edits'])
         if replayed_xml != emitted_xml:
@@ -371,7 +371,8 @@ def apply_plan(plan_path):
             raise ValueError('roundtrip_lint failed: %s' % '; '.join(lint['errors']))
         if _sha256_file(normalized['source_path']) != normalized['source_sha256']:
             raise ValueError('source file changed after plan validation; refusing output')
-        afpx.encode_new(emitted_xml, normalized['output_path'])
+        afpx.write_preserving_crossovers(
+            normalized['source_path'], emitted_xml, normalized['output_path'])
     finally:
         if temp_path is not None and os.path.exists(temp_path):
             os.unlink(temp_path)
@@ -554,32 +555,48 @@ def analyze(args):
     return report
 
 
-def check_doc_refs():
-    """Every '§Section' reference in SKILL.md must match a real heading in
-    references/methodology.md.
+def check_doc_refs(core_path=None, methodology_path=None):
+    """Validate canonical workflow section names and methodology anchors.
 
     This exists because line-number references kept going stale: another
-    session edits methodology.md, every heading shifts, and SKILL.md silently
+    session edits methodology.md, every heading shifts, and core workflow silently
     points at the wrong place. It broke three times before being replaced with
     section names, which survive insertions. This check makes the remaining
     drift (a renamed or deleted heading) fail loudly instead of being
     rediscovered by accident. Returns a list of problems; empty means OK."""
     here = os.path.dirname(os.path.abspath(__file__))
-    skill = os.path.join(here, '..', 'SKILL.md')
-    meth = os.path.join(here, '..', 'references', 'methodology.md')
-    if not (os.path.isfile(skill) and os.path.isfile(meth)):
-        return ['SKILL.md or references/methodology.md not found']
+    core = (os.fspath(core_path) if core_path is not None else
+            os.path.join(here, '..', 'references', 'core_workflow.md'))
+    meth = (os.fspath(methodology_path) if methodology_path is not None else
+            os.path.join(here, '..', 'references', 'methodology.md'))
+    if not (os.path.isfile(core) and os.path.isfile(meth)):
+        return ['references/core_workflow.md or references/methodology.md not found']
     import re as _re
     with open(meth, encoding='utf-8') as fh:
-        headings = [ln.lstrip('#').strip() for ln in fh if ln.startswith('##')]
-    with open(skill, encoding='utf-8') as fh:
-        refs = sorted(set(_re.findall(r'§([^|,\n]+)', fh.read())))
+        headings = [ln.lstrip('#').strip() for ln in fh if ln.startswith('#')]
+    with open(core, encoding='utf-8') as fh:
+        core_text = fh.read()
+    refs = sorted(set(_re.findall(r'§([^|,\n]+)', core_text)))
+    linked_anchors = sorted(set(_re.findall(
+        r'\]\((?:[^)\s]*/)?methodology\.md#([^)]+)\)', core_text,
+        flags=_re.IGNORECASE)))
+
+    def anchor(heading):
+        value = _re.sub(r'[`*_]', '', heading.strip().lower())
+        value = _re.sub(r'[^\w\- ]', '', value)
+        return _re.sub(r'[ \t]+', '-', value)
+
+    anchors = {anchor(heading) for heading in headings}
     problems = []
     for ref in refs:
         ref = ref.strip()
         if not any(h.lower().startswith(ref.lower()) for h in headings):
-            problems.append('SKILL.md references "§%s" but no such heading in '
+            problems.append('core_workflow.md references "§%s" but no such heading in '
                             'methodology.md' % ref)
+    for linked_anchor in linked_anchors:
+        if linked_anchor.lower() not in anchors:
+            problems.append('core_workflow.md has unresolved methodology.md anchor #%s'
+                            % linked_anchor)
     return problems
 
 
@@ -621,7 +638,7 @@ def _selftest():
               '<OC ON="1" CINV="1"><Fil T="17" F="100" G="-2" Q="1"/></OC></ATF>'
               '<T PM="1" P="0" T="0"/><T PM="2" P="0" T="91"/>')
         afpx_path = os.path.join(d, 'test.afpx')
-        afpx.encode(xml, afpx_path)
+        afpx._encode_unchecked(xml, afpx_path)
 
         args = argparse.Namespace(
             measurement=meas_path, positions=pos_paths, target=target_path,
@@ -672,7 +689,7 @@ def _selftest():
 
     doc_problems = check_doc_refs()
     assert not doc_problems, 'stale doc cross-references:\n  ' + '\n  '.join(doc_problems)
-    print('pipeline selftest: SKILL.md section refs all resolve in methodology.md OK')
+    print('pipeline selftest: core_workflow.md section refs and anchors resolve OK')
 
     print('\nALL PIPELINE SELFTESTS PASSED')
 

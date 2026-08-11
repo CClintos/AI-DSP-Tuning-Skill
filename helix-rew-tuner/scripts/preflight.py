@@ -8,7 +8,7 @@ import sys
 from pathlib import Path
 
 
-MINIMUM_PYTHON = (3, 9)
+MINIMUM_PYTHON = (3, 10)
 DEPENDENCIES = {
     "numpy": ("NumPy", (1, 23, 0)),
     "scipy": ("SciPy", (1, 9, 0)),
@@ -70,10 +70,10 @@ def _path_check(path, label):
     return {"ok": ok, "path": str(resolved), "message": message}
 
 
-def collect_preflight(module_loader=__import__):
+def collect_preflight(module_loader=__import__, python_version=None):
     """Return dependency and skill-path checks without modifying the system."""
     skill_root = Path(__file__).resolve().parents[1]
-    py_version = tuple(sys.version_info[:3])
+    py_version = tuple(sys.version_info[:3] if python_version is None else python_version)
     py_required = _required_text(MINIMUM_PYTHON)
     py_ok = py_version >= MINIMUM_PYTHON
     py_text = ".".join(str(part) for part in py_version)

@@ -112,6 +112,17 @@ class PreflightTests(unittest.TestCase):
         self.assertTrue(report["ready"])
         self.assertTrue(report["runtime"]["scipy"]["ok"])
 
+    def test_python_310_is_the_supported_runtime_boundary(self):
+        preflight = load_script("preflight_python_boundary_test", PREFLIGHT)
+
+        too_old = preflight.collect_preflight(python_version=(3, 9, 19))
+        minimum = preflight.collect_preflight(python_version=(3, 10, 0))
+
+        self.assertFalse(too_old["runtime"]["python"]["ok"])
+        self.assertEqual(">=3.10", too_old["runtime"]["python"]["required"])
+        self.assertTrue(minimum["runtime"]["python"]["ok"])
+        self.assertEqual(">=3.10", minimum["runtime"]["python"]["required"])
+
 
 class BenchmarkTests(unittest.TestCase):
     def test_missing_stable_peak_filter_is_reported_as_a_failed_guard(self):
@@ -157,6 +168,31 @@ class BenchmarkTests(unittest.TestCase):
                     {"name", "passed", "actual", "operator", "expected"},
                     set(guard),
                 )
+
+    def test_applicable_fixtures_compare_legacy_and_robust_fitters(self):
+        run = subprocess.run(
+            [sys.executable, str(BENCHMARK), "--json"],
+            cwd=ROOT, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, run.returncode, run.stderr)
+        report = json.loads(run.stdout)
+        cases = {case["id"]: case for case in report["cases"]}
+
+        for case_id in ("stable_peaks", "wandering_nulls", "worst_position_harm"):
+            with self.subTest(case=case_id):
+                comparison = cases[case_id]["metrics"]["legacy_vs_robust"]
+                self.assertEqual({"legacy", "robust"}, set(comparison))
+                for fitter in ("legacy", "robust"):
+                    metrics = comparison[fitter]
+                    self.assertEqual(
+                        {"median_improvement_db", "worst_position_change_db",
+                         "bands_used", "headroom_cost_db", "refused"},
+                        set(metrics),
+                    )
+                    self.assertIsInstance(metrics["refused"], bool)
+                    self.assertGreaterEqual(metrics["headroom_cost_db"], 0.0)
+                self.assertGreaterEqual(
+                    comparison["robust"]["worst_position_change_db"], -0.25)
 
     def test_failed_guard_makes_main_return_nonzero_and_names_the_failure(self):
         """Ignoring a false guard must not produce a successful process status."""

@@ -26,8 +26,9 @@ container; it doesn't reimplement any tune-XML parsing.
 
 ```python
 import pct6
-xml = pct6.decode('MyTune.pct6')   # -> byte-preserving text view, same shape as afpx.decode()
-pct6.encode(xml, 'Out.pct6')
+source = 'MyTune.pct6'
+xml = pct6.decode(source)   # -> byte-preserving text view, same shape as afpx.decode()
+pct6.write_preserving_crossovers(source, xml, 'Out.pct6')
 ```
 
 **Password-protected `.pct6` saves use a different, unidentified scheme and are
@@ -46,19 +47,19 @@ the files tested so far (their binary-looking attributes happened to already
 be valid UTF-8) — that's luck on two samples, not a guarantee for every file,
 version, or attribute this project hasn't seen yet.
 
-`pct6.py` gives you two layers, matching how you're using the data:
+`pct6.py` gives you read layers plus one source-bound output boundary:
 
-- **`decode_bytes(path)` / `encode_bytes(bytes, path)`** — raw bytes, no text
-  decoding at all. Use for read-only inspection or a verified round-trip
-  check (`decode_bytes(original) == decode_bytes(reencoded)` after an
-  edit-and-write-back — this is the real safety check, not just a file
-  looking similar).
-- **`decode(path)` / `encode(xml, path)`** — a byte-preserving **latin-1**
+- **`decode_bytes(path)`** — raw bytes, no text decoding at all, for read-only
+  inspection.
+- **`decode(path)`** — a byte-preserving **latin-1**
   text view, safe to hand to `afpx.py`'s regex-based functions. latin-1 maps
   every byte 0–255 to exactly one character 1:1 — no decode errors are
-  possible and no information is lost, unlike `errors='replace'`. Always
-  encode back with `encode()` (also latin-1) — mixing this with a
-  utf-8-decoded string reintroduces the exact corruption this pair avoids.
+  possible and no information is lost, unlike `errors='replace'`.
+- **`write_preserving_crossovers(source_path, xml, output_path)`** — the only
+  public helper that creates a `.pct6`. It binds the candidate to the decoded
+  source, compares the complete channel/slot crossover signature, and opens a
+  distinct output exclusively. The `encode` CLI requires those same three
+  paths. There is no public unchecked raw encoder.
 
 **Don't parse this text with `xml.etree` or another strict XML parser
 either** — the same non-strict binary content that survives regex parsing
@@ -194,7 +195,8 @@ test suite, since it needs a real file):
 ```python
 import pct6
 orig = pct6.decode_bytes('MyTune.pct6')
-pct6.encode(pct6.decode('MyTune.pct6'), 'roundtrip_check.pct6')
+pct6.write_preserving_crossovers(
+    'MyTune.pct6', pct6.decode('MyTune.pct6'), 'roundtrip_check.pct6')
 assert pct6.decode_bytes('roundtrip_check.pct6') == orig
 ```
 

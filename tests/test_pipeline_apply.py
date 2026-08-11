@@ -18,6 +18,7 @@ sys.path.insert(0, str(SCRIPTS))
 
 import afpx  # noqa: E402
 import alpine_jssh  # noqa: E402
+import pct6  # noqa: E402
 import pipeline  # noqa: E402
 
 
@@ -35,6 +36,24 @@ SYNTHETIC_AFPX = (
 )
 
 
+def _raw_afpx_encode(xml, path):
+    """Test-fixture codec; production output must use a source-bound writer."""
+    encoder = getattr(afpx, "_encode_unchecked", None) or afpx.encode
+    encoder(xml, path)
+
+
+def _raw_pct6_encode(xml_bytes, path):
+    """Test-fixture codec; production output must use a source-bound writer."""
+    encoder = getattr(pct6, "_encode_bytes_unchecked", None) or pct6.encode_bytes
+    encoder(xml_bytes, path)
+
+
+def _raw_alpine_encode(obj, path):
+    """Test-fixture codec; production output must use a source-bound writer."""
+    encoder = getattr(alpine_jssh, "_encode_unchecked", None) or alpine_jssh.encode
+    encoder(obj, path)
+
+
 class PipelineApplyTests(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -42,7 +61,10 @@ class PipelineApplyTests(unittest.TestCase):
         self.root = Path(self.tempdir.name)
         self.source = self.root / "source.afpx"
         self.output = self.root / "output.afpx"
-        afpx.encode(SYNTHETIC_AFPX, self.source)
+        _raw_afpx_encode(SYNTHETIC_AFPX, self.source)
+
+    def replace_source(self, xml):
+        _raw_afpx_encode(xml, self.source)
 
     def plan(self):
         return {
@@ -64,6 +86,7 @@ class PipelineApplyTests(unittest.TestCase):
             "slot": 1,
             "G": -3.0,
         }]
+        plan["confirmations"] = {"peq-1": True}
         return plan
 
     def test_validate_plan_refuses_source_hash_mismatch_without_writing(self):
@@ -204,6 +227,15 @@ class PipelineApplyTests(unittest.TestCase):
 
         self.assertFalse(self.output.exists())
 
+    def test_validate_plan_refuses_unconfirmed_ordinary_peq(self):
+        plan = self.peq_plan()
+        plan["confirmations"] = {}
+
+        with self.assertRaisesRegex(ValueError, "peq-1.*confirmation"):
+            pipeline.validate_plan(plan, self.source)
+
+        self.assertFalse(self.output.exists())
+
     def test_validate_plan_refuses_unconfirmed_delay(self):
         plan = self.plan()
         plan["edits"] = [{
@@ -322,12 +354,90 @@ class PipelineApplyTests(unittest.TestCase):
             "channel": 0,
             "samples": 96,
         })
-        plan["confirmations"] = {"delay-1": True}
+        plan["confirmations"] = {"peq-1": True, "delay-1": True}
 
         with self.assertRaisesRegex(ValueError, "delay.*filter.*same channel"):
             pipeline.validate_plan(plan, self.source)
 
         self.assertFalse(self.output.exists())
+
+    def test_validate_plan_refuses_cross_channel_delay_and_peq_until_remeasurement(self):
+        two_channel_xml = '<ATF>%s%s</ATF>' % tuple(
+            afpx.channel_blocks(SYNTHETIC_AFPX) * 2)
+        self.replace_source(two_channel_xml)
+        plan = self.plan()
+        plan["edits"] = [
+            {"id": "peq-1", "kind": "filter_slot", "channel": 0,
+             "slot": 1, "G": -3.0},
+            {"id": "delay-2", "kind": "delay_samples", "channel": 1,
+             "samples": 96},
+        ]
+        plan["confirmations"] = {"peq-1": True, "delay-2": True}
+
+        with self.assertRaisesRegex(ValueError, "phase.*EQ.*remeasur"):
+            pipeline.validate_plan(plan, self.source)
+
+        self.assertFalse(self.output.exists())
+
+    def test_validate_plan_refuses_same_channel_apf_and_peq_until_remeasurement(self):
+        plan = self.plan()
+        plan["edits"] = [
+            {"id": "apf-1", "kind": "filter_slot", "channel": 0,
+             "slot": 2, "type_code": "20", "F": 400.0, "Q": 2.0,
+             "G": 0.0},
+            {"id": "peq-1", "kind": "filter_slot", "channel": 0,
+             "slot": 1, "G": -3.0},
+        ]
+        plan["confirmations"] = {"apf-1": True, "peq-1": True}
+
+        with self.assertRaisesRegex(ValueError, "phase.*EQ.*remeasur"):
+            pipeline.validate_plan(plan, self.source)
+
+        self.assertFalse(self.output.exists())
+
+    def test_validate_plan_keeps_peq_and_shelves_in_eq_domain(self):
+        plan = self.plan()
+        plan["edits"] = [
+            {"id": "shelf-1", "kind": "filter_slot", "channel": 0,
+             "slot": 3, "type_code": "3", "F": 80.0, "Q": 0.7,
+             "G": 2.0},
+            {"id": "peq-1", "kind": "filter_slot", "channel": 0,
+             "slot": 1, "G": -3.0},
+        ]
+        plan["confirmations"] = {"shelf-1": True, "peq-1": True}
+
+        normalized = pipeline.validate_plan(plan, self.source)
+
+        self.assertEqual(2, len(normalized["edits"]))
+
+    def test_validate_plan_classifies_filter_removal_by_source_domain(self):
+        existing_apf = SYNTHETIC_AFPX.replace(
+            '<Fil T="1" F="200.00"', '<Fil T="20" F="200.00"', 1)
+        self.replace_source(existing_apf)
+        plan = self.plan()
+        plan["edits"] = [
+            {"id": "remove-apf", "kind": "filter_slot", "channel": 0,
+             "slot": 2, "type_code": "1"},
+            {"id": "peq-1", "kind": "filter_slot", "channel": 0,
+             "slot": 1, "G": -3.0},
+        ]
+        plan["confirmations"] = {"remove-apf": True, "peq-1": True}
+        with self.assertRaisesRegex(ValueError, "phase.*EQ.*remeasur"):
+            pipeline.validate_plan(plan, self.source)
+
+        two_channel_xml = '<ATF>%s%s</ATF>' % tuple(
+            afpx.channel_blocks(SYNTHETIC_AFPX) * 2)
+        self.replace_source(two_channel_xml)
+        plan = self.plan()
+        plan["edits"] = [
+            {"id": "remove-peq", "kind": "filter_slot", "channel": 0,
+             "slot": 1, "type_code": "1"},
+            {"id": "delay-2", "kind": "delay_samples", "channel": 1,
+             "samples": 96},
+        ]
+        plan["confirmations"] = {"remove-peq": True, "delay-2": True}
+        with self.assertRaisesRegex(ValueError, "phase.*EQ.*remeasur"):
+            pipeline.validate_plan(plan, self.source)
 
     def test_apply_plan_writes_new_verified_afpx_for_one_slot_edit(self):
         plan = self.peq_plan()
@@ -366,7 +476,7 @@ class PipelineApplyTests(unittest.TestCase):
         path = self.root / "codec.afpx"
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always", ResourceWarning)
-            afpx.encode(SYNTHETIC_AFPX, path)
+            _raw_afpx_encode(SYNTHETIC_AFPX, path)
             self.assertEqual(afpx.decode(path), SYNTHETIC_AFPX)
             gc.collect()
 
@@ -396,6 +506,7 @@ class PipelineApplyTests(unittest.TestCase):
         self.assertEqual(draft, self.plan())
 
         draft["edits"] = self.peq_plan()["edits"]
+        draft["confirmations"] = self.peq_plan()["confirmations"]
         plan_path.write_text(json.dumps(draft), encoding="utf-8")
         apply = subprocess.run(
             [
@@ -555,7 +666,7 @@ class PipelineApplyTests(unittest.TestCase):
             normalized = real_validate(
                 candidate, source_path, source_bytes=source_bytes
             )
-            afpx.encode(SYNTHETIC_AFPX.replace('L="1.0"', 'L="0.5"'), self.source)
+            _raw_afpx_encode(SYNTHETIC_AFPX.replace('L="1.0"', 'L="0.5"'), self.source)
             return normalized
 
         with mock.patch.object(pipeline, "validate_plan", side_effect=validate_then_mutate):
@@ -608,7 +719,7 @@ class PipelineApplyTests(unittest.TestCase):
         plan_path.write_text(json.dumps(plan), encoding="utf-8")
         original_bytes = self.source.read_bytes()
         mutated_path = self.root / "mutated.afpx"
-        afpx.encode(SYNTHETIC_AFPX.replace('L="1.0"', 'L="0.5"'), mutated_path)
+        _raw_afpx_encode(SYNTHETIC_AFPX.replace('L="1.0"', 'L="0.5"'), mutated_path)
         mutated_bytes = mutated_path.read_bytes()
         real_validate = pipeline.validate_plan
         real_sha256_file = pipeline._sha256_file
@@ -690,7 +801,7 @@ class PipelineApplyTests(unittest.TestCase):
         ]
         for name, source_xml, edit in cases:
             with self.subTest(name=name):
-                afpx.encode(source_xml, self.source)
+                _raw_afpx_encode(source_xml, self.source)
                 plan = self.plan()
                 plan["edits"] = [edit]
                 plan["confirmations"] = {edit["id"]: True}
@@ -701,7 +812,7 @@ class PipelineApplyTests(unittest.TestCase):
                 self.assertFalse(self.output.exists())
 
     def test_validate_plan_refuses_exact_large_integer_delay_noop(self):
-        afpx.encode(
+        _raw_afpx_encode(
             SYNTHETIC_AFPX.replace(
                 'T="0"/>', 'T="09007199254740993"/>'
             ),
@@ -722,7 +833,7 @@ class PipelineApplyTests(unittest.TestCase):
         self.assertFalse(self.output.exists())
 
     def test_validate_plan_rejects_malformed_existing_delay(self):
-        afpx.encode(
+        _raw_afpx_encode(
             SYNTHETIC_AFPX.replace('T="0"/>', 'T="not-an-integer"/>'),
             self.source,
         )
@@ -763,6 +874,195 @@ class PipelineApplyTests(unittest.TestCase):
                     pipeline.apply_plan(plan_path)
 
                 self.assertFalse(self.output.exists())
+
+    def test_doc_reference_check_scans_core_workflow_markdown_anchors(self):
+        core = self.root / "core_workflow.md"
+        methodology = self.root / "methodology.md"
+        methodology.write_text("# Methodology\n\n## Real section\n", encoding="utf-8")
+        core.write_text(
+            "# Workflow\n\nRead [the method](methodology.md#missing-section).\n",
+            encoding="utf-8",
+        )
+
+        problems = pipeline.check_doc_refs(core, methodology)
+
+        self.assertTrue(any("missing-section" in problem for problem in problems), problems)
+        core.write_text(
+            "# Workflow\n\nRead [the method](methodology.md#real-section).\n",
+            encoding="utf-8",
+        )
+        self.assertEqual([], pipeline.check_doc_refs(core, methodology))
+
+
+class SourceBoundCodecSafetyTests(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+
+    def test_afpx_crossover_signature_preserves_channel_and_slot_identity(self):
+        block = afpx.channel_blocks(SYNTHETIC_AFPX)[0]
+        second = block.replace('F="80.00"', 'F="2500.00"', 1)
+        original = '<ATF>%s%s</ATF>' % (block, second)
+        first_filters = afpx.filters(block)
+        second_filters = afpx.filters(second)
+        swapped_first = block.replace(first_filters[0], second_filters[0], 1)
+        swapped_second = second.replace(second_filters[0], first_filters[0], 1)
+        swapped = '<ATF>%s%s</ATF>' % (swapped_first, swapped_second)
+
+        self.assertNotEqual(
+            afpx.semantic_xover_key(original),
+            afpx.semantic_xover_key(swapped),
+            "relocating crossover state between channels must be observable",
+        )
+        free_tag = first_filters[2]
+        moved_block = block.replace(first_filters[0], '<SwapSlot/>', 1)
+        moved_block = moved_block.replace(free_tag, first_filters[0], 1)
+        moved_block = moved_block.replace('<SwapSlot/>', free_tag, 1)
+        self.assertNotEqual(
+            afpx.semantic_xover_key('<ATF>%s</ATF>' % block),
+            afpx.semantic_xover_key('<ATF>%s</ATF>' % moved_block),
+            "relocating a crossover between slots must be observable",
+        )
+
+    def test_unchecked_tune_encoders_are_not_public(self):
+        for module, names in (
+            (afpx, ("encode", "encode_new")),
+            (pct6, ("encode", "encode_bytes")),
+            (alpine_jssh, ("encode", "encode_bytes")),
+        ):
+            for name in names:
+                with self.subTest(module=module.__name__, name=name):
+                    self.assertFalse(hasattr(module, name), "%s.%s" % (module.__name__, name))
+
+    def test_afpx_source_bound_writer_rejects_crossover_change_and_is_exclusive(self):
+        source = self.root / "source.afpx"
+        output = self.root / "output.afpx"
+        _raw_afpx_encode(SYNTHETIC_AFPX, source)
+        writer = getattr(afpx, "write_preserving_crossovers", None)
+        self.assertIsNotNone(writer)
+        changed_xover = SYNTHETIC_AFPX.replace('F="80.00"', 'F="90.00"', 1)
+
+        with self.assertRaisesRegex(ValueError, "crossover"):
+            writer(source, changed_xover, output)
+        self.assertFalse(output.exists())
+
+        changed_peq = SYNTHETIC_AFPX.replace('G="-2"', 'G="-3"', 1)
+        writer(source, changed_peq, output)
+        self.assertEqual(changed_peq, afpx.decode(output))
+        with self.assertRaises(FileExistsError):
+            writer(source, changed_peq, output)
+
+    def test_pct6_source_bound_writer_and_cli_reject_crossover_changes(self):
+        source = self.root / "source.pct6"
+        output = self.root / "output.pct6"
+        candidate = self.root / "candidate.xml"
+        source_bytes = SYNTHETIC_AFPX.encode("latin-1")
+        _raw_pct6_encode(source_bytes, source)
+        writer = getattr(pct6, "write_preserving_crossovers", None)
+        self.assertIsNotNone(writer)
+        changed = SYNTHETIC_AFPX.replace('F="80.00"', 'F="90.00"', 1)
+
+        with self.assertRaisesRegex(ValueError, "crossover"):
+            writer(source, changed, output)
+        self.assertFalse(output.exists())
+
+        candidate.write_text(changed, encoding="latin-1")
+        run = subprocess.run(
+            [sys.executable, str(SCRIPTS / "pct6.py"), "encode",
+             str(source), str(candidate), str(output)],
+            cwd=self.root, text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(0, run.returncode)
+        self.assertIn("crossover", run.stdout + run.stderr)
+        self.assertFalse(output.exists())
+
+    def test_pct6_source_bound_writer_and_cli_allow_peq_to_new_output_only(self):
+        source = self.root / "source.pct6"
+        output = self.root / "output.pct6"
+        candidate = self.root / "candidate.xml"
+        _raw_pct6_encode(SYNTHETIC_AFPX.encode("latin-1"), source)
+        changed = SYNTHETIC_AFPX.replace('G="-2"', 'G="-3"', 1)
+        candidate.write_text(changed, encoding="latin-1")
+
+        run = subprocess.run(
+            [sys.executable, str(SCRIPTS / "pct6.py"), "encode",
+             str(source), str(candidate), str(output)],
+            cwd=self.root, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, run.returncode, run.stdout + run.stderr)
+        self.assertEqual(changed, pct6.decode(output))
+        rerun = subprocess.run(
+            [sys.executable, str(SCRIPTS / "pct6.py"), "encode",
+             str(source), str(candidate), str(output)],
+            cwd=self.root, text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(0, rerun.returncode)
+
+    def test_alpine_source_bound_writer_and_cli_reject_crossover_changes(self):
+        source = self.root / "source.jssh"
+        output = self.root / "output.jssh"
+        candidate = self.root / "candidate.json"
+        original = alpine_jssh._make_synthetic_preset(n_channels=2)
+        for offset in alpine_jssh.CROSSOVER_BYTE_OFFSETS:
+            block = alpine_jssh.channel_block(original, 1)
+            block[offset] = (block[offset] + offset - 255) % 256
+        changed = copy.deepcopy(original)
+        alpine_jssh.channel_block(changed, 1)[256] ^= 1
+        _raw_alpine_encode(original, source)
+        writer = getattr(alpine_jssh, "write_preserving_crossovers", None)
+        self.assertIsNotNone(writer)
+
+        with self.assertRaisesRegex(ValueError, "crossover"):
+            writer(source, changed, output)
+        self.assertFalse(output.exists())
+
+        swapped = copy.deepcopy(original)
+        for offset in alpine_jssh.CROSSOVER_BYTE_OFFSETS:
+            (alpine_jssh.channel_block(swapped, 0)[offset],
+             alpine_jssh.channel_block(swapped, 1)[offset]) = (
+                alpine_jssh.channel_block(swapped, 1)[offset],
+                alpine_jssh.channel_block(swapped, 0)[offset])
+        with self.assertRaisesRegex(ValueError, "crossover"):
+            writer(source, swapped, output)
+        self.assertFalse(output.exists())
+
+        candidate.write_text(json.dumps(changed), encoding="utf-8")
+        run = subprocess.run(
+            [sys.executable, str(SCRIPTS / "alpine_jssh.py"), "encode",
+             str(source), str(candidate), str(output)],
+            cwd=self.root, text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(0, run.returncode)
+        self.assertIn("crossover", run.stdout + run.stderr)
+        self.assertFalse(output.exists())
+
+    def test_alpine_source_bound_writer_and_cli_allow_peq_to_new_output_only(self):
+        source = self.root / "source.jssh"
+        output = self.root / "output.jssh"
+        candidate = self.root / "candidate.json"
+        original = alpine_jssh._make_synthetic_preset(n_channels=1)
+        changed = copy.deepcopy(original)
+        alpine_jssh.set_band_gain_db(changed, 0, 1, -3.0)
+        _raw_alpine_encode(original, source)
+        candidate.write_text(json.dumps(changed), encoding="utf-8")
+
+        run = subprocess.run(
+            [sys.executable, str(SCRIPTS / "alpine_jssh.py"), "encode",
+             str(source), str(candidate), str(output)],
+            cwd=self.root, text=True, capture_output=True, check=False,
+        )
+        self.assertEqual(0, run.returncode, run.stdout + run.stderr)
+        self.assertEqual(
+            alpine_jssh.channel_block(changed, 0),
+            alpine_jssh.channel_block(alpine_jssh.decode(output), 0),
+        )
+        rerun = subprocess.run(
+            [sys.executable, str(SCRIPTS / "alpine_jssh.py"), "encode",
+             str(source), str(candidate), str(output)],
+            cwd=self.root, text=True, capture_output=True, check=False,
+        )
+        self.assertNotEqual(0, rerun.returncode)
 
 
 class AlpineCrossoverSafetyTests(unittest.TestCase):
@@ -824,8 +1124,8 @@ class AlpineCrossoverSafetyTests(unittest.TestCase):
             original = alpine_jssh._make_synthetic_preset(n_channels=1)
             changed = copy.deepcopy(original)
             alpine_jssh.channel_block(changed, 0)[256] ^= 1
-            alpine_jssh.encode(original, source)
-            alpine_jssh.encode(changed, output)
+            _raw_alpine_encode(original, source)
+            _raw_alpine_encode(changed, output)
 
             with self.assertRaisesRegex(ValueError, "crossover"):
                 alpine_jssh.verify_write(

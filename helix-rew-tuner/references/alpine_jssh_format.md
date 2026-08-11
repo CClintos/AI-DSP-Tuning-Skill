@@ -26,8 +26,9 @@ symmetric, so the same operation decodes and encodes.
 
 ```python
 import alpine_jssh
-obj = alpine_jssh.decode('MyPreset.jssh')     # -> parsed Python dict/list
-alpine_jssh.encode(obj, 'Out.jssh')
+source = 'MyPreset.jssh'
+obj = alpine_jssh.decode(source)     # -> parsed Python dict/list
+alpine_jssh.write_preserving_crossovers(source, obj, 'Out.jssh')
 ```
 
 Unlike `.pct6`'s XML-ish content (which is not reliably valid UTF-8 and
@@ -50,7 +51,7 @@ this Python port has **not yet been independently re-run against a real
 Alpine-produced file** the way the source PowerShell was (six real captured
 presets, one confirmed byte-for-byte match against Alpine's own output for
 an identical change). **Run `alpine_jssh.roundtrip_identical()` against a
-real file before trusting `encode()` output on real hardware** — that is
+real file before trusting generated output on real hardware** — that is
 the actual safety check, not the synthetic selftest.
 
 The source project's own verification discipline, inherited here:
@@ -63,6 +64,11 @@ The source project's own verification discipline, inherited here:
   the same "don't silently trust, verify and refuse" discipline
   `afpx.roundtrip_lint` uses for `.afpx`. Crossover byte offsets can never be
   declared intended; they are read-only.
+- `write_preserving_crossovers(source_path, obj, output_path)` is the only
+  public file-producing helper. It compares every protected crossover byte at
+  the same channel before exclusively creating a distinct output. The
+  source-requiring `encode` CLI uses the same boundary; no unchecked raw
+  encoder is public.
 
 ## Schema
 
@@ -196,7 +202,7 @@ before trusting any generated file on hardware.**
 ### 1. Number-text preservation (why byte-identity is achievable at all)
 
 `decode()` parses numbers into `_RawInt`/`_RawFloat`, which carry the
-original source text; `encode()` emits that text verbatim for anything not
+original source text; the internal serializer emits that text verbatim for anything not
 modified. Only values this module actually writes get re-serialized — and
 every field it writes is an integer byte.
 

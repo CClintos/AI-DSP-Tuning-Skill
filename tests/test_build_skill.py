@@ -52,6 +52,37 @@ Re-measure after changes.
 """
 
 
+class RepositoryReleaseContractsTests(unittest.TestCase):
+    def test_afpx_write_guidance_routes_through_plan_apply_and_generated_doctrine(self):
+        core = (REPO_ROOT / "helix-rew-tuner" / "references" / "core_workflow.md").read_text(
+            encoding="utf-8")
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        agents = (REPO_ROOT / "AGENTS.md").read_text(encoding="utf-8")
+        required = (
+            "pipeline.py plan", "pipeline.py apply", "tune_plan_schema.md",
+            "source_sha256", "output_path", "confirmations", "verification manifest",
+            "Direct `afpx.py` write helpers are implementation/reference only",
+        )
+        for token in required:
+            with self.subTest(document="core_workflow", token=token):
+                self.assertIn(token, core)
+            with self.subTest(document="README", token=token):
+                self.assertIn(token, readme)
+        self.assertIn(core.strip(), agents)
+
+    def test_readme_records_both_verified_pct6_versions_with_caveat(self):
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        pct6 = readme[readme.index("## Beta: `.pct6`"):readme.index("## Beta: Alpine")]
+        self.assertIn("6.01.08", pct6)
+        self.assertIn("6.03.04", pct6)
+        self.assertIn("version-fragile", pct6)
+
+    def test_ci_whitespace_gate_checks_a_committed_change(self):
+        workflow = (REPO_ROOT / ".github" / "workflows" / "validate.yml").read_text(
+            encoding="utf-8")
+        self.assertIn("git show --check --oneline HEAD", workflow)
+
+
 class BuildSkillTests(unittest.TestCase):
     """Run the real build CLI against controlled repository fixtures."""
 

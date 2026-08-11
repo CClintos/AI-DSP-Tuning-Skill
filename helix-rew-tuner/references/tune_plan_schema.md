@@ -18,7 +18,7 @@ Version 1 is a JSON object with exactly these fields:
 | `format` | string | Must be `"afpx"`. `.pct6` and Alpine writes are not enabled by this schema. |
 | `output_path` | string | A different, not-yet-existing `.afpx` path. |
 | `edits` | array | One or more edit objects described below. |
-| `confirmations` | object | Edit ID to JSON boolean. Protected edits require their own value to be exactly `true`. |
+| `confirmations` | object | Edit ID to JSON boolean. Every actual edit requires its own value to be exactly `true`, including ordinary PEQ. |
 
 Unknown fields, edit kinds, duplicate edit IDs, duplicate targets, empty edit
 lists, nonexistent slots/channels, and unsupported filter types are refused.
@@ -59,7 +59,7 @@ dB, and 0.25 dB gain steps. A first-order all-pass (`19`) accepts no Q edit; its
 stored Q is non-functional and gain must be 0 dB. A second-order all-pass (`20`)
 requires positive Q (there is deliberately no invented upper cap) and 0 dB
 gain. All writable active filters require a 20-20000 Hz frequency. Editing or
-creating a shelf or all-pass is protected and requires
+creating any filter, including ordinary PEQ, requires
 `confirmations[edit.id] = true`.
 
 ### Delay in samples
@@ -75,9 +75,10 @@ creating a shelf or all-pass is protected and requires
 
 `samples` is an exact non-negative integer. The value must already have been
 derived at the DSP's confirmed sample rate and shown to the user. Every delay
-edit is protected and requires its own `true` confirmation. Version 1 refuses
-a delay and a filter-slot edit on the same channel in one plan, avoiding a
-phase change combined with a PEQ prediction based on the old summed response.
+edit requires its own `true` confirmation. Version 1 treats delays and T=19/20
+all-pass filters as phase-domain and treats T=17 PEQ and T=3/4 shelves as
+EQ-domain. It refuses any plan containing both domains, even across different
+channels: apply the phase edit, remeasure, then create a fresh EQ plan.
 
 ### Relative output trim
 
@@ -92,7 +93,7 @@ phase change combined with a PEQ prediction based on the old summed response.
 
 `trim_db` is relative to the current channel output level and must be between
 -6 and 0 dB. It can only attenuate. The channel must already contain a `<Vol>`
-tag. Every trim edit is protected and requires its own `true` confirmation.
+tag. Every trim edit requires its own `true` confirmation.
 
 ## Example plan and commands
 

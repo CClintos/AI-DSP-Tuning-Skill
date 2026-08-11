@@ -33,7 +33,7 @@
 # a file Alpine actually accepts, rather than one that merely parses:
 #
 #  1. NUMBER-TEXT PRESERVATION. decode() keeps each number's original source
-#     text (_RawInt/_RawFloat) and encode() emits it verbatim for anything
+#     text (_RawInt/_RawFloat) and the internal serializer emits it verbatim for anything
 #     not modified. This sidesteps a real trap: the ported PowerShell
 #     serializer rewrites integral floats as integers (1.0 -> "1") and
 #     non-integral ones as G17 (0.1 -> "0.10000000000000001"), while stdlib
@@ -132,13 +132,15 @@ def decode_bytes(path):
     return decoded
 
 
-def encode_bytes(json_bytes, path):
-    """Raw JSON bytes (UTF-8) -> .jssh. Pairs with decode_bytes() for a
+def _encode_bytes_unchecked(json_bytes, path, exclusive=False):
+    """Internal raw JSON -> JSSH codec with no tune-safety checks. Pairs with decode_bytes() for a
     byte-exact round-trip IF the JSON bytes are unchanged; a re-SERIALIZED
-    object is only byte-identical to Alpine's own output if encode()'s
+    object is only byte-identical to Alpine's own output if the serializer's
     compact/non-ASCII-preserving formatting matches Alpine's serializer --
-    see encode()'s docstring."""
-    Path(path).write_bytes(_xor_by_position(json_bytes))
+    see _alpine_json()'s docstring."""
+    mode = 'xb' if exclusive else 'wb'
+    with open(path, mode) as fh:
+        fh.write(_xor_by_position(json_bytes))
 
 
 def decode(path):
@@ -265,14 +267,33 @@ def find_unverified_constructs(obj, path=''):
     return found
 
 
-def encode(obj, path):
-    """Parsed Python object -> .jssh, using Alpine's own number/string
+def _encode_unchecked(obj, path, exclusive=False):
+    """Internal parsed-object codec, using Alpine's number/string
     formatting rules (see _alpine_json). NOT independently re-verified from
     this Python port against a real Alpine-produced file -- run
     preflight_real_file() on your own real preset before trusting a
     generated file on real hardware, exactly as the source project's own
     mandatory round-trip self-test required."""
-    encode_bytes(_alpine_json(obj).encode('utf-8'), path)
+    _encode_bytes_unchecked(
+        _alpine_json(obj).encode('utf-8'), path, exclusive=exclusive)
+
+
+def semantic_xover_key(obj):
+    """Channel-bound signature of every read-only HPF/LPF byte."""
+    return tuple(
+        (channel_index,
+         tuple((offset, block[offset]) for offset in sorted(CROSSOVER_BYTE_OFFSETS)))
+        for channel_index, block in enumerate(obj['data']['output']['output'])
+    )
+
+
+def write_preserving_crossovers(source_path, obj, output_path):
+    """Create one new JSSH only when every source crossover byte is preserved."""
+    source_obj = decode(source_path)
+    if semantic_xover_key(source_obj) != semantic_xover_key(obj):
+        raise ValueError(
+            'crossover state or channel identity changed; refusing Alpine output')
+    _encode_unchecked(obj, output_path, exclusive=True)
 
 
 def preflight_real_file(path):
@@ -348,13 +369,13 @@ def preflight_real_file(path):
 def roundtrip_identical(path):
     """Decode a real file, re-encode unchanged, decode again, and report
     whether the re-encoded bytes are byte-identical to the source. This is
-    the real safety check before trusting encode() on a given file/PC-Tool
+    the real safety check before trusting a generated output on a given file/PC-Tool
     version -- run it once per file you intend to edit, not just at
     selftest time. Returns dict with byte_identical/source_len/output_len."""
     obj = decode(path)
     tmp = Path(str(path) + '.roundtrip_tmp')
     try:
-        encode(obj, tmp)
+        _encode_unchecked(obj, tmp)
         source_raw = Path(path).read_bytes()
         output_raw = tmp.read_bytes()
         return {'byte_identical': source_raw == output_raw,
@@ -935,7 +956,7 @@ def _selftest():
     tmp = Path('_alpine_jssh_selftest.jssh')
     try:
         # container round-trip
-        encode(obj, tmp)
+        _encode_unchecked(obj, tmp)
         back = decode(tmp)
         assert back == obj, 'decode/encode round-trip mismatch on synthetic preset'
 
@@ -1002,11 +1023,11 @@ def _selftest():
         # verify_write: expected-fields-only write passes; an out-of-scope
         # change is caught
         base = _make_synthetic_preset()
-        encode(base, tmp)
+        _encode_unchecked(base, tmp)
         changed = copy.deepcopy(base)
         set_band_gain_db(changed, 0, 1, -3.0)
         out = Path('_alpine_jssh_selftest_out.jssh')
-        encode(changed, out)
+        _encode_unchecked(changed, out)
         res = verify_write(tmp, out, expected_channel_indices=[0], expected_byte_offsets=[2, 3])
         assert res['diff_count'] == 1, '0 to -3 dB should change only the low PEQ gain byte'
         sneaky = copy.deepcopy(base)
@@ -1018,7 +1039,7 @@ def _selftest():
         # diff for verify_write to catch. Deriving it from the live value
         # makes the test independent of the fixture's defaults.
         set_channel_muted(sneaky, 1, not get_channel_muted(sneaky, 1))
-        encode(sneaky, out)
+        _encode_unchecked(sneaky, out)
         try:
             verify_write(tmp, out, expected_channel_indices=[0], expected_byte_offsets=[2, 3])
             raise AssertionError('verify_write should have caught the unexpected mute change')
@@ -1146,7 +1167,7 @@ def _selftest():
         mod = decode(tp)
         set_band_gain_db(mod, 0, 1, -3.0)
         outp = Path('_alpine_jssh_numfmt_out.jssh')
-        encode(mod, outp)
+        _encode_unchecked(mod, outp)
         verify_write(tp, outp, expected_channel_indices=[0], expected_byte_offsets=[2, 3])
         assert b'"v":1.0' in _xor_by_position(outp.read_bytes()), \
             'an untouched 1.0 elsewhere in the file must survive a write verbatim'
@@ -1164,7 +1185,7 @@ def _selftest():
 
         # ---- preflight gate on a well-formed synthetic file ----------------
         pf_path = Path('_alpine_jssh_preflight.jssh')
-        encode(_make_synthetic_preset(n_channels=2), pf_path)
+        _encode_unchecked(_make_synthetic_preset(n_channels=2), pf_path)
         pf = preflight_real_file(pf_path)
         assert pf['decodes'] and pf['byte_identical'], 'clean file must round-trip'
         assert pf['channel_count'] == 2 and pf['block_len_ok']
@@ -1193,7 +1214,7 @@ def _selftest():
 def _main():
     if len(sys.argv) < 2:
         print('usage: python alpine_jssh.py {preflight <file.jssh> | inspect <file.jssh> '
-              '| decode <file.jssh> | encode <file.json> <out.jssh> | selftest}')
+              '| decode <file.jssh> | encode <source.jssh> <file.json> <out.jssh> | selftest}')
         sys.exit(1)
     cmd = sys.argv[1]
     if cmd == 'selftest':
@@ -1221,9 +1242,11 @@ def _main():
         out.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding='utf-8')
         print('decoded ->', out)
     elif cmd == 'encode':
-        obj = json.loads(Path(sys.argv[2]).read_text(encoding='utf-8'))
-        encode(obj, sys.argv[3])
-        print('encoded ->', sys.argv[3])
+        if len(sys.argv) != 5:
+            raise ValueError('encode requires source.jssh, candidate.json, and new output.jssh')
+        obj = json.loads(Path(sys.argv[3]).read_text(encoding='utf-8'))
+        write_preserving_crossovers(sys.argv[2], obj, sys.argv[4])
+        print('encoded ->', sys.argv[4])
     else:
         print('unknown command:', cmd)
         sys.exit(1)
