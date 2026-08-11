@@ -169,7 +169,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             improve_pct=6.0, boost_penalty=0.5, hf_q_penalty=0.4,
             hf_q_knee=4.0, transition_hz=1000.0, selection_tax_weight=0.25,
             null_boost_penalty=0.8, partner_target_db=None, partner_weight=0.0,
-            partner_band=(700.0, 5000.0), verbose=False):
+            partner_band=(700.0, 5000.0), partner_conf=None, verbose=False):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -249,6 +249,10 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             psel = psel & mask
         if np.any(psel):
             pw = audibility_weight(freqs[psel])
+            if conf is not None:
+                pw = pw * np.clip(conf[psel], 0.0, 1.0)
+            if partner_conf is not None:
+                pw = pw * np.clip(partner_conf[psel], 0.0, 1.0)
             ptarget = np.asarray(partner_target_db, dtype=float)[psel]
         else:
             psel = None
@@ -257,6 +261,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         if psel is None:
             return 0.0
         own = dev_db[psel] + cascade_db(freqs[psel], bands)
+        if np.sum(pw ** 2) <= 1e-12:
+            return 0.0
         return float(wrms(np.abs(own - ptarget), pw))
 
     def penalties(bands):
@@ -334,7 +340,10 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         raw_now = dev_db + cascade_db(freqs, bands_now)
         seed_basis = raw_now.copy()
         if psel is not None:
-            seed_basis[psel] = raw_now[psel] + partner_weight * (raw_now[psel] - ptarget)
+            seed_basis[psel] = (raw_now[psel]
+                                + partner_weight * np.clip(
+                                    pw / audibility_weight(freqs[psel]), 0.0, 1.0)
+                                * (raw_now[psel] - ptarget))
         res_now = erb_smooth(freqs, seed_basis)
         res_w = np.where(sel, np.abs(res_now) * audibility_weight(freqs), 0)
         if conf is not None:
@@ -373,7 +382,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         sum(([np.log10(F), Q, G] for F, Q, G in bands), []), dtype=float))
     report = {'score_before': round(base_score, 3),
               'score_after': round(final, 3),
-              'selection_score_before': round(base_score, 3),
+              'selection_score_before': round(base_combined, 3),
               'selection_score_after': round(final_tax, 3),
               'bands_used': len(bands)}
     if psel is not None:
@@ -1871,7 +1880,8 @@ def complex_vector_average(complex_traces):
 # this is what finally sources them from real spatial data instead of a
 # single-position guess.
 def spatial_consistency(freqs, position_traces, consistent_db=1.5,
-                        min_positions=3, smooth_oct=1.0 / 12.0):
+                        min_positions=3, smooth_oct=1.0 / 12.0,
+                        align_levels=True, alignment_band=(100.0, 10000.0)):
     """position_traces: list of >=min_positions arrays on the SAME freq grid,
     one per mic position -- either complex (magnitude+phase, reduced to
     magnitude here) or plain SPL in dB (fine, and usually all that's
@@ -1885,11 +1895,17 @@ def spatial_consistency(freqs, position_traces, consistent_db=1.5,
     noise is smaller than that; a real interference null is usually much
     larger, often 6+ dB at one spot and near-zero a few inches away).
 
-    Returns mean_db (across-position average), spread_db (per-frequency
-    across-position std, lightly octave-smoothed so single-bin position-grid
-    jitter doesn't flip the mask), mask (bool, True = consistent enough to
-    trust a correction there), conf (continuous 0..1, 1 at spread=0 tapering
-    to 0 by 2x consistent_db -- feed directly into fit_peq's conf=).
+    align_levels: remove each trace's robust, weighted-median broadband offset
+    within alignment_band before comparing shapes. Set False when absolute SPL
+    differences are the signal of interest.
+
+    Returns mean_db (level-aligned across-position average when align_levels
+    is True), spread_db (per-frequency across-position std, lightly octave-
+    smoothed so single-bin position-grid jitter doesn't flip the mask), mask
+    (bool, True = consistent enough to trust a correction there), conf
+    (continuous 0..1, 1 at spread=0 tapering to 0 by 2x consistent_db -- feed
+    directly into fit_peq's conf=), and level_offsets_db (the measured level
+    offsets removed from each trace).
 
     Use: sc = spatial_consistency(freqs, [pos1, pos2, pos3])
          fit_peq(freqs, dev_db, band, mask=sc['mask'], conf=sc['conf'])"""
@@ -1903,13 +1919,22 @@ def spatial_consistency(freqs, position_traces, consistent_db=1.5,
         t = np.asarray(t)
         db_traces.append(20 * np.log10(np.abs(t)) if np.iscomplexobj(t) else t.astype(float))
     stack = np.stack(db_traces, axis=0)
+    level_offsets_db = np.zeros(len(stack), dtype=float)
+    if align_levels:
+        reference = np.median(stack, axis=0)
+        align_sel = ((freqs >= alignment_band[0]) & (freqs <= alignment_band[1]))
+        weights = audibility_weight(freqs[align_sel])
+        for i, trace in enumerate(stack):
+            delta = trace - reference
+            level_offsets_db[i] = weighted_median(delta[align_sel], weights)
+        stack = stack - level_offsets_db[:, np.newaxis]
     mean_db = np.mean(stack, axis=0)
     spread_raw = np.std(stack, axis=0, ddof=0)
     spread_db = octave_smooth_log(freqs, spread_raw, smooth_oct)
     mask = spread_db <= consistent_db
     conf = np.clip(1.0 - spread_db / (2.0 * consistent_db), 0.0, 1.0)
     return {'mean_db': mean_db, 'spread_db': spread_db,
-            'mask': mask, 'conf': conf}
+            'mask': mask, 'conf': conf, 'level_offsets_db': level_offsets_db}
 
 # --------------------------------------------------------------------------
 # PREDICTED vs MEASURED -- closes the predict -> re-measure loop. Everything
