@@ -1922,7 +1922,10 @@ def spatial_consistency(freqs, position_traces, consistent_db=1.5,
     level_offsets_db = np.zeros(len(stack), dtype=float)
     if align_levels:
         reference = np.median(stack, axis=0)
-        align_sel = ((freqs >= alignment_band[0]) & (freqs <= alignment_band[1]))
+        align_sel = ((freqs >= alignment_band[0]) & (freqs <= alignment_band[1])
+                     & np.all(np.isfinite(stack), axis=0))
+        if not np.any(align_sel):
+            raise ValueError('alignment_band has no finite samples on the frequency grid')
         weights = audibility_weight(freqs[align_sel])
         for i, trace in enumerate(stack):
             delta = trace - reference
