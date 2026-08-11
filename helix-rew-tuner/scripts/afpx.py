@@ -17,7 +17,8 @@ import zlib
 
 # ---------------------------------------------------------------- codec
 def decode(path):
-    raw = open(path, 'rb').read()
+    with open(path, 'rb') as fh:
+        raw = fh.read()
     if len(raw) < 5:
         raise ValueError('file too short to be a valid .afpx: %s' % path)
     declared = struct.unpack('>I', raw[:4])[0]
@@ -30,7 +31,15 @@ def decode(path):
 
 def encode(xml, path):
     payload = xml.encode('utf-8')
-    open(path, 'wb').write(struct.pack('>I', len(payload)) + zlib.compress(payload, 9))
+    with open(path, 'wb') as fh:
+        fh.write(struct.pack('>I', len(payload)) + zlib.compress(payload, 9))
+
+
+def encode_new(xml, path):
+    """Encode to a path that must not already exist."""
+    payload = xml.encode('utf-8')
+    with open(path, 'xb') as fh:
+        fh.write(struct.pack('>I', len(payload)) + zlib.compress(payload, 9))
 
 
 # ---------------------------------------------------------------- parsing

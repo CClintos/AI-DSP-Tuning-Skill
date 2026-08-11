@@ -16,6 +16,8 @@
 # tested by their own self-tests.
 #
 # python pipeline.py analyze --measurement <export.txt> --target <target.txt|default> [options]
+# python pipeline.py plan --source <input.afpx> --output <new.afpx> --out <plan.json>
+# python pipeline.py apply --plan <plan.json>
 #   --measurement FILE           REW text export (system sum or primary trace)
 #   --positions FILE [FILE...]   2+ position sweeps -> spatial_consistency
 #                                 (first one doubles as --measurement if that
@@ -33,9 +35,11 @@
 #   --dev-flag-db N (default 2.0) deviation-region flagging threshold
 #   --out FILE                    write JSON here instead of stdout
 import argparse
+import hashlib
 import json
 import os
 import sys
+import tempfile
 
 import numpy as np
 
@@ -45,6 +49,315 @@ import tunelib
 
 ASSETS_DEFAULT_TARGET = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'default_incar_target.txt')
+
+
+def _sha256_file(path):
+    digest = hashlib.sha256()
+    with open(path, 'rb') as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b''):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def validate_plan(plan, source_path):
+    """Validate and normalize an AFPX tune plan without writing files."""
+    if not isinstance(plan, dict):
+        raise ValueError('plan must be a JSON object')
+    required = {'version', 'source_path', 'source_sha256', 'format',
+                'output_path', 'edits', 'confirmations'}
+    missing = required - set(plan)
+    extra = set(plan) - required
+    if missing:
+        raise ValueError('plan is missing required field(s): %s' % sorted(missing))
+    if extra:
+        raise ValueError('plan has unknown field(s): %s' % sorted(extra))
+    if plan['version'] != 1:
+        raise ValueError('unsupported plan version %r (expected 1)' % plan['version'])
+    if plan['format'] != 'afpx':
+        raise ValueError('unsupported format %r (only afpx is writable)' % plan['format'])
+    if not isinstance(plan['source_path'], str) or not plan['source_path']:
+        raise ValueError('source_path must be a non-empty string')
+    if not isinstance(plan['output_path'], str) or not plan['output_path']:
+        raise ValueError('output_path must be a non-empty string')
+    if not isinstance(plan['edits'], list) or not plan['edits']:
+        raise ValueError('edits must be a non-empty list')
+    if not isinstance(plan['confirmations'], dict):
+        raise ValueError('confirmations must be an object keyed by edit id')
+
+    source_path = os.path.abspath(os.fspath(source_path))
+    plan_source = os.path.abspath(plan['source_path'])
+    if os.path.normcase(os.path.realpath(plan_source)) != os.path.normcase(
+            os.path.realpath(source_path)):
+        raise ValueError('plan source_path does not match supplied source path')
+    if not os.path.isfile(source_path):
+        raise ValueError('source_path is not a file: %s' % source_path)
+    if os.path.splitext(source_path)[1].lower() != '.afpx':
+        raise ValueError('format afpx requires a .afpx source_path')
+
+    supplied_hash = plan['source_sha256']
+    if (not isinstance(supplied_hash, str) or len(supplied_hash) != 64 or
+            any(ch not in '0123456789abcdefABCDEF' for ch in supplied_hash)):
+        raise ValueError('source_sha256 must be 64 hexadecimal characters')
+    actual_hash = _sha256_file(source_path)
+    if supplied_hash.lower() != actual_hash:
+        raise ValueError('source_sha256 does not match source file')
+
+    output_path = os.path.abspath(plan['output_path'])
+    if os.path.splitext(output_path)[1].lower() != '.afpx':
+        raise ValueError('format afpx requires a .afpx output_path')
+    if os.path.normcase(os.path.realpath(output_path)) == os.path.normcase(
+            os.path.realpath(source_path)):
+        raise ValueError('output_path must be different from source path')
+    if os.path.exists(output_path):
+        raise ValueError('output_path already exists; refusing to overwrite: %s' % output_path)
+
+    source_xml = afpx.decode(source_path)
+    confirmations = plan['confirmations']
+    protected_types = {'3', '4', '19', '20'}
+    normalized_edits = []
+    edit_ids = set()
+    target_keys = set()
+    delay_channels = set()
+    filter_channels = set()
+    working_xml = source_xml
+
+    def integer_field(edit, key):
+        value = edit.get(key)
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError('%s: %s must be an integer' % (edit.get('id'), key))
+        return value
+
+    for raw_edit in plan['edits']:
+        if not isinstance(raw_edit, dict):
+            raise ValueError('every edit must be an object')
+        edit_id = raw_edit.get('id')
+        if not isinstance(edit_id, str) or not edit_id:
+            raise ValueError('every edit requires a non-empty string id')
+        if edit_id in edit_ids:
+            raise ValueError('duplicate edit id: %s' % edit_id)
+        edit_ids.add(edit_id)
+        kind = raw_edit.get('kind')
+        if kind not in {'filter_slot', 'delay_samples', 'output_trim'}:
+            raise ValueError('%s: unsupported edit kind %r; crossover and polarity '
+                             'writes are not supported' % (edit_id, kind))
+
+        allowed = {
+            'filter_slot': {'id', 'kind', 'channel', 'slot', 'F', 'Q', 'G', 'type_code'},
+            'delay_samples': {'id', 'kind', 'channel', 'samples'},
+            'output_trim': {'id', 'kind', 'channel', 'trim_db'},
+        }[kind]
+        unknown = set(raw_edit) - allowed
+        if unknown:
+            raise ValueError('%s: unknown field(s): %s' % (edit_id, sorted(unknown)))
+
+        channel = integer_field(raw_edit, 'channel')
+        normalized_edit = {'id': edit_id, 'kind': kind, 'channel': channel}
+        if kind == 'filter_slot':
+            slot = integer_field(raw_edit, 'slot')
+            if not any(key in raw_edit for key in ('F', 'Q', 'G', 'type_code')):
+                raise ValueError('%s: filter_slot edit has nothing to change' % edit_id)
+            key = (kind, channel, slot)
+            if key in target_keys:
+                raise ValueError('%s: duplicate filter target ch%d slot%d' %
+                                 (edit_id, channel, slot))
+            target_keys.add(key)
+            try:
+                old_tag = afpx.filters(afpx.channel_blocks(working_xml)[channel])[slot]
+            except (IndexError, TypeError):
+                raise ValueError('%s: channel or slot is out of range' % edit_id)
+            old_attrs = afpx.attrs(old_tag)
+            old_type = old_attrs.get('T')
+            target_type = str(raw_edit.get('type_code', old_type))
+            if target_type in afpx.CROSSOVER_TYPES:
+                raise ValueError('%s: crossover edit requested; refusing' % edit_id)
+            if target_type not in {'1', '17', '3', '4', '19', '20'}:
+                raise ValueError('%s: unsupported filter type_code %r' %
+                                 (edit_id, target_type))
+            if target_type == '3' and old_attrs.get('dF') != '25':
+                raise ValueError('%s: low shelf requires the dF 25 end slot' % edit_id)
+            if target_type == '4' and old_attrs.get('dF') != '20000':
+                raise ValueError('%s: high shelf requires the dF 20000 end slot' % edit_id)
+            kwargs = {}
+            for field in ('F', 'Q', 'G'):
+                if field in raw_edit:
+                    try:
+                        kwargs[field] = float(raw_edit[field])
+                    except (TypeError, ValueError):
+                        raise ValueError('%s: %s must be numeric' % (edit_id, field))
+                    normalized_edit[field] = kwargs[field]
+            if 'type_code' in raw_edit:
+                kwargs['type_code'] = target_type
+                normalized_edit['type_code'] = target_type
+            working_xml = afpx.write_filter_slot(
+                working_xml, channel, slot, **kwargs)
+            if old_type in protected_types or target_type in protected_types:
+                if confirmations.get(edit_id) is not True:
+                    raise ValueError('%s requires explicit per-change confirmation' % edit_id)
+            normalized_edit['slot'] = slot
+            filter_channels.add(channel)
+        elif kind == 'delay_samples':
+            samples = integer_field(raw_edit, 'samples')
+            key = (kind, channel)
+            if key in target_keys:
+                raise ValueError('%s: duplicate delay target ch%d' % (edit_id, channel))
+            target_keys.add(key)
+            if confirmations.get(edit_id) is not True:
+                raise ValueError('%s requires explicit per-change confirmation' % edit_id)
+            working_xml = afpx.write_delay_samples(working_xml, channel, samples)
+            normalized_edit['samples'] = samples
+            delay_channels.add(channel)
+        else:
+            try:
+                trim_db = float(raw_edit['trim_db'])
+            except (KeyError, TypeError, ValueError):
+                raise ValueError('%s: trim_db must be numeric' % edit_id)
+            key = (kind, channel)
+            if key in target_keys:
+                raise ValueError('%s: duplicate output trim target ch%d' % (edit_id, channel))
+            target_keys.add(key)
+            if confirmations.get(edit_id) is not True:
+                raise ValueError('%s requires explicit per-change confirmation' % edit_id)
+            working_xml = afpx.write_output_trim(working_xml, {channel: trim_db})
+            normalized_edit['trim_db'] = trim_db
+        normalized_edits.append(normalized_edit)
+
+    unknown_confirmations = set(confirmations) - edit_ids
+    if unknown_confirmations:
+        raise ValueError('confirmations reference unknown edit id(s): %s' %
+                         sorted(unknown_confirmations))
+    if any(type(value) is not bool for value in confirmations.values()):
+        raise ValueError('confirmation values must be JSON booleans')
+    overlap = delay_channels & filter_channels
+    if overlap:
+        raise ValueError('delay and filter edits on the same channel are refused: %s'
+                         % sorted(overlap))
+
+    return {
+        'version': 1,
+        'source_path': source_path,
+        'source_sha256': actual_hash,
+        'format': 'afpx',
+        'output_path': output_path,
+        'edits': normalized_edits,
+        'confirmations': dict(confirmations),
+    }
+
+
+def _slot_expect(edit):
+    expect = {}
+    if 'F' in edit:
+        expect['F'] = '%.2f' % edit['F']
+    if 'Q' in edit:
+        expect['Q'] = '%g' % edit['Q']
+    if 'G' in edit:
+        expect['G'] = '%g' % edit['G']
+    if 'type_code' in edit:
+        expect['T'] = edit['type_code']
+    return expect
+
+
+def _apply_edits(source_xml, edits):
+    working_xml = source_xml
+    results = []
+    for edit in edits:
+        before = working_xml
+        if edit['kind'] == 'filter_slot':
+            kwargs = {key: edit[key] for key in ('F', 'Q', 'G', 'type_code')
+                      if key in edit}
+            working_xml = afpx.write_filter_slot(
+                before, edit['channel'], edit['slot'], **kwargs)
+            result = afpx.verify_slot_write(
+                before, working_xml, edit['channel'], edit['slot'], _slot_expect(edit))
+        elif edit['kind'] == 'delay_samples':
+            working_xml = afpx.write_delay_samples(
+                before, edit['channel'], edit['samples'])
+            result = afpx.verify_delay_write(
+                before, working_xml, edit['channel'], edit['samples'])
+        elif edit['kind'] == 'output_trim':
+            trims = {edit['channel']: edit['trim_db']}
+            working_xml = afpx.write_output_trim(before, trims)
+            result = afpx.verify_output_trim_write(before, working_xml, trims)
+        else:
+            raise ValueError('application is not implemented for edit kind %r' % edit['kind'])
+        if not result['pass']:
+            raise ValueError('%s verification failed: %s' %
+                             (edit['id'], '; '.join(result['errors'])))
+        results.append({'id': edit['id'], 'kind': edit['kind'], 'result': result})
+    return working_xml, results
+
+
+def apply_plan(plan_path):
+    """Apply a validated plan to a new AFPX and return its verification manifest."""
+    plan_path = os.path.abspath(os.fspath(plan_path))
+    with open(plan_path, encoding='utf-8') as fh:
+        plan = json.load(fh)
+    plan_dir = os.path.dirname(plan_path)
+    for key in ('source_path', 'output_path'):
+        if isinstance(plan.get(key), str) and not os.path.isabs(plan[key]):
+            plan[key] = os.path.join(plan_dir, plan[key])
+    normalized = validate_plan(plan, plan['source_path'])
+    source_xml = afpx.decode(normalized['source_path'])
+    intended_xml, _ = _apply_edits(source_xml, normalized['edits'])
+
+    output_dir = os.path.dirname(normalized['output_path']) or os.curdir
+    temp_path = None
+    try:
+        fd, temp_path = tempfile.mkstemp(prefix='.tune-plan-', suffix='.afpx', dir=output_dir)
+        os.close(fd)
+        afpx.encode(intended_xml, temp_path)
+        emitted_xml = afpx.decode(temp_path)
+        replayed_xml, edit_results = _apply_edits(source_xml, normalized['edits'])
+        if replayed_xml != emitted_xml:
+            raise ValueError('encoded output did not decode to the verified edit result')
+        filter_count = sum(1 for edit in normalized['edits']
+                           if edit['kind'] == 'filter_slot')
+        lint = afpx.roundtrip_lint(
+            source_xml, emitted_xml, expect_changed=filter_count,
+            allow_delay=any(edit['kind'] == 'delay_samples'
+                            for edit in normalized['edits']))
+        if not lint['pass']:
+            raise ValueError('roundtrip_lint failed: %s' % '; '.join(lint['errors']))
+        os.rename(temp_path, normalized['output_path'])
+        temp_path = None
+    finally:
+        if temp_path is not None and os.path.exists(temp_path):
+            os.unlink(temp_path)
+
+    return {
+        'plan_version': normalized['version'],
+        'format': normalized['format'],
+        'source_path': normalized['source_path'],
+        'output_path': normalized['output_path'],
+        'source_sha256': normalized['source_sha256'],
+        'output_sha256': _sha256_file(normalized['output_path']),
+        'normalized_edits': normalized['edits'],
+        'verification': {'edits': edit_results, 'roundtrip_lint': lint},
+        'predicted_not_measured': True,
+    }
+
+
+def create_plan(source_path, output_path):
+    """Create an empty version-1 AFPX plan for review and editing."""
+    source_path = os.path.abspath(os.fspath(source_path))
+    output_path = os.path.abspath(os.fspath(output_path))
+    if not os.path.isfile(source_path):
+        raise ValueError('source is not a file: %s' % source_path)
+    if os.path.splitext(source_path)[1].lower() != '.afpx':
+        raise ValueError('plan currently supports .afpx sources only')
+    if os.path.splitext(output_path)[1].lower() != '.afpx':
+        raise ValueError('output must use the .afpx extension')
+    if os.path.normcase(os.path.realpath(source_path)) == os.path.normcase(
+            os.path.realpath(output_path)):
+        raise ValueError('output must be different from source')
+    return {
+        'version': 1,
+        'source_path': source_path,
+        'source_sha256': _sha256_file(source_path),
+        'format': 'afpx',
+        'output_path': output_path,
+        'edits': [],
+        'confirmations': {},
+    }
 
 
 def _find_regions(freqs, y, flag_db, smooth_oct=1.0 / 6.0):
@@ -317,6 +630,14 @@ def main():
 
     sub.add_parser('selftest', help='run the self-contained synthetic-fixture self-test')
 
+    pl = sub.add_parser('plan', help='create a versioned AFPX tune-plan draft')
+    pl.add_argument('--source', required=True, help='source .afpx tune')
+    pl.add_argument('--output', required=True, help='new .afpx output path')
+    pl.add_argument('--out', help='write the JSON plan here instead of stdout')
+
+    app = sub.add_parser('apply', help='validate and apply a tune plan')
+    app.add_argument('--plan', required=True, help='version-1 JSON tune plan')
+
     an = sub.add_parser('analyze', help='load measurement(s) + target, emit one JSON report')
     an.add_argument('--measurement')
     an.add_argument('--positions', nargs='+')
@@ -334,6 +655,17 @@ def main():
     args = ap.parse_args()
     if args.cmd == 'selftest':
         _selftest()
+    elif args.cmd == 'plan':
+        draft = create_plan(args.source, args.output)
+        text = json.dumps(draft, indent=2)
+        if args.out:
+            with open(args.out, 'x', encoding='utf-8') as fh:
+                fh.write(text)
+            print('wrote %s' % args.out)
+        else:
+            print(text)
+    elif args.cmd == 'apply':
+        print(json.dumps(apply_plan(args.plan), indent=2))
     elif args.cmd == 'analyze':
         report = analyze(args)
         text = json.dumps(report, indent=2)
