@@ -550,4 +550,4 @@ natural" intuition.
 
 ## License
 
-No license is set yet — add one to state how others may reuse this.
+[MIT](LICENSE).
