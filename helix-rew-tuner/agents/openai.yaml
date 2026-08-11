@@ -1,0 +1,4 @@
+interface:
+  display_name: "Helix REW Tuner"
+  short_description: "Diagnose and tune car DSPs from REW data"
+  default_prompt: "Use $helix-rew-tuner to diagnose my REW measurements and propose a conservative, verified DSP tune."

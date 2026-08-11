@@ -1,20 +1,11 @@
 ---
 name: helix-rew-tuner
 description: >-
-  Measurement-driven tuner for Helix / Audiotec Fischer car-audio DSPs. Use this
-  whenever a user wants to tune, improve, EQ, time-align, or fix the sound of a
-  Helix DSP (P SIX, DSP.3, M-SIX, V-SIX, etc.) using REW measurements — including
-  when they share a `.mdat` or REW text export together with a `.afpx` tune file
-  and/or a target curve, or say things like "read my measurement and improve my
-  tune", "tune my car DSP", "fix my crossover / imaging / bass", "why does this
-  measurement look wrong", or "edit my .afpx". It decodes REW measurements and
-  Helix `.afpx` files, computes deviation from the target, classifies each problem
-  (EQ vs level vs phase vs modal-null vs measurement error), writes corrected
-  `.afpx` files within hardware limits, and verifies every write. Also includes
-  BETA, personal-use-only support for the newer `.pct6` format (DSP PC-Tool 6 /
-  Helix DSP PRO and similar) — no-password saves only, far less proven than
-  `.afpx`. Trigger it even if the user doesn't name the format explicitly but
-  clearly has DSP measurements they want acted on.
+  Use when diagnosing, tuning, or verifying Helix / Audiotec Fischer car-audio
+  DSP systems from REW measurements; editing or validating `.afpx` or beta
+  `.pct6` tune files; or handling supported beta Alpine `.jssh` presets,
+  crossover, imaging, bass, phase, level, target-curve, or measurement-quality
+  problems.
 ---
 
 # Helix / REW measurement-driven auto-tuner
@@ -38,6 +29,12 @@ spending a limited filter budget where it improves the whole system.
 
 Run these with the user's files; they are the deterministic layer.
 
+- **`preflight.py`** — read-only install check. Run `python preflight.py
+  --json` before first use in a new environment; it reports Python, NumPy,
+  SciPy, required skill paths, actionable failures, and overall readiness.
+  Install declared dependencies with `python -m pip install -r requirements.txt`.
+- **`benchmark.py`** — deterministic synthetic robust-fitting regression gate.
+  Run `python benchmark.py --json`; any failed declared guard exits nonzero.
 - **`tunelib.py`** — the verified analysis + DSP core (import it). Pure,
   deterministic, self-tested (`python tunelib.py` → `ALL TESTS PASSED`). This
   is a lookup table, not the rationale — each function's *why* and *when*
@@ -47,7 +44,7 @@ Run these with the user's files; they are the deterministic layer.
   | Function(s) | For | Ref |
   |---|---|---|
   | `voice_target`, `measure_tilt` | voicing layer (tilt/bass/presence/air) | §Voicing |
-  | `fit_peq` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | joint PEQ optimizer, restraint & L/R matching | §Restraint, §Imaging |
+  | `fit_peq`, `fit_peq_robust` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | single- or multi-position PEQ optimizer, restraint & L/R matching | §Restraint, §Imaging |
   | `interference_audit` | real dip vs. destructive summation | §The interference audit |
   | `crossover_confidence` | one band-limited crossover go/no-go | §The crossover action-ladder |
   | `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | §The crossover action-ladder |
@@ -129,29 +126,12 @@ Run these with the user's files; they are the deterministic layer.
   corrupts them on re-encode. **Read `references/pct6_format.md` before
   using this on a real file** — the container key is version-fragile and
   unverified beyond PC-Tool 6.01.08/6.03.04.
-- **`alpine_jssh.py`** — **BETA, personal-use only** — a **different vendor**:
-  decode/encode Alpine DSP PC-Tool `.jssh` presets (confirmed on a
-  PXE-X121-12EV). Same workflow shape as `afpx.py`: `channels()` for the
-  step-1 channel-map confirmation (`python alpine_jssh.py inspect <file>`),
-  per-field getters/setters, `write_peq_bands()` to write a whole
-  `fit_peq` result, and `verify_write()` (refuses if anything outside the
-  intended bytes moved). **Alpine's limits are NOT Helix's** — use
-  `alpine_jssh.validate_band` and `ALPINE_LIMITS`, never
-  `tunelib.validate_peq_band`, and pass `q_lim=alpine_jssh.WRITABLE_Q_RANGE`
-  + an Alpine `g_lim` to `fit_peq` (its defaults are Helix-shaped). Only 13
-  Q values are writable, so `write_peq_bands(snap=True)` snaps to the
-  nearest and **reports** the deviation (~0.2 dB typical, 0.44 dB worst) —
-  quote that to the user, don't claim the requested Q landed exactly. Read
-  `references/alpine_jssh_format.md` before touching a real file.
-  **Do NOT write channel gain on the PXE-X121-12EV** — the stored field and
-  PC-Tool's own Gain slider disagree on a real unit (−24.00 dB stored vs 9
-  shown) and the mapping is unexplained; see `alpine_jssh_format.md`. Band gain
-  is unaffected. Also: most real bands carry a Q code outside the writable
-  13-value table (`get_band_q` → `None`), so **to keep some bands and disable
-  others, zero the unwanted ones with `set_band_gain_db(...,0.0)` rather than
-  rebuilding the channel with `write_peq_bands`** — the latter rewrites every
-  band and snaps the Q of ones you meant to preserve.
-  Run `alpine_jssh.preflight_real_file(path)` (CLI: `python alpine_jssh.py preflight <file>`) on the REAL preset BEFORE any write and report its verdict — it checks decode, byte-identical round-trip, channel-block layout and stray floats in byte data. Only `safe_to_write` clears a write. Note it cannot prove the hardware applied a value: after loading a generated preset, have the user read the values back in Alpine's UI.
+- **`alpine_jssh.py`** — **BETA, personal-use only** support for the different-
+  vendor Alpine `.jssh` format. Keep Alpine work in this skill, but read
+  `references/alpine_jssh_format.md` in full before inspecting or changing a
+  real preset; that reference owns the verified model scope, Alpine-specific
+  limits, writable Q values, unsafe channel-gain caveat, edit-preservation
+  rules, mandatory real-file preflight, and hardware read-back requirement.
 
 For anything not covered by a script, write short Python that imports these —
 never hand-guess `.afpx`/`.pct6` bytes or filter codes.
