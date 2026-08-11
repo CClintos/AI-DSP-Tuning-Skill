@@ -59,7 +59,7 @@ class SpatialConsistencyTests(unittest.TestCase):
 
 class RobustPeqTests(unittest.TestCase):
     def test_masked_nonfinite_samples_are_excluded_from_robust_fit(self):
-        """Passing raw non-finites past the authority mask must crash fitting."""
+        """Masked non-finite samples must be safely excluded from fitting."""
         freqs = np.geomspace(100.0, 10000.0, 401)
         shared_peak = tunelib.peaking_db(freqs, 800.0, 0.8, 4.0)
         deviations = np.vstack([shared_peak, shared_peak, shared_peak])
