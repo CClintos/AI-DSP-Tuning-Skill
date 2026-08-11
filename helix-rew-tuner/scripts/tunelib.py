@@ -452,11 +452,29 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
 
     masks = authority_array(mask, 'mask', True, bool)
     confidence = np.clip(authority_array(conf, 'conf', 1.0, float), 0.0, 1.0)
+    finite = np.isfinite(deviations)
+    masks &= finite
+    # Keep non-finite bins out of every authority calculation, while giving
+    # smoothing operations a finite local continuation instead of NaN/inf.
+    # Interpolated values never receive weight because ``masks`` stays false.
+    sanitized = deviations.copy()
+    for position in range(shape[0]):
+        valid = finite[position]
+        if np.any(valid):
+            sanitized[position, ~valid] = np.interp(
+                freqs[~valid], freqs[valid], deviations[position, valid])
+        else:
+            sanitized[position] = 0.0
+    deviations = sanitized
     inband = (freqs >= fit_band[0]) & (freqs <= fit_band[1])
-    authority = masks & inband[None, :] & np.isfinite(deviations)
+    authority = masks & inband[None, :]
     weights = audibility_weight(freqs)[None, :] * confidence * authority
     if np.any(np.sum(weights ** 2, axis=1) <= 1e-12):
         raise ValueError('each position needs authoritative samples in fit_band')
+
+    def authoritative_median(values):
+        values = np.ma.array(values, mask=~(weights > 0.0))
+        return np.asarray(np.ma.median(values, axis=0).filled(0.0), dtype=float)
 
     def raw_bands(params):
         return [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
@@ -509,14 +527,24 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         bands = raw_bands(params)
         errors = deviations + cascade_db(freqs, bands)[None, :]
         weighted = errors * weights
-        median_error = np.median(errors, axis=0)
+        median_error = authoritative_median(errors)
         median_weight = np.median(weights, axis=0)
         # sqrt(x**2 + eps) is a smooth absolute value. Log-mean-exp is a
         # smooth maximum, so this tail stays differentiable for least_squares.
-        smooth_abs = np.sqrt(weighted ** 2 + 1e-8)
-        peak = np.max(smooth_abs, axis=0)
-        tail = peak + np.log(np.mean(
-            np.exp(4.0 * (smooth_abs - peak[None, :])), axis=0)) / 4.0
+        tail_authority = weights > 0.0
+        smooth_abs = np.sqrt(weighted ** 2 + 1e-8) - 1e-4
+        peak = np.max(np.where(tail_authority, smooth_abs, -np.inf), axis=0)
+        tail_count = np.sum(tail_authority, axis=0)
+        peak[tail_count == 0] = 0.0
+        tail_sum = np.sum(np.where(
+            tail_authority,
+            np.exp(4.0 * (smooth_abs - peak[None, :])), 0.0), axis=0)
+        safe_tail_mean = np.where(
+            tail_count > 0, tail_sum / np.maximum(tail_count, 1), 1.0)
+        tail = np.where(
+            tail_count > 0,
+            peak + np.log(safe_tail_mean) / 4.0,
+            0.0)
         parts = [weighted.ravel() / np.sqrt(shape[0]),
                  median_error * median_weight,
                  tail_weight * tail,
@@ -535,7 +563,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
 
     for _ in range(n_bands_max):
         current_error = deviations + cascade_db(freqs, accepted)[None, :]
-        median_error = erb_smooth(freqs, np.median(current_error, axis=0))
+        median_error = erb_smooth(freqs, authoritative_median(current_error))
         seed_weight = np.median(weights, axis=0)
         seed_basis = np.abs(median_error) * seed_weight
         i0 = int(np.argmax(seed_basis))

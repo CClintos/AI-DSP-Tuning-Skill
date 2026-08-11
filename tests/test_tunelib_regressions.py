@@ -58,6 +58,29 @@ class SpatialConsistencyTests(unittest.TestCase):
 
 
 class RobustPeqTests(unittest.TestCase):
+    def test_masked_nonfinite_samples_are_excluded_from_robust_fit(self):
+        """Passing raw non-finites past the authority mask must crash fitting."""
+        freqs = np.geomspace(100.0, 10000.0, 401)
+        shared_peak = tunelib.peaking_db(freqs, 800.0, 0.8, 4.0)
+        deviations = np.vstack([shared_peak, shared_peak, shared_peak])
+        mask = np.ones_like(deviations, dtype=bool)
+        for position, index, value in (
+                (0, 100, np.nan), (1, 200, np.inf), (2, 300, -np.inf)):
+            deviations[position, index] = value
+            mask[position, index] = False
+
+        bands, report = tunelib.fit_peq_robust(
+            freqs, deviations, (200.0, 6000.0), mask=mask,
+            n_bands_max=1, improve_pct=3.0,
+        )
+
+        self.assertTrue(any(500.0 <= f <= 1300.0 and gain <= -1.0
+                            for f, _q, gain in bands))
+        self.assertTrue(all(np.isfinite(report[key]) for key in (
+            "score_before", "score_after", "worst_position_loss_db")))
+        self.assertTrue(all(np.isfinite(report[key]).all() for key in (
+            "position_scores_before", "position_scores_after")))
+
     def test_shared_broad_peak_is_cut_for_every_position(self):
         """Removing robust fitting must leave a shared peak uncorrected."""
         freqs = np.geomspace(100.0, 10000.0, 401)
