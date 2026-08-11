@@ -373,6 +373,41 @@ class PipelineApplyTests(unittest.TestCase):
         self.assertTrue(manifest["verification"]["roundtrip_lint"]["pass"])
         self.assertEqual(manifest["verification"]["roundtrip_lint"]["slots_changed"], 0)
 
+    def test_validate_plan_rejects_nonfinite_and_wrong_json_types(self):
+        cases = []
+
+        boolean_version = self.peq_plan()
+        boolean_version["version"] = True
+        cases.append(("boolean version", boolean_version))
+
+        boolean_gain = self.peq_plan()
+        boolean_gain["edits"][0]["G"] = True
+        cases.append(("boolean gain", boolean_gain))
+
+        string_gain = self.peq_plan()
+        string_gain["edits"][0]["G"] = "-3"
+        cases.append(("string gain", string_gain))
+
+        numeric_type_code = self.peq_plan()
+        numeric_type_code["edits"][0]["type_code"] = 17
+        cases.append(("numeric type code", numeric_type_code))
+
+        nan_trim = self.plan()
+        nan_trim["edits"] = [{
+            "id": "trim-nan",
+            "kind": "output_trim",
+            "channel": 0,
+            "trim_db": float("nan"),
+        }]
+        nan_trim["confirmations"] = {"trim-nan": True}
+        cases.append(("non-finite trim", nan_trim))
+
+        for name, plan in cases:
+            with self.subTest(name=name):
+                with self.assertRaises(ValueError):
+                    pipeline.validate_plan(plan, self.source)
+                self.assertFalse(self.output.exists())
+
 
 if __name__ == "__main__":
     unittest.main()

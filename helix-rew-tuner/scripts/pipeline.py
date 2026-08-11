@@ -37,6 +37,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import sys
 import tempfile
@@ -71,7 +72,7 @@ def validate_plan(plan, source_path):
         raise ValueError('plan is missing required field(s): %s' % sorted(missing))
     if extra:
         raise ValueError('plan has unknown field(s): %s' % sorted(extra))
-    if plan['version'] != 1:
+    if type(plan['version']) is not int or plan['version'] != 1:
         raise ValueError('unsupported plan version %r (expected 1)' % plan['version'])
     if plan['format'] != 'afpx':
         raise ValueError('unsupported format %r (only afpx is writable)' % plan['format'])
@@ -127,6 +128,14 @@ def validate_plan(plan, source_path):
             raise ValueError('%s: %s must be an integer' % (edit.get('id'), key))
         return value
 
+    def numeric_field(edit, key):
+        value = edit.get(key)
+        if (isinstance(value, bool) or not isinstance(value, (int, float)) or
+                not math.isfinite(value)):
+            raise ValueError('%s: %s must be a finite JSON number' %
+                             (edit.get('id'), key))
+        return float(value)
+
     for raw_edit in plan['edits']:
         if not isinstance(raw_edit, dict):
             raise ValueError('every edit must be an object')
@@ -167,6 +176,10 @@ def validate_plan(plan, source_path):
                 raise ValueError('%s: channel or slot is out of range' % edit_id)
             old_attrs = afpx.attrs(old_tag)
             old_type = old_attrs.get('T')
+            if ('type_code' in raw_edit and
+                    (not isinstance(raw_edit['type_code'], str) or
+                     not raw_edit['type_code'])):
+                raise ValueError('%s: type_code must be a non-empty string' % edit_id)
             target_type = str(raw_edit.get('type_code', old_type))
             if target_type in afpx.CROSSOVER_TYPES:
                 raise ValueError('%s: crossover edit requested; refusing' % edit_id)
@@ -180,10 +193,7 @@ def validate_plan(plan, source_path):
             kwargs = {}
             for field in ('F', 'Q', 'G'):
                 if field in raw_edit:
-                    try:
-                        kwargs[field] = float(raw_edit[field])
-                    except (TypeError, ValueError):
-                        raise ValueError('%s: %s must be numeric' % (edit_id, field))
+                    kwargs[field] = numeric_field(raw_edit, field)
                     normalized_edit[field] = kwargs[field]
             if 'type_code' in raw_edit:
                 kwargs['type_code'] = target_type
@@ -207,10 +217,9 @@ def validate_plan(plan, source_path):
             normalized_edit['samples'] = samples
             delay_channels.add(channel)
         else:
-            try:
-                trim_db = float(raw_edit['trim_db'])
-            except (KeyError, TypeError, ValueError):
-                raise ValueError('%s: trim_db must be numeric' % edit_id)
+            if 'trim_db' not in raw_edit:
+                raise ValueError('%s: trim_db is required' % edit_id)
+            trim_db = numeric_field(raw_edit, 'trim_db')
             key = (kind, channel)
             if key in target_keys:
                 raise ValueError('%s: duplicate output trim target ch%d' % (edit_id, channel))
