@@ -18,6 +18,7 @@ before correcting, and prefer doing less.**
   - [The interference audit](#the-interference-audit-magnitude-only-very-useful)
   - [Two checks before trusting a proposed EQ band](#two-checks-to-run-before-trusting-any-proposed-eq-band)
   - [Minimum-phase / EQ-ability](#minimum-phase-eq-ability)
+  - [The boost gate](#the-boost-gate-the-same-doctrine-scored-and-asked-only-of-boosts)
   - [Single-position phase reliability](#quantify-single-position-phase-reliability-before-trusting-it)
   - [Multi-position variance](#multi-position-variance-eq-whats-common-ignore-what-moves)
 - [The crossover action-ladder](#the-crossover-action-ladder-cheapest-safest-first)
@@ -788,6 +789,43 @@ Flat excess group delay ⇒ minimum-phase region ⇒ EQ works. Sharp excess-GD
 excursions ⇒ non-minimum-phase ⇒ EQ won't generalize. `tunelib.excess_gd_mask`
 flags regions to leave alone. Narrow high-frequency dips are almost never worth
 correcting — they don't survive small mic movement.
+
+### The boost gate — the same doctrine, scored, and asked only of boosts
+
+`excess_gd_mask` answers "is this region minimum-phase" with a yes/no, against
+an absolute group-delay threshold, and applies to cuts and boosts alike.
+`tunelib.excess_phase_fields` + `boost_gate_verdict` ask a narrower and more
+useful question: **would boosting *here*, with *this* filter, be pushing gain
+into a cancellation?** Three things have to be true at once before it objects —
+a deep local dip, a phase anomaly, and the filter actually delivering gain at
+that frequency. Any one alone over-flags: cabin midrange is phase-rough almost
+everywhere, and depth alone cannot tell a cancellation from a fillable shape
+deficit. Verdicts are `ALLOW` / `WARN` / `BLOCK`; `pipeline.py analyze` reports
+one per `boost_needed` deviation region under `boost_gate`.
+
+**Cutting into a null is merely pointless; boosting into one wastes headroom
+and cannot work** — that asymmetry is why this is boost-only.
+
+Use it with three limits firmly in mind:
+
+- **ALLOW is not a certificate.** On synthetic ground truth it misses most
+  cancellations. It means "no phase objection found", nothing more — the
+  interference audit, `reaches_target_after_boost`, `inert_band_check` and the
+  headroom budget are what actually carry the decision.
+- **WARN is an instruction to cross-check, not a verdict.** Shift the mic ~10 cm
+  and re-measure: a real cancellation notch moves or fills, a driver/cabin shape
+  deficit stays put.
+- **It needs unsmoothed data.** The score is normalized by the measurement's own
+  spread, so a 1/3-octave-smoothed export collapses the normalizer and makes
+  everything read anomalous. The gate detects this and reports
+  `low_confidence` rather than pretending — if you see it, re-export.
+
+It is deliberately **specific rather than sensitive**: it objects rarely, so
+that when it does the objection is usually real. A gate that flagged half of all
+boosts would just be noise you learned to click through. Measured operating
+characteristics, and the reasoning behind the thresholds, are in
+`boost_gate_verdict`'s docstring — including why they are *not* the upstream
+values this was ported from.
 
 ### Quantify single-position phase reliability before trusting it
 

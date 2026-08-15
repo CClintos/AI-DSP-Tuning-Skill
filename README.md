@@ -100,6 +100,12 @@ The full Helix filter set, each used for what it's good at:
   for a re-measure before the other is trusted.
 - **Shape-anchored level** — it matches the shape of your target and lets overall
   level float, so swapping in a different curve changes the voicing, not the tune.
+- **A dip is not automatically a thing to fill** — before proposing a boost, it
+  checks whether the dip is a shape deficit EQ can actually correct or a
+  cancellation that will simply eat the gain, and says which. It's deliberately
+  cautious about objecting, so an objection is worth reading rather than clicking
+  through — and it tells you when your measurement is too smoothed to support the
+  question being asked at all.
 - **Within limits, verified** — every gain respects the DSP's hardware limits,
   crossovers are never written or changed, delays require confirmation of the
   specific value, and every written file is decoded back and checked.
@@ -547,6 +553,24 @@ across real tuning sessions, the aggressive auto-EQ approach — more bands,
 bigger moves, tighter curve-matching — consistently loses to the restrained
 one on `tune_scorecard`'s whole-system metrics, not just on "sounds more
 natural" intuition.
+
+## Credits
+
+The excess-phase **boost gate** (`tunelib.excess_phase_fields` /
+`boost_gate_verdict`) is a port of the method in
+[`ayukhno/autosound-tuning-skill`](https://github.com/ayukhno/autosound-tuning-skill)'s
+MIT-licensed `rew_tool/eq_gate.py` — the three-way conjunction (dip depth **and**
+phase anomaly **and** filter weight), the sliding-RMS statistic that catches both
+lobes of a bipolar excess-group-delay swing, and the graded ALLOW/WARN/BLOCK
+verdicts are theirs. Their write-up of *why* a depth-only null guard is a
+regression saved re-learning it the expensive way.
+
+The port is not a copy: excess phase is derived cepstrally here rather than read
+from REW's native excess-phase trace, the score is normalized in cycles rather
+than seconds (measured: normalizing seconds tilts it ~80× across the audio band
+on a fixture with no phase anomaly in it at all), and the thresholds were
+re-derived on synthetic ground truth for this path. Details and measured
+operating characteristics are in `boost_gate_verdict`'s docstring.
 
 ## License
 

@@ -438,6 +438,43 @@ def _find_regions(freqs, y, flag_db, smooth_oct=1.0 / 6.0):
     return regions
 
 
+def _trust_band(freqs, spl_db, down_db=20.0, smooth_oct=1.0 / 3.0, inset_oct=1.0 / 3.0):
+    """The band this trace actually produces output in, as (lo, hi).
+
+    Bounds where the boost gate measures its robust spread. Two things this has
+    to avoid, both of which quietly corrupt that statistic:
+      - a STOPBAND is mostly noise, and letting it in inflates the normalizer,
+        which makes the gate permissive everywhere;
+      - the AXIS EDGES carry extraction artifacts, because the cepstral
+        minimum-phase step clamps the magnitude flat past the ends of the
+        measured range and the smoothing pads there. Those show up as
+        high-S outliers on data that is perfectly minimum-phase (measured:
+        max S 8.1 in the top octave of a fixture whose true excess phase is
+        zero), and they were the whole reason a full-axis band needed a
+        blocking threshold ~50 % higher than a per-driver one.
+    So: widest contiguous run within `down_db` of the smoothed peak, then inset
+    by `inset_oct` at each end."""
+    sm = tunelib.octave_smooth_log(freqs, spl_db, smooth_oct)
+    live = sm >= (np.max(sm) - down_db)
+    best, start = None, None
+    for i, on in enumerate(live):
+        if on and start is None:
+            start = i
+        if start is not None and (not on or i == len(live) - 1):
+            end = i if on else i - 1
+            if best is None or (end - start) > (best[1] - best[0]):
+                best = (start, end)
+            start = None
+    lo, hi = ((float(freqs[0]), float(freqs[-1])) if best is None
+              else (float(freqs[best[0]]), float(freqs[best[1]])))
+    lo = max(lo, float(freqs[0]) * 2 ** inset_oct)
+    hi = min(hi, float(freqs[-1]) / 2 ** inset_oct)
+    if hi <= lo:                      # degenerate/narrow trace -- don't inset
+        return ((float(freqs[0]), float(freqs[-1])) if best is None
+                else (float(freqs[best[0]]), float(freqs[best[1]])))
+    return lo, hi
+
+
 _VOICE_KEYS = {'tilt': 'tilt_db_per_oct', 'bass': 'bass_shelf_db',
               'presence': 'presence_db', 'air': 'air_db'}
 
@@ -464,11 +501,11 @@ def analyze(args):
         f, s, _ph, _coh = measure.load_text_export(p)
         positions_db.append(measure.resample_log(f, s, freqs))
 
-    measurement_phase = None
+    measurement_phase = meas_axis = None
     if args.measurement:
         f, s, ph, _coh = measure.load_text_export(args.measurement)
         primary_db = measure.resample_log(f, s, freqs)
-        measurement_phase = ph
+        measurement_phase, meas_axis = ph, f
     elif positions_db:
         primary_db = positions_db[0]
     else:
@@ -499,6 +536,54 @@ def analyze(args):
     report['tilt'] = {'measured': tunelib.measure_tilt(freqs, primary_db),
                       'target': tunelib.measure_tilt(freqs, target_db)}
     report['deviation_regions'] = _find_regions(freqs, dev_db, args.dev_flag_db)
+
+    # Phase objection per dip a boost would target. Answers the one question
+    # the deviation list cannot: is this dip a shape deficit EQ can fill, or a
+    # cancellation that will eat the gain? Advisory by design -- see
+    # tunelib.boost_gate_verdict on why this informs the proposal table rather
+    # than silently dropping bands.
+    boost_regions = [r for r in report['deviation_regions']
+                     if r['direction'] == 'boost_needed']
+    if measurement_phase is None:
+        pass                      # already noted above; needs phase
+    elif not boost_regions:
+        notes.append('boost gate not run -- no dip regions deep enough to flag '
+                     '(nothing here tempts a boost)')
+    else:
+        trust = tuple(args.trust_band) if args.trust_band else _trust_band(freqs, primary_db)
+        try:
+            fields = tunelib.excess_phase_fields(
+                freqs,
+                primary_db,
+                measure.resample_log(
+                    meas_axis,
+                    np.rad2deg(np.unwrap(np.deg2rad(measurement_phase))),
+                    freqs),
+                trust_band=trust)
+        except ValueError as exc:
+            notes.append('boost gate skipped: %s' % exc)
+        else:
+            rows = []
+            for r in boost_regions:
+                width = max(r['f_hi'] - r['f_lo'], 1e-6)
+                q = float(np.clip(r['peak_hz'] / width, 0.5, 8.0))
+                v = tunelib.boost_gate_verdict(fields, r['peak_hz'], q)
+                v.update({'region_hz': [r['f_lo'], r['f_hi']],
+                          'peak_hz': r['peak_hz'], 'assumed_q': round(q, 2),
+                          'deficit_db': r['peak_db']})
+                rows.append(v)
+            report['boost_gate'] = {
+                'trust_band_hz': [round(float(trust[0]), 1), round(float(trust[1]), 1)],
+                'trust_band_source': 'explicit' if args.trust_band else 'derived (-20 dB from peak)',
+                'low_confidence': bool(fields['mad_floored']),
+                'regions': rows,
+                'counts': {v: sum(1 for r in rows if r['verdict'] == v)
+                           for v in ('ALLOW', 'WARN', 'BLOCK')},
+            }
+            if fields['mad_floored']:
+                notes.append('boost gate ran on a trace too smooth to support it '
+                             '(MAD floored) -- re-export WITHOUT smoothing before '
+                             'trusting any verdict below')
 
     if len(positions_db) >= 3:
         sc = tunelib.spatial_consistency(freqs, positions_db)
@@ -618,7 +703,14 @@ def _selftest():
 
         spl = 78.0 + tunelib.peaking_db(freqs, 300.0, 2.0, -6.0)   # real, fillable dip
         phase = np.zeros_like(freqs)
-        meas_path = save('measurement.txt', freqs, spl, phase)
+        # The measurement gets the dip's TRUE minimum phase plus ordinary
+        # measurement noise, so the fixture is physically coherent: a
+        # minimum-phase dip is by definition fillable, which is what the boost
+        # gate must conclude below. Noise matters -- a noiseless trace collapses
+        # the gate's MAD normalizer (see tunelib.excess_phase_fields).
+        meas_phase = (np.rad2deg(tunelib.minphase_from_mag(freqs, spl))
+                      + np.random.RandomState(3).normal(0, 0.2, len(freqs)))
+        meas_path = save('measurement.txt', freqs, spl, meas_phase)
         target_path = save('target.txt', freqs, 76.0 * np.ones_like(freqs))
 
         rng = np.random.RandomState(7)
@@ -644,7 +736,7 @@ def _selftest():
             measurement=meas_path, positions=pos_paths, target=target_path,
             voice=['tilt=-0.5'], solo_a=solo_a_path, solo_b=solo_b_path,
             together=together_path, pair_band=[200.0, 800.0], gate_ms=2.9,
-            afpx=afpx_path, dev_flag_db=2.0, out=None)
+            afpx=afpx_path, dev_flag_db=2.0, trust_band=None, out=None)
         report = analyze(args)
 
         assert report['voicing_applied'] == {'tilt_db_per_oct': -0.5}
@@ -665,16 +757,27 @@ def _selftest():
         assert abs(report['gating']['trust_floor_hz'] - 344.8) < 1.0
         assert len(report['afpx']['channels']) == 2
         assert report['afpx']['channels'][1]['polarity'] == 'inverted'
+        # The 300 Hz dip is minimum-phase by construction, so the boost gate
+        # must NOT object to filling it -- a BLOCK here would mean the gate is
+        # rejecting exactly the case EQ is for.
+        bg = report['boost_gate']
+        assert not bg['low_confidence'], \
+            'fixture carries measurement noise; MAD should not have floored: %r' % bg
+        dip_rows = [r for r in bg['regions'] if 200.0 <= r['peak_hz'] <= 400.0]
+        assert dip_rows, 'the 300Hz dip should have reached the boost gate: %r' % bg
+        assert all(r['verdict'] == 'ALLOW' for r in dip_rows), \
+            'a minimum-phase dip must not be gated: %r' % dip_rows
+        assert bg['trust_band_source'].startswith('derived')
         assert report['notes'] == [], 'a fully-specified run should have no skip notes: %r' % report['notes']
         print('pipeline selftest: analyze() wiring OK (voicing, level anchor, '
              'deviation regions, spatial_consistency, interference_audit, '
-             'crossover_confidence, gating, afpx read-through)')
+             'crossover_confidence, gating, boost_gate, afpx read-through)')
 
         try:
             analyze(argparse.Namespace(measurement=None, positions=None, target=target_path,
                                        voice=None, solo_a=None, solo_b=None, together=None,
                                        pair_band=None, gate_ms=None, afpx=None,
-                                       dev_flag_db=2.0, out=None))
+                                       dev_flag_db=2.0, trust_band=None, out=None))
             raise AssertionError('missing --measurement/--positions should have raised')
         except ValueError:
             pass
@@ -718,6 +821,9 @@ def main():
     an.add_argument('--together')
     an.add_argument('--pair-band', nargs=2, type=float, metavar=('LO_HZ', 'HI_HZ'))
     an.add_argument('--gate-ms', type=float)
+    an.add_argument('--trust-band', nargs=2, type=float, metavar=('LO_HZ', 'HI_HZ'),
+                    help='band this driver actually produces output in, for the '
+                         'boost gate; default derived as -20 dB from the peak')
     an.add_argument('--afpx')
     an.add_argument('--dev-flag-db', type=float, default=2.0)
     an.add_argument('--out')

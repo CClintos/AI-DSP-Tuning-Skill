@@ -118,6 +118,306 @@ def excess_gd_mask(freqs, spl_db, phase_deg, flat_ms=1.0, smooth_oct=1 / 6.0,
     return gd, (wob <= flat_ms)
 
 # --------------------------------------------------------------------------
+# 1b) EXCESS-PHASE BOOST GATE -- the same doctrine as excess_gd_mask, but
+# scored rather than thresholded, and asked only of BOOSTS.
+#
+# Ported (method + calibration constants) from the MIT-licensed `eq_gate.py`
+# in github.com/ayukhno/autosound-tuning-skill (c) 2026 ayukhno. Adapted to
+# this module's cepstral excess-phase path and ms conventions; the divergences
+# are noted in excess_phase_fields' docstring.
+#
+# WHY THIS EXISTS ALONGSIDE excess_gd_mask(), which already answers "is this
+# region minimum-phase":
+#   1. excess_gd_mask thresholds |gd - local median| against an ABSOLUTE
+#      flat_ms. That threshold means different things on a clean sweep and a
+#      noisy in-cabin one. Here the deviation is normalized by the
+#      measurement's OWN robust spread (MAD over the trust band), so the
+#      operating point travels between measurements.
+#   2. excess_gd_mask smooths |wobble| with a 5-bin boxcar -- at 96 PPO that
+#      is ~1/19 octave. A non-minimum-phase notch produces a BIPOLAR excess-GD
+#      swing whose lobes straddle the notch and whose zero-crossing sits at the
+#      notch CENTRE, which is exactly where a fitter wants to put the filter.
+#      A window that narrow can sit in the zero-crossing and read the middle of
+#      a cancellation notch as flat (i.e. EQ-able). S below integrates z^2 over
+#      1/6 octave, so both lobes count and the centre no longer reads clean.
+#   3. A mask is binary and applies to cuts as well as boosts. Cutting into a
+#      null is merely pointless; BOOSTING into one wastes headroom and cannot
+#      work. This gate is boost-only and graded (ALLOW/WARN/BLOCK), so a
+#      candidate can be routed to a cross-check instead of silently dropped.
+#
+# The rule: a boost is dangerous only where ALL THREE hold at once --
+#   dip(f) >= dip_db  : a deep LOCAL magnitude dip (vs a +/-2/3-oct median);
+#   S(f)   >= z_warn  : phase-anomalous (sliding RMS of the excess-phase
+#                       z-score, normalized in CYCLES -- see the docstring on
+#                       why seconds tilts the score ~80x across the axis);
+#   w(f)   >= 0.5     : the filter actually delivers gain there (skirts free).
+# Cabin midrange is phase-rough nearly everywhere, so phase alone over-blocks;
+# depth alone cannot tell a cancellation from a fillable shape deficit.
+#
+# !! DO NOT add a depth-only guard that abstains on deep dips regardless of S.
+# A minimum-phase system has ~zero excess phase at ANY depth, so a deep
+# minimum-phase notch is genuinely fillable and its S correctly sits at the
+# noise floor. Upstream measured a depth-only guard demoting a 90/90
+# ground-truth score to 54/90 by overriding correct confident ALLOWs. If a
+# guard is ever wanted, condition it on S as well, never on depth alone. The
+# self-test at the bottom of this file locks that case in.
+
+def _gauss_smooth(y, sigma_pts):
+    """Gaussian smoothing over an array index axis (edge-padded, length-preserving)."""
+    n = int(max(3, round(sigma_pts * 8)) | 1)          # odd, >= 3
+    k = np.exp(-0.5 * ((np.arange(n) - n // 2) / sigma_pts) ** 2)
+    k /= k.sum()
+    return np.convolve(np.pad(y, n // 2, mode='edge'), k, mode='valid')
+
+
+def _rolling_median(y, half):
+    return np.array([np.median(y[max(0, i - half):i + half + 1])
+                     for i in range(len(y))])
+
+
+def excess_phase_fields(freqs, spl_db, phase_deg, trust_band, ppo=96,
+                        smooth_frac=6.0, base_half_oct=1.0, dip_half_oct=2 / 3.0,
+                        measurement_fs=None, n_fft=2 ** 18,
+                        mad_floor_cycles=1e-4):
+    """Precompute the excess-phase anomaly fields a boost gate scores against.
+
+    Run once per measurement, then call boost_gate_verdict() per candidate band.
+
+    Inputs are the same single-position REW text export WITH phase that
+    excess_gd_mask() takes. `trust_band` is (lo, hi) -- the band this driver
+    actually produces output in. It sets where the robust spread (MAD) is
+    measured, so a stopband full of noise cannot inflate the normalization and
+    flatten every z-score toward zero.
+
+    Returns a dict of arrays on an internal log grid `g`:
+      g       -- the analysis grid (Hz), `ppo` points/octave
+      gd_ms   -- excess group delay (ms)
+      dev_ms  -- gd_ms minus its +/-base_half_oct rolling median
+      z       -- dev_ms / MAD(dev_ms over trust_band): a robust anomaly score
+      s       -- sqrt of the 1/smooth_frac-octave sliding mean of z^2. THE
+                 statistic. Integrates both lobes of a bipolar swing, so the
+                 notch centre (where z zero-crosses) still scores hot
+      dip_db  -- local dip depth vs a +/-dip_half_oct rolling median
+      mag_db  -- magnitude resampled onto g
+      trust_mask -- g within trust_band
+      dev_cycles -- dev_ms expressed as cycles of excess phase (dev * 1e-3 * f)
+      mad_cycles -- the robust spread, in cycles, that z is normalized by
+      mad_floored -- True if that spread fell under `mad_floor_cycles`
+
+    THE SCORE IS NORMALIZED IN CYCLES, NOT SECONDS. This is a departure from
+    upstream, which takes the MAD of the group-delay deviation directly, and
+    the reason is structural rather than incidental. Group delay is a
+    derivative of phase with respect to frequency, and on a log-spaced axis the
+    bin spacing itself scales with f (~0.14 Hz at 20 Hz, ~72 Hz at 10 kHz), so
+    differentiated measurement noise scales as 1/f. Measured here on a fixture
+    that is minimum-phase EVERYWHERE -- true excess phase zero, so every score
+    should read the same -- normalizing seconds gave median S ~21 at 20-40 Hz
+    against ~0.26 at 1-6 kHz: an ~80x tilt with no acoustic content in it at
+    all. At z_warn=4.5 that means near-automatic objections in the bass and
+    near-automatic clearance in the treble, close to the opposite of where
+    cabin cancellation actually lives.
+
+    Multiplying the deviation by f converts it to CYCLES of excess phase, whose
+    noise floor is frequency-independent by construction (GD noise ~ sigma_phi
+    / delta_omega, and delta_omega ~ omega, so the product is flat). That is a
+    change of UNITS, so unlike a rolling-window normalizer it keeps the global
+    MAD -- which matters, because a rolling window is self-masking on exactly
+    the structure this gate exists to catch. Measured, on the 216-comb suite
+    below: a rolling +/-1-octave spread cut correct blocks from 72 to 36,
+    because a comb repeats every ~333 Hz and therefore FILLS the window it is
+    being normalized against. Cycles keep both properties at once.
+
+    THE OTHER FAILURE MODE TO WATCH is the scale of that spread. z divides by
+    it, which has two consequences worth stating plainly:
+      - A NOISIER measurement gets a LARGER MAD, hence smaller z, hence a MORE
+        PERMISSIVE gate. That is backwards from a safety standpoint, and it is
+        why WARN routes to a cross-check rather than to a decision.
+      - An ALMOST-NOISELESS trace (a heavily smoothed export -- 1/3-octave
+        smoothing applied in REW before exporting is the usual culprit -- or
+        synthetic data) collapses the MAD toward zero and makes EVERYTHING
+        score hot: a perfectly noiseless minimum-phase fixture reached S=8776
+        before this was floored. `mad_floor_cycles` (1e-4 cycles = 0.036
+        degrees of excess phase, far under anything a real in-cabin sweep
+        resolves) stops that from producing confident nonsense, and
+        `mad_floored` reports when it bound so the caller can say plainly that
+        the data is too smooth to support a phase verdict. Feed this
+        UNSMOOTHED exports.
+
+    TWO DELIBERATE DIVERGENCES from the upstream implementation, both because
+    this module derives excess phase cepstrally rather than reading REW's
+    native "excess phase version":
+      - Upstream interpolates excess phase as a unit PHASOR, smooths real and
+        imaginary parts, then re-unwraps. That is the right move for a possibly
+        wrapped input. Here `ex` is unwrapped by construction (an unwrapped
+        measured phase minus a continuous cepstral minimum phase) and CARRIES
+        THE BULK TIME-OF-FLIGHT RAMP, which spans many turns. Round-tripping
+        that through a phasor would attenuate the ramp toward zero during
+        smoothing. Smoothing the unwrapped radians directly has no wrap to
+        worry about, and the ramp survives as a CONSTANT group-delay offset
+        that the rolling-median baseline removes by construction anyway.
+      - The grid is clamped to the measured axis rather than a fixed 20 kHz
+        ceiling, so this never reads extrapolated data (same discipline as
+        minphase_from_mag's Nyquist check).
+    """
+    freqs = np.asarray(freqs, dtype=float)
+    lo_t, hi_t = float(trust_band[0]), float(trust_band[1])
+    if hi_t <= lo_t:
+        raise ValueError('trust_band must be (lo, hi) with hi > lo, got %r' % (trust_band,))
+    f_lo, f_hi = float(np.min(freqs)), float(np.max(freqs))
+    lo = max(f_lo, lo_t * 0.5)
+    hi = min(f_hi, hi_t * 2.0)
+    if hi <= lo:
+        raise ValueError(
+            'trust_band %r does not overlap the measured axis %.1f-%.1f Hz'
+            % (trust_band, f_lo, f_hi))
+    n = max(16, int(round(np.log2(hi / lo) * ppo)))
+    g = np.geomspace(lo, hi, n)
+
+    if measurement_fs is None:
+        measurement_fs = max(48000.0, 2.2 * f_hi)
+    ex = (np.unwrap(np.deg2rad(np.asarray(phase_deg, dtype=float)))
+          - minphase_from_mag(freqs, np.asarray(spl_db, dtype=float),
+                              n_fft=n_fft, fs=measurement_fs))
+    sigma = ppo / smooth_frac / 2.355                  # FWHM 1/smooth_frac oct
+    phi = _gauss_smooth(np.interp(g, freqs, ex), sigma)
+    gd_ms = -np.gradient(phi, g) / (2 * np.pi) * 1000.0
+
+    half = int(base_half_oct * ppo)
+    dev = gd_ms - _rolling_median(gd_ms, half)
+    m = (g >= lo_t) & (g <= hi_t)
+    if not np.any(m):
+        m = np.ones_like(g, dtype=bool)
+    # Normalize in CYCLES of excess phase, not seconds of excess group delay.
+    # This is the fix for the 1/f noise tilt described above, and it is a
+    # change of UNITS rather than of window, so it keeps the global MAD (and
+    # with it, immunity to the self-masking a rolling window suffers on comb
+    # structure -- see the docstring).
+    dev_cyc = dev * 1e-3 * g
+    mad_raw = float(np.median(np.abs(dev_cyc[m] - np.median(dev_cyc[m]))))
+    mad = max(mad_raw, float(mad_floor_cycles))
+    z = dev_cyc / mad
+    s = np.sqrt(_gauss_smooth(z ** 2, sigma))
+
+    mag = np.interp(g, freqs, np.asarray(spl_db, dtype=float))
+    dip = _rolling_median(mag, int(dip_half_oct * ppo)) - mag
+    return {'g': g, 'gd_ms': gd_ms, 'dev_ms': dev, 'dev_cycles': dev_cyc,
+            'z': z, 's': s, 'dip_db': dip, 'mag_db': mag, 'trust_mask': m,
+            'mad_cycles': mad_raw,
+            'mad_floored': bool(mad_raw < mad_floor_cycles)}
+
+
+def s_at(fields, f0):
+    """The phase-anomaly statistic S at one frequency -- the ALWAYS-comparable
+    value. Use this, never boost_gate_verdict()'s `metric`, whenever you
+    compare or aggregate across candidates: `metric` is an S-family value on
+    every branch today, but it means "max S where the gate is hot" on
+    WARN/BLOCK and "max S*w anywhere" on ALLOW. Mixing those in one average is
+    how upstream manufactured a false 'the criterion inverts on deep dips'
+    result."""
+    i = int(np.argmin(np.abs(fields['g'] - float(f0))))
+    return float(fields['s'][i])
+
+
+def boost_gate_verdict(fields, f0, Q, z_warn=7.0, z_block=11.0, dip_db=4.0):
+    """Should this PEQ BOOST at (f0, Q) be allowed on phase grounds?
+
+    Returns dict:
+      verdict  -- 'ALLOW' | 'WARN' | 'BLOCK'
+      metric   -- the S value behind the verdict (see s_at for the comparability trap)
+      at_hz    -- where the objection peaks (None on ALLOW)
+      dip_db   -- local dip depth there (None on ALLOW)
+      low_confidence -- True when the fields' MAD hit its floor (over-smoothed
+                  data); the verdict is then not trustworthy in either direction
+      note     -- one line fit for a proposal table
+
+    MEASURED OPERATING CHARACTERISTICS. The thresholds are NOT upstream's --
+    changing the normalizer's units moved the statistic, so they were
+    re-derived here on 216 synthetic reflection combs (tau 0.8/1.5/2.5 ms,
+    notches 3/5/7, three realistic measurement-noise levels, minimum-phase
+    |r|<1 vs non-minimum-phase |r|>1 at MATCHED magnitude -- ground truth on
+    which any depth-only rule is at chance). At the shipped z_warn=7/z_block=11:
+
+      trust band          false BLOCK   BLOCK caught   WARN-or-worse caught
+      per-driver 200-6k       1.4 %         15 %              34 %
+      full-range (inset)      4.2 %         50 %              50 %
+
+    Read that honestly: this is a SPECIFIC detector, not a sensitive one. It
+    misses most cancellations. What it buys is that when it does object, the
+    objection is usually real -- which is the only property that justifies
+    putting a verdict in front of the user at all. WARN sits low and BLOCK
+    high on purpose: a WARN costs a mic-shift cross-check, a BLOCK obstructs a
+    correction that may be legitimate.
+
+    ALLOW IS NOT A CERTIFICATE -- it is the majority verdict on real
+    cancellations too. It means only "no phase objection found". The other
+    restraint rules (interference_audit, reaches_target_after_boost,
+    inert_band_check, the headroom budget) still all have to pass, and they
+    are what actually carry the decision.
+
+    CALIBRATION IS PROVISIONAL. The numbers above are from synthetic combs on
+    this extraction path; a real cabin is not a two-path reflection. Treat WARN
+    and BLOCK as advice to the user and to the per-edit confirmation step, not
+    as a silent veto -- this skill confirms every edit individually anyway, so
+    the verdict belongs in the proposal table where the user can see it and
+    overrule it.
+
+    WARN routes to a cross-check rather than a decision: shift the mic ~10 cm
+    and re-measure. A real cancellation notch moves or fills; a driver/cabin
+    shape deficit stays put.
+    """
+    g, s, dip = fields['g'], fields['s'], fields['dip_db']
+    weak = bool(fields.get('mad_floored', False))
+    smooth_note = (' -- NOTE: the trace is too smooth for this test (MAD hit '
+                   'its floor); re-export without smoothing' if weak else '')
+    w = np.abs(peaking_db(g, float(f0), float(Q), 3.0))
+    w = w / max(float(w.max()), 1e-12)
+    hot = (s >= z_warn) & (dip >= dip_db) & (w >= 0.5)
+    if not np.any(hot):
+        return {'verdict': 'ALLOW', 'metric': round(float(np.max(s * w)), 2),
+                'at_hz': None, 'dip_db': None, 'low_confidence': weak,
+                'note': 'no phase objection (not a certificate -- other checks '
+                        'still apply)' + smooth_note}
+    i = int(np.argmax(np.where(hot, s, -np.inf)))
+    metric = float(s[i])
+    verdict = 'BLOCK' if metric >= z_block else 'WARN'
+    return {'verdict': verdict, 'metric': round(metric, 2),
+            'at_hz': round(float(g[i]), 1), 'dip_db': round(float(dip[i]), 2),
+            'low_confidence': weak,
+            'note': ('%.1f dB dip at %.0f Hz is phase-anomalous (S=%.1f) -- '
+                     'boosting it wastes headroom; %s'
+                     % (dip[i], g[i], metric,
+                        'do not boost' if verdict == 'BLOCK'
+                        else 'cross-check with a ~10 cm mic shift before boosting')
+                     + smooth_note)}
+
+
+def gate_boost_bands(fields, bands, z_warn=7.0, z_block=11.0, dip_db=4.0,
+                     min_boost_db=0.25):
+    """Run boost_gate_verdict over a proposed [(F, Q, G), ...] cascade.
+
+    Cuts (and negligible gains) are passed through untouched with verdict
+    'N/A' -- this gate is about boosts only. Returns (rows, summary) where
+    summary counts each verdict, so a caller can decide whether the plan needs
+    a re-measure before it goes anywhere near pipeline.py plan."""
+    rows, counts = [], {'ALLOW': 0, 'WARN': 0, 'BLOCK': 0, 'N/A': 0}
+    for F, Q, G in bands:
+        if float(G) <= min_boost_db:
+            row = {'f_hz': float(F), 'q': float(Q), 'gain_db': float(G),
+                   'verdict': 'N/A', 'metric': None, 'at_hz': None,
+                   'dip_db': None, 'low_confidence': False,
+                   'note': 'cut -- boost gate does not apply'}
+        else:
+            row = dict(boost_gate_verdict(fields, F, Q, z_warn, z_block, dip_db))
+            row.update({'f_hz': float(F), 'q': float(Q), 'gain_db': float(G)})
+        counts[row['verdict']] += 1
+        rows.append(row)
+    return rows, {'counts': counts,
+                  'worst': ('BLOCK' if counts['BLOCK'] else
+                            'WARN' if counts['WARN'] else
+                            'ALLOW' if counts['ALLOW'] else 'N/A'),
+                  'low_confidence': bool(fields.get('mad_floored', False))}
+
+# --------------------------------------------------------------------------
 # 2) AUDIBILITY-WEIGHTED SCORE (ERB smoothing + sensitivity weighting)
 def erb_hz(fc):
     return 24.7 * (4.37 * fc / 1000.0 + 1.0)
@@ -2368,6 +2668,90 @@ if __name__ == '__main__':
               (nm, mask[i_pk], 'stays eqable (exp)' if expect_nt else
                ('flagged un-EQ-able (exp)' if nt_ok else 'NOT flagged (FAIL)')))
         assert mask[i_pk] and nt_ok, 'excess-GD classifier failed on ' + nm
+
+    # ---- TEST 1b: excess-phase BOOST GATE ----------------------------------
+    # Ground truth a depth-only rule cannot get right: two reflection combs
+    # with near-identical MAGNITUDE, one minimum-phase (reflection weaker than
+    # direct) and one not (reflection dominant). Built as impulse responses so
+    # magnitude and phase are mutually consistent, the way a real export is --
+    # pairing an analytic phase with a sampled magnitude manufactures an
+    # excess-phase residual that is an artifact of the test, not of the method.
+    print('TEST1b excess-phase boost gate:')
+    _fs_ir, _tau = 48000.0, 1.5e-3
+    _rng = np.random.default_rng(11)
+    _notch = 1.0 / (2 * _tau)                      # 333.3 Hz; odd multiples null
+
+    def _comb_fields(r, n=2 ** 16):
+        ir = np.zeros(n)
+        ir[0], ir[int(round(_tau * _fs_ir))] = 1.0, r
+        lin_f = np.fft.rfftfreq(n, 1.0 / _fs_ir)
+        H = np.fft.rfft(ir)
+        spl = np.interp(freqs, lin_f, 20 * np.log10(np.abs(H) + 1e-12))
+        ph = np.rad2deg(np.interp(freqs, lin_f, np.unwrap(np.angle(H))))
+        # ORDINARY measurement noise. A noiseless trace is the degenerate case
+        # here, not the easy one -- it collapses the MAD normalizer. See
+        # excess_phase_fields' docstring.
+        return excess_phase_fields(freqs, spl + _rng.normal(0, 0.05, len(freqs)),
+                                   ph + _rng.normal(0, 0.2, len(freqs)),
+                                   trust_band=(200, 6000))
+
+    _f_min, _f_non = _comb_fields(0.95), _comb_fields(1.05)
+    _v_min = boost_gate_verdict(_f_min, 5 * _notch, 5.0)
+    _v_non = boost_gate_verdict(_f_non, 5 * _notch, 5.0)
+    _v_between = boost_gate_verdict(_f_non, 6 * _notch, 8.0)
+    print('  min-phase comb  r=0.95 @notch -> %-5s (S %.2f)'
+          % (_v_min['verdict'], s_at(_f_min, 5 * _notch)))
+    print('  dominant refl   r=1.05 @notch -> %-5s (S %.2f @ %s Hz)'
+          % (_v_non['verdict'], s_at(_f_non, 5 * _notch), _v_non['at_hz']))
+    print('  same trace, between notches   -> %-5s (S %.2f)'
+          % (_v_between['verdict'], s_at(_f_non, 6 * _notch)))
+    # The property under test is DISCRIMINATION at matched magnitude, not a
+    # particular verdict: both combs have the same notch depth, so a depth-only
+    # rule scores exactly chance here. At the shipped z_warn=7/z_block=11 a
+    # single mid-band case lands on WARN rather than BLOCK -- the gate is
+    # deliberately specific rather than sensitive (see boost_gate_verdict's
+    # measured characteristics), so assert the objection, not its grade.
+    assert _v_non['verdict'] in ('WARN', 'BLOCK'), \
+        'non-minimum-phase notch drew no objection: %r' % (_v_non,)
+    assert _v_min['verdict'] == 'ALLOW', \
+        'minimum-phase comb (genuinely fillable) was gated: %r' % (_v_min,)
+    assert s_at(_f_non, 5 * _notch) > 2 * s_at(_f_min, 5 * _notch), \
+        'statistic does not separate the two at matched magnitude: non %.2f vs min %.2f' \
+        % (s_at(_f_non, 5 * _notch), s_at(_f_min, 5 * _notch))
+    assert _v_between['verdict'] == 'ALLOW', \
+        'flat region between notches gated: %r' % (_v_between,)
+
+    # DEPTH-GUARD REGRESSION LOCK. A DEEP but genuinely minimum-phase notch:
+    # the magnitude carries a -12 dB dip and the phase IS that magnitude's
+    # minimum phase, so the excess phase is ~zero by construction and S sits at
+    # the floor. The conjunction must ALLOW it. Upstream measured a depth-based
+    # abstention rule demoting a 90/90 ground-truth score to 54/90 by
+    # overriding correct ALLOWs exactly here -- depth alone must never block.
+    _deep_mag = peaking_db(freqs, 1500.0, 6.0, -12.0)
+    _deep_f = excess_phase_fields(freqs, _deep_mag,
+                                  np.rad2deg(minphase_from_mag(freqs, _deep_mag)),
+                                  trust_band=(200, 6000))
+    _i_deep = int(np.argmin(np.abs(_deep_f['g'] - 1500.0)))
+    _v_deep = boost_gate_verdict(_deep_f, 1500.0, 6.0)
+    print('  deep MIN-phase dip (%.1f dB, S %.2f) -> %s'
+          % (_deep_f['dip_db'][_i_deep], s_at(_deep_f, 1500.0), _v_deep['verdict']))
+    assert _deep_f['dip_db'][_i_deep] >= 4.0, \
+        'deep-dip fixture is not actually deep (%.2f dB) -- test proves nothing' \
+        % _deep_f['dip_db'][_i_deep]
+    assert _v_deep['verdict'] == 'ALLOW', \
+        'DEPTH-GUARD REGRESSION: a deep minimum-phase dip was gated (%r). ' \
+        'Any new guard must be conditioned on S, never on depth alone.' % (_v_deep,)
+    # ...and that fixture is noiseless, so it must also self-report as such
+    assert _v_deep['low_confidence'] is True, \
+        'noiseless fixture did not trip the MAD floor flag: %r' % (_v_deep,)
+
+    # cuts bypass the gate; the summary reports the worst verdict present
+    _rows, _summary = gate_boost_bands(
+        _f_non, [(5 * _notch, 5.0, +3.0), (5 * _notch, 5.0, -3.0), (900.0, 1.0, +2.0)])
+    assert _rows[0]['verdict'] in ('WARN', 'BLOCK'), _rows
+    assert _rows[1]['verdict'] == 'N/A', 'a CUT must bypass the boost gate: %r' % _rows[1]
+    assert _summary['worst'] == _rows[0]['verdict'] and _summary['counts']['N/A'] == 1, _summary
+    print('  cascade gating: %s' % _summary['counts'])
 
     # ---- TEST 2: optimizer recovers a known correction ---------------------
     dev = peaking_db(freqs, 500.0, 2.0, 5.0) + peaking_db(freqs, 2000.0, 1.0, 4.0)

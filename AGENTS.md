@@ -54,6 +54,7 @@ Run these with the user's files; they are the deterministic layer.
   | `spatial_consistency`, `complex_vector_average` | multi-position averaging | §Multi-position variance |
   | `phase_linearity_residual` | single-position phase reliability | §Quantify single-position phase reliability |
   | `excess_gd_mask` | minimum-phase / EQ-ability classifier | §Minimum-phase |
+  | `excess_phase_fields` + `boost_gate_verdict` / `gate_boost_bands` | is a specific BOOST pushing gain into a cancellation? (ALLOW/WARN/BLOCK; specific, not sensitive — ALLOW proves nothing, and it needs UNSMOOTHED data) | §The boost gate |
   | `lr_match_report` | L/R image-stability diagnostic | §Imaging |
   | `predicted_vs_measured` | predict → re-measure loop (step 7) | §Verification & honesty |
   | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | §Two checks |
@@ -98,8 +99,13 @@ Run these with the user's files; they are the deterministic layer.
   <file> | --voice tilt=X bass=Y presence=Z air=W]` → one JSON report: tilt,
   threshold-flagged deviation regions (not raw per-bin arrays), plus
   `spatial_consistency`/`interference_audit`/`crossover_confidence`/gating
-  results for whichever inputs were given. Analysis writes nothing to a DSP
-  file. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
+  results for whichever inputs were given. When the measurement carries phase,
+  the report also includes `boost_gate` — a per-dip ALLOW/WARN/BLOCK phase
+  verdict for every `boost_needed` region, so a boost that would be pushing
+  gain into a cancellation is flagged before it reaches a plan (`--trust-band
+  LO HI` sets the driver's passband explicitly). Before quoting a verdict read
+  methodology.md §The boost gate, which covers why ALLOW is not a certificate.
+  Analysis writes nothing to a DSP file. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
   and review `references/tune_plan_schema.md`, then populate the plan's
   `source_sha256`, distinct not-yet-existing `output_path`, edits, and
   per-edit `confirmations`; finally run `pipeline.py apply`. Apply exclusively
@@ -285,6 +291,13 @@ For each region, decide the *type* of problem before proposing a fix
 Use the `interference_audit` (power-sum vs measured) to tell a real magnitude dip
 from destructive summation. Use `tune_scorecard` for every before/after comparison
 so the math is identical each time.
+
+Before proposing any **boost**, read its `boost_gate` verdict from the analyze
+report (or run `gate_boost_bands` on the candidate cascade). A `BLOCK` means the
+dip is phase-anomalous and the gain will be eaten — say so and don't propose it.
+A `WARN` means re-measure with the mic moved ~10 cm before deciding. An `ALLOW`
+means only that this particular check found no objection; it is not permission,
+and §Two checks, plus the interference audit, still have to pass.
 
 ### 3b. Voice the target — the most audible single decision
 
