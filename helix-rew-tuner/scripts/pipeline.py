@@ -640,6 +640,81 @@ def analyze(args):
     return report
 
 
+def source_audit(args):
+    """Is the signal ENTERING the DSP level-independent? (roadmap item 01)
+
+    Everything else in this skill assumes it is. Nothing else can check."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    traces, levels, notes = [], [], []
+    for spec in args.at:
+        path, _, lvl = spec.partition('=')
+        if not lvl:
+            raise ValueError('--at wants PATH=DB (the volume setting in dB '
+                             'relative to your reference), got %r' % spec)
+        f, s, _ph, _c = measure.load_text_export(path)
+        traces.append(measure.resample_log(f, s, freqs))
+        levels.append(float(lvl))
+
+    audit = tunelib.source_level_audit(freqs, traces, levels,
+                                       electrical=bool(args.electrical))
+    report = {'meta': {'traces': len(traces), 'commanded_db': levels,
+                       'capture': 'electrical' if args.electrical else 'acoustic'},
+              'verdict': audit['verdict'],
+              'attribution': audit['attribution'],
+              'steps': [], 'notes': list(audit['notes'])}
+    for step, spec in zip(audit['steps'], args.at):
+        row = {k: step[k] for k in
+               ('index', 'measured_db', 'tracking_error_db', 'max_shape_db', 'verdict')}
+        row['file'] = spec.split('=')[0]
+        row['shape_regions'] = _find_regions(freqs, step['shape_delta_db'],
+                                             args.shape_flag_db)
+        report['steps'].append(row)
+
+    ref = traces[audit['reference_index']]
+    report['bandwidth'] = tunelib.source_bandwidth_limits(freqs, ref)
+    if report['bandwidth']['low_hz']:
+        notes.append('source is already down 6 dB by %.0f Hz -- output EQ cannot '
+                     'recover what the source does not send'
+                     % report['bandwidth']['low_hz'])
+    report['notes'].extend(notes)
+    return report
+
+
+def imaging(args):
+    """Where does the image sit, as a function of frequency? (roadmap item 04)"""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    fl, sl, pl, _ = measure.load_text_export(args.solo_l)
+    fr, sr, pr, _ = measure.load_text_export(args.solo_r)
+    left_db = measure.resample_log(fl, sl, freqs)
+    right_db = measure.resample_log(fr, sr, freqs)
+
+    notes = []
+    lp = rp = None
+    if pl is not None and pr is not None:
+        lp = measure.resample_log(fl, np.rad2deg(np.unwrap(np.deg2rad(pl))), freqs)
+        rp = measure.resample_log(fr, np.rad2deg(np.unwrap(np.deg2rad(pr))), freqs)
+    else:
+        notes.append('no phase column in one or both solo exports -- the TIME cue '
+                     'is unavailable, so only level differences were used. Below '
+                     'about 1.5 kHz that is the WEAKER cue, and the low-frequency '
+                     'result should not be trusted')
+
+    rows = tunelib.band_itd_ild(freqs, left_db, right_db, lp, rp)
+    pull = tunelib.image_pull(rows)
+    if pull['verdict'] == 'smeared':
+        notes.append('image position disagrees across frequency -- one delay value '
+                     'cannot fix this; see methodology.md on the duplex region')
+    elif pull['verdict'] == 'pulled':
+        notes.append('image sits consistently off-centre -- this IS the case a '
+                     'delay or level trim addresses')
+    return {'meta': {'solo_l': args.solo_l, 'solo_r': args.solo_r,
+                     'phase_available': lp is not None,
+                     'convention': 'positive = image pulls LEFT'},
+            'verdict': pull['verdict'],
+            'spread': pull['spread'], 'mean_pull': pull['mean_pull'],
+            'bands': pull['bands'], 'notes': notes}
+
+
 def check_doc_refs(core_path=None, methodology_path=None):
     """Validate canonical workflow section names and methodology anchors.
 
@@ -790,6 +865,58 @@ def _selftest():
             pass
         print('pipeline selftest: unknown voice knob correctly raises')
 
+        # ---- source-audit wiring: a head unit with a loudness contour -------
+        base = 80.0 + tunelib.peaking_db(freqs, 900.0, 1.2, -3.0)
+        cmd_levels = [0.0, -6.0, -12.0]
+        contour_paths = []
+        for c in cmd_levels:
+            trace = base + c + (abs(c) / 12.0) * tunelib.low_shelf_db(freqs, 120.0, 0.7, 6.0)
+            contour_paths.append('%s=%g' % (save('src_%g.txt' % abs(c), freqs, trace,
+                                                 np.zeros_like(freqs)), c))
+        sa = source_audit(argparse.Namespace(at=contour_paths, electrical=False,
+                                             shape_flag_db=1.0, out=None))
+        assert sa['verdict'] == 'level_dependent_shape', sa
+        assert sa['attribution'] == 'source_or_driver_compression', sa
+        worst = max(sa['steps'], key=lambda s: s['max_shape_db'])
+        assert any(r['peak_hz'] < 300.0 for r in worst['shape_regions']), \
+            'the bass contour should be localised in the bass: %r' % worst['shape_regions']
+        assert any('CANNOT ATTRIBUTE' in n for n in sa['notes']), sa['notes']
+        print('pipeline selftest: source-audit catches a loudness contour and '
+              'refuses to attribute it from an acoustic capture')
+
+        # a clean source must come back clean, with no invented findings
+        clean_paths = ['%s=%g' % (save('clean_%g.txt' % abs(c), freqs, base + c,
+                                       np.zeros_like(freqs)), c) for c in cmd_levels]
+        sc = source_audit(argparse.Namespace(at=clean_paths, electrical=True,
+                                            shape_flag_db=1.0, out=None))
+        assert sc['verdict'] == 'clean', sc
+        print('pipeline selftest: source-audit reports a clean source as clean')
+
+        # ---- imaging wiring: opposing cues across the duplex region ---------
+        lead_s = 300e-6
+        l_db = 80.0 * np.ones_like(freqs)
+        r_db = 80.0 + tunelib.high_shelf_db(freqs, 2000.0, 0.7, 6.0)
+        l_ph = np.zeros_like(freqs)
+        r_ph = np.rad2deg(2 * np.pi * freqs * lead_s)
+        im = imaging(argparse.Namespace(
+            solo_l=save('img_l.txt', freqs, l_db, l_ph),
+            solo_r=save('img_r.txt', freqs, r_db, r_ph), out=None))
+        assert im['meta']['phase_available'], im['meta']
+        assert im['verdict'] == 'smeared', im
+        lo_band = [b for b in im['bands'] if b['f_hi'] <= 400][0]
+        hi_band = [b for b in im['bands'] if b['f_lo'] >= 5000][0]
+        assert lo_band['side'] == 'left' and hi_band['side'] == 'right', (lo_band, hi_band)
+        print('pipeline selftest: imaging reports left-at-LF / right-at-HF from '
+              'opposing time and level cues (spread %.2f)' % im['spread'])
+
+        # without phase the time cue must be withdrawn, not guessed
+        im2 = imaging(argparse.Namespace(
+            solo_l=save('img_l2.txt', freqs, l_db),
+            solo_r=save('img_r2.txt', freqs, r_db), out=None))
+        assert not im2['meta']['phase_available']
+        assert any('TIME cue is unavailable' in n for n in im2['notes']), im2['notes']
+        print('pipeline selftest: imaging withdraws the time cue when phase is absent')
+
     doc_problems = check_doc_refs()
     assert not doc_problems, 'stale doc cross-references:\n  ' + '\n  '.join(doc_problems)
     print('pipeline selftest: core_workflow.md section refs and anchors resolve OK')
@@ -828,6 +955,24 @@ def main():
     an.add_argument('--dev-flag-db', type=float, default=2.0)
     an.add_argument('--out')
 
+    sa = sub.add_parser('source-audit',
+                        help='is the signal entering the DSP level-independent?')
+    sa.add_argument('--at', nargs='+', required=True, metavar='PATH=DB',
+                    help='the same sweep at several SOURCE volumes, e.g. '
+                         'ref.txt=0 down6.txt=-6 down12.txt=-12')
+    sa.add_argument('--electrical', action='store_true',
+                    help='captured at the DSP input, not acoustically -- only '
+                         'then can a finding be attributed to the source rather '
+                         'than to driver compression')
+    sa.add_argument('--shape-flag-db', type=float, default=1.0)
+    sa.add_argument('--out')
+
+    im = sub.add_parser('imaging',
+                        help='predicted image position vs frequency from solo L/R')
+    im.add_argument('--solo-l', required=True)
+    im.add_argument('--solo-r', required=True)
+    im.add_argument('--out')
+
     args = ap.parse_args()
     if args.cmd == 'selftest':
         _selftest()
@@ -842,8 +987,9 @@ def main():
             print(text)
     elif args.cmd == 'apply':
         print(json.dumps(apply_plan(args.plan), indent=2))
-    elif args.cmd == 'analyze':
-        report = analyze(args)
+    elif args.cmd in ('analyze', 'source-audit', 'imaging'):
+        report = {'analyze': analyze, 'source-audit': source_audit,
+                  'imaging': imaging}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
             open(args.out, 'w').write(text)

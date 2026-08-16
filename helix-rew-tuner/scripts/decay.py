@@ -243,6 +243,124 @@ def csd(ir, fs, bands=DEFAULT_BANDS, slices_ms=(0, 2, 5, 10, 20, 40, 80), frac=1
     return rows
 
 
+# ------------------------------------------------- reflections (energy-time)
+# WHY: a frequency response says a dip exists. It cannot say WHY. A dip caused
+# by a reflection arriving 1.4 ms after the direct sound is not an EQ problem
+# -- filling it wastes headroom and the null moves the moment the mic does.
+# The impulse response holds the answer directly: find the secondary arrivals,
+# convert each delay to a path-length difference, and predict the comb it must
+# produce. If that predicted comb lines up with the measured dips, the cause is
+# established rather than guessed.
+#
+# The same refusal discipline as the rest of this module applies: an arrival
+# below the noise floor is not reported, and no surface is ever named -- this
+# returns a path-length difference, which is geometry. Which panel sits at that
+# distance is the user's call, not the maths'.
+
+SPEED_OF_SOUND_M_S = 343.0
+
+
+def _envelope(ir, fs, smooth_ms=0.05):
+    """Energy-time envelope: |analytic|-ish via a short RMS window, in dB."""
+    w = max(3, int(round(smooth_ms * 1e-3 * fs)) | 1)
+    e = np.convolve(ir.astype(float) ** 2, np.ones(w) / w, mode='same')
+    return 10 * np.log10(np.maximum(e, 1e-30))
+
+
+def reflections(ir, fs, window_ms=12.0, min_delay_ms=0.15, floor_margin_db=6.0,
+                rel_threshold_db=-25.0, max_count=8, smooth_ms=0.05):
+    """Secondary arrivals after the direct sound.
+
+    window_ms        -- how far past the direct arrival to look.
+    min_delay_ms     -- ignore anything closer than this to the direct peak
+                        (it is the direct arrival's own envelope, not a
+                        separate event).
+    rel_threshold_db -- ignore arrivals quieter than this relative to direct.
+    floor_margin_db  -- an arrival must clear the late noise floor by this
+                        much to be reported at all.
+
+    Returns dict with direct_index/direct_db, noise_floor_db, and `arrivals`:
+    per arrival -- delay_ms, level_db (relative to direct), path_diff_cm,
+    comb_null_hz (first cancellation, 1/(2*delay)), comb_spacing_hz (1/delay),
+    and null_depth_db, the depth the comb would produce given that level. A
+    -20 dB reflection cannot make a 15 dB hole; when a measured dip is far
+    deeper than the arrival can explain, the arrival is not the whole story."""
+    ir = np.asarray(ir, dtype=float)
+    env = _envelope(ir, fs, smooth_ms)
+    d = int(np.argmax(np.abs(ir)))
+    direct_db = float(env[d])
+
+    tail = env[int(d + 0.75 * len(env[d:])):] if len(env) - d > 40 else env[-10:]
+    floor_db = float(np.median(tail)) if len(tail) else -300.0
+
+    lo = d + max(1, int(round(min_delay_ms * 1e-3 * fs)))
+    hi = min(len(env), d + int(round(window_ms * 1e-3 * fs)))
+    arrivals = []
+    if hi > lo + 2:
+        seg = env[lo:hi]
+        # local maxima only -- a rising slope is not an arrival
+        peaks = [i for i in range(1, len(seg) - 1)
+                 if seg[i] >= seg[i - 1] and seg[i] > seg[i + 1]]
+        for i in sorted(peaks, key=lambda k: -seg[k]):
+            rel = float(seg[i] - direct_db)
+            if rel < rel_threshold_db:
+                continue
+            if seg[i] < floor_db + floor_margin_db:
+                continue
+            delay_ms = (lo + i - d) / fs * 1000.0
+            # keep arrivals separated by at least min_delay_ms
+            if any(abs(delay_ms - a['delay_ms']) < min_delay_ms for a in arrivals):
+                continue
+            amp = 10 ** (rel / 20.0)
+            arrivals.append({
+                'delay_ms': round(delay_ms, 3),
+                'level_db': round(rel, 1),
+                'path_diff_cm': round(delay_ms * 1e-3 * SPEED_OF_SOUND_M_S * 100.0, 1),
+                'comb_null_hz': round(1.0 / (2.0 * delay_ms * 1e-3), 1),
+                'comb_spacing_hz': round(1.0 / (delay_ms * 1e-3), 1),
+                'null_depth_db': round(float(20 * np.log10(max(abs(1.0 - amp), 1e-6))), 1),
+            })
+            if len(arrivals) >= max_count:
+                break
+    arrivals.sort(key=lambda a: a['delay_ms'])
+    return {'direct_index': d, 'direct_db': round(direct_db, 1),
+            'noise_floor_db': round(floor_db, 1),
+            'floor_margin_db': float(floor_margin_db),
+            'arrivals': arrivals}
+
+
+def comb_matches(arrivals, dip_freqs_hz, tol_frac=0.12):
+    """Do the measured dips line up with the comb an arrival must produce?
+
+    This is what turns a hypothesis into a diagnosis. For each arrival, the
+    first null sits at 1/(2t) and repeats every 1/t. A measured dip within
+    `tol_frac` of any predicted null is a match. Returns per-arrival matched /
+    unmatched dip lists -- an arrival that explains nothing measured is not
+    the cause of the problem you are looking at, however real the arrival is."""
+    out = []
+    for a in arrivals:
+        t = a['delay_ms'] * 1e-3
+        matched, best = [], {}
+        for f in dip_freqs_hz:
+            k = round((f * t - 0.5))
+            if k < 0:
+                continue
+            predicted = (k + 0.5) / t
+            if predicted <= 0:
+                continue
+            err = abs(f - predicted) / predicted
+            if err <= tol_frac:
+                matched.append({'dip_hz': round(float(f), 1),
+                                'predicted_hz': round(float(predicted), 1),
+                                'error_pct': round(err * 100.0, 1)})
+                best[f] = err
+        out.append({'delay_ms': a['delay_ms'], 'level_db': a['level_db'],
+                    'matched': matched,
+                    'match_count': len(matched),
+                    'explains': bool(matched)})
+    return out
+
+
 # ---------------------------------------------------------------- CLI
 def _load_any(path, fs_hint=48000.0):
     if path.lower().endswith('.wav'):
@@ -263,6 +381,15 @@ def _main():
     c.add_argument('a')
     c.add_argument('b')
     c.add_argument('--drop', type=float, default=20.0)
+    r = sub.add_parser('reflections')
+    r.add_argument('ir')
+    r.add_argument('--window-ms', type=float, default=12.0)
+    r.add_argument('--rel-db', type=float, default=-25.0,
+                   help='ignore arrivals quieter than this vs direct')
+    r.add_argument('--dips', type=float, nargs='+', metavar='HZ',
+                   help='measured dip frequencies, to test against the '
+                        'predicted comb -- this is what turns an arrival into '
+                        'a diagnosis')
     a = ap.parse_args()
 
     if a.cmd == 't20':
@@ -290,6 +417,43 @@ def _main():
             print('%6d %s   %s' % (r['hz'], cells,
                                    '--' if r['noise_floor_db'] is None else '%.1f' % r['noise_floor_db']))
         print("\n'--' = at or below this band's noise floor: no usable data there.")
+
+    elif a.cmd == 'reflections':
+        ir, fs = _load_any(a.ir)
+        rep = reflections(ir, fs, window_ms=a.window_ms, rel_threshold_db=a.rel_db)
+        print('direct arrival at sample %d | noise floor %.1f dB below peak'
+              % (rep['direct_index'], rep['noise_floor_db'] - rep['direct_db']))
+        if not rep['arrivals']:
+            print('\nNo secondary arrivals clear the noise floor in the first '
+                  '%.0f ms. Either the capture is clean or it lacks the dynamic '
+                  'range to show them.' % a.window_ms)
+            return
+        print('\n%9s %9s %11s %11s %11s  %s'
+              % ('delay', 'level', 'path diff', '1st null', 'spacing', 'max null depth'))
+        for r_ in rep['arrivals']:
+            print('%7.2f ms %7.1f dB %8.1f cm %8.0f Hz %8.0f Hz  %8.1f dB'
+                  % (r_['delay_ms'], r_['level_db'], r_['path_diff_cm'],
+                     r_['comb_null_hz'], r_['comb_spacing_hz'], r_['null_depth_db']))
+        print('\nPath difference is geometry, not a diagnosis -- match it against '
+              'what actually sits that far from the driver.')
+        if a.dips:
+            print('\nDo these arrivals explain the measured dips?')
+            for m in comb_matches(rep['arrivals'], a.dips):
+                if m['explains']:
+                    hits = ', '.join('%.0f Hz (predicted %.0f, %.0f%% off)'
+                                     % (h['dip_hz'], h['predicted_hz'], h['error_pct'])
+                                     for h in m['matched'])
+                    print('  %.2f ms @ %.1f dB  EXPLAINS %s' % (m['delay_ms'], m['level_db'], hits))
+                else:
+                    print('  %.2f ms @ %.1f dB  explains none of them'
+                          % (m['delay_ms'], m['level_db']))
+            unexplained = [f for f in a.dips
+                           if not any(any(abs(h['dip_hz'] - f) < 0.5 for h in m['matched'])
+                                      for m in comb_matches(rep['arrivals'], a.dips))]
+            if unexplained:
+                print('  UNEXPLAINED by any arrival: %s'
+                      % ', '.join('%.0f Hz' % f for f in unexplained)
+                      + ' -- look elsewhere (driver, cabin mode, summation).')
 
     elif a.cmd == 'compare':
         ia, fa = _load_any(a.a)
@@ -343,6 +507,42 @@ def _selftest():
     rn10 = decay_band(synth(100.0, TAU, noise_db=-40.0), fs, 100.0, drop=10.0)
     assert rn10['reliable'], rn10
     print('decay selftest: smaller --drop still usable on a noisier capture OK')
+
+    # ---- reflections: a KNOWN secondary arrival must be recovered ----------
+    # Direct impulse plus one reflection at a chosen delay and level. Ground
+    # truth is exact, so the recovered delay, path length and predicted comb
+    # can all be checked against arithmetic rather than eyeballed.
+    REFL_MS, REFL_DB = 1.40, -8.0
+    imp = np.zeros(n)
+    imp[480] = 1.0
+    imp[480 + int(round(REFL_MS * 1e-3 * fs))] = 10 ** (REFL_DB / 20.0)
+    imp += rng.normal(0, 10 ** (-70.0 / 20.0), n)
+    rep = reflections(imp, fs)
+    assert rep['arrivals'], 'no arrival found in a synthetic two-path IR'
+    a0 = rep['arrivals'][0]
+    assert abs(a0['delay_ms'] - REFL_MS) < 0.06, (a0, REFL_MS)
+    assert abs(a0['level_db'] - REFL_DB) < 2.5, (a0, REFL_DB)
+    expect_cm = REFL_MS * 1e-3 * SPEED_OF_SOUND_M_S * 100.0
+    assert abs(a0['path_diff_cm'] - expect_cm) < 3.0, (a0, expect_cm)
+    expect_null = 1.0 / (2.0 * REFL_MS * 1e-3)
+    assert abs(a0['comb_null_hz'] - expect_null) / expect_null < 0.06, (a0, expect_null)
+    print('decay selftest: recovers a %.2f ms / %.0f dB arrival -> %.1f cm, '
+          'first null %.0f Hz OK' % (REFL_MS, REFL_DB, a0['path_diff_cm'], a0['comb_null_hz']))
+
+    # the comb test must ACCEPT the null it predicts and REJECT an unrelated dip
+    m = comb_matches([a0], [expect_null, expect_null * 3.0, 137.0])
+    assert m[0]['match_count'] == 2, m
+    assert not any(abs(h['dip_hz'] - 137.0) < 1.0 for h in m[0]['matched']), m
+    print('decay selftest: comb prediction matches its own nulls, rejects an '
+          'unrelated 137 Hz dip OK')
+
+    # a clean single-path IR must report NOTHING rather than invent an arrival
+    clean = np.zeros(n)
+    clean[480] = 1.0
+    clean += rng.normal(0, 10 ** (-70.0 / 20.0), n)
+    assert not reflections(clean, fs)['arrivals'], \
+        'invented an arrival in a single-path IR'
+    print('decay selftest: reports no arrivals on a clean single-path IR OK')
 
     # faster decay must measure shorter than slower decay
     fast = decay_band(synth(100.0, 10.0), fs, 100.0, drop=20.0)

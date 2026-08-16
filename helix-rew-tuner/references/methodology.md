@@ -6,6 +6,7 @@ before correcting, and prefer doing less.**
 
 ## Contents
 
+- [Audit the source before correcting the system](#audit-the-source-before-correcting-the-system)
 - [Measurement method selection — sweep vs Moving Mic (MMM)](#measurement-method-selection-sweep-vs-moving-mic-mmm)
 - [Sweep capture setup](#sweep-capture-setup-before-you-have-data-to-analyze)
 - [Beyond magnitude — decay and distortion](#beyond-magnitude-the-decay-time-domain-and-distortion-axes)
@@ -24,6 +25,8 @@ before correcting, and prefer doing less.**
 - [The crossover action-ladder](#the-crossover-action-ladder-cheapest-safest-first)
 - [Shelf cookbook](#shelf-cookbook-broad-tonal-balance-only)
 - [All-pass cookbook](#all-pass-cookbook-phase-only-use-sparingly)
+- [Image position is frequency-dependent](#image-position-is-frequency-dependent-and-one-delay-cannot-fix-it)
+- [Reflections: find the cause first](#reflections-find-the-cause-before-reaching-for-a-filter)
 - [Imaging](#imaging)
 - [Restraint](#restraint-the-thing-that-beats-aggressive-auto-eq)
 - [Verification and honesty](#verification-honesty)
@@ -47,6 +50,39 @@ before correcting, and prefer doing less.**
 - [Retraction discipline](#retraction-discipline-a-disproven-claim-invalidates-what-was-built-on-it)
 - [Rear-fill / ambience measurement discipline](#rear-fill-ambience-channels-need-their-own-measurement-discipline)
 - [Stopping is a valid outcome](#stopping-is-a-valid-and-often-correct-outcome)
+
+## Audit the source before correcting the system
+
+Every other section here assumes the signal arriving at the DSP is a clean,
+level-independent copy of the recording. If it isn't — if the head unit applies
+a loudness contour, dynamic bass, or compression — then a tune corrected at one
+volume is **wrong at every other volume**, and nothing else in this skill can
+see it, because everything else measures at a single level.
+
+Capture the same sweep at three or more source volume settings and run
+`pipeline.py source-audit --at ref.txt=0 down6.txt=-6 down12.txt=-12`. Each
+trace is aligned to its own broadband level, so a pure volume change cancels
+exactly and only a change of **shape** survives. Verdicts:
+
+- **`clean`** — shape and level both track the control. Proceed normally.
+- **`level_dependent_shape`** — the response changes shape with volume. Decide
+  which volume the tune is *for* and say so, because it cannot be right at all
+  of them.
+- **`compression`** — measured level lags commanded level. Something in the
+  chain is limiting.
+
+**The confound, which matters more than the verdict.** An acoustic capture
+cannot separate source processing from driver compression. A loudness contour
+*adds* bass at low volume; a midbass running out of excursion *removes* bass at
+high volume — relative to each other those are the same measurement. The
+discriminator is where you capture, not what you compute: take the sweep
+electrically at the DSP input and the drivers leave the path. The audit refuses
+to name the source as the cause unless you pass `--electrical` to record that
+you did.
+
+Also check `bandwidth` in the report. A source already 6 dB down at 60 Hz sets
+a ceiling no output EQ can lift, and boosting into it just burns headroom
+against a wall.
 
 ## Measurement method selection — sweep vs Moving Mic (MMM)
 
@@ -1041,6 +1077,75 @@ when the defect is phase (a summation null), never a magnitude bump.
   zero interaural group delay by construction, since both branches get the same
   filter. This is different from a *split* configuration, which deliberately uses
   **different** F/Q per side and does carry real interaural GD risk (above).
+
+## Image position is frequency-dependent, and one delay cannot fix it
+
+The standard car-audio move is one delay per side, set from path length. That
+is a single number for a mechanism that is not single:
+
+- **Below ~1.5 kHz** the ear localizes by **interaural time difference**. Half a
+  wavelength still spans the head, so arrival-time difference is unambiguous and
+  dominant.
+- **Above ~1.5 kHz** the wavelength is shorter than the head, time cues become
+  ambiguous, and head shadowing makes **level difference** dominant.
+
+So an image can sit centred at 2 kHz and pull left at 250 Hz. That is audible,
+extremely common, and invisible to both magnitude-vs-target and L/R level
+matching — the two things a conventional tune actually checks.
+
+`pipeline.py imaging --solo-l L.txt --solo-r R.txt` reports it. ITD is **fitted,
+not differentiated**: the unwrapped phase difference is regressed against
+angular frequency per band and the slope taken as the arrival-time difference,
+which is far more robust than a pointwise group delay. Each band reports a
+`pull` from −1 (hard right) to +1 (hard left), with the dominant cue named.
+
+Read the **`verdict`** first:
+
+- **`stable`** — image holds position across frequency.
+- **`pulled`** — consistently off-centre. This *is* the case a delay or level
+  trim addresses; fix it the normal way.
+- **`smeared`** — bands disagree with each other. **No single delay value can
+  fix this**, and adding one will improve some bands while making others worse.
+  The causes worth checking are inter-driver alignment within a side, a
+  crossover region where the two drivers arrive at different times, and
+  reflections (below).
+
+Sign convention is positive = pulls left, throughout.
+
+Two honest limits. This is not a calibrated localization model — real
+localization uses the listener's own head, pinnae and small head movements, none
+of which a microphone at the seat has; read it as an ordering, not degrees of
+arc. And an ITD whose phase-difference regression fits poorly is **discarded
+rather than blended**, because a phase difference that isn't behaving like a
+delay is not an arrival-time cue. When phase is missing entirely the time cue is
+withdrawn and the low-frequency result should not be trusted.
+
+## Reflections: find the cause before reaching for a filter
+
+A frequency response says a dip exists. It cannot say why. The impulse response
+can: `decay.py reflections ir.wav` lists secondary arrivals with their delay,
+level, and the **path-length difference** that delay implies.
+
+The step that turns a hypothesis into a diagnosis is the comb prediction. A
+reflection at delay *t* must produce its first cancellation at 1/(2*t*) and
+repeat every 1/*t*. Pass the measured dip frequencies with `--dips 340 1020
+1700` and each arrival is tested against them. An arrival that explains nothing
+measured is not the cause of the problem in front of you, however real it is —
+and a dip explained by no arrival needs a different explanation entirely
+(driver, cabin mode, or summation between drivers).
+
+Two disciplines carried over from the rest of `decay.py`:
+
+- **Path difference is geometry, not a diagnosis.** The tool reports centimetres.
+  Which panel sits at that distance is your call, and naming a surface from
+  arithmetic alone would be a guess wearing a number.
+- **`null_depth_db` bounds what the arrival can explain.** A −20 dB reflection
+  cannot produce a 15 dB hole. When a measured dip is far deeper than the
+  arrival allows, the arrival is at most part of the story.
+
+The payoff is mostly negative, in the best sense: a reflection is not an EQ
+problem, so identifying one stops a filter being spent where no filter can work
+and points at aiming, absorption or an enclosure change instead.
 
 ## Imaging
 

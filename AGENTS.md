@@ -56,6 +56,8 @@ Run these with the user's files; they are the deterministic layer.
   | `excess_gd_mask` | minimum-phase / EQ-ability classifier | §Minimum-phase |
   | `excess_phase_fields` + `boost_gate_verdict` / `gate_boost_bands` | is a specific BOOST pushing gain into a cancellation? (ALLOW/WARN/BLOCK; specific, not sensitive — ALLOW proves nothing, and it needs UNSMOOTHED data) | §The boost gate |
   | `lr_match_report` | L/R image-stability diagnostic | §Imaging |
+  | `source_level_audit`, `source_bandwidth_limits` | is the signal ENTERING the DSP level-independent? (cannot attribute to the source from an acoustic capture — see the docstring) | §Audit the source |
+  | `band_itd_ild`, `image_pull` | where the image sits vs FREQUENCY; `smeared` means no single delay fixes it | §Image position is frequency-dependent |
   | `predicted_vs_measured` | predict → re-measure loop (step 7) | §Verification & honesty |
   | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | §Two checks |
   | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | §Sweep capture setup |
@@ -105,7 +107,14 @@ Run these with the user's files; they are the deterministic layer.
   gain into a cancellation is flagged before it reaches a plan (`--trust-band
   LO HI` sets the driver's passband explicitly). Before quoting a verdict read
   methodology.md §The boost gate, which covers why ALLOW is not a certificate.
-  Analysis writes nothing to a DSP file. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
+  Analysis writes nothing to a DSP file.
+  Two further read-only commands share the same loader and conventions:
+  `pipeline.py source-audit --at ref.txt=0 down6.txt=-6 ...` asks whether the
+  signal ENTERING the DSP is level-independent (read §Audit the source, first —
+  and note it will not attribute a finding to the source without `--electrical`),
+  and `pipeline.py imaging --solo-l L.txt --solo-r R.txt` reports where the image
+  sits as a function of frequency — see §Image position is frequency-dependent,
+  for how to read a `smeared` verdict. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
   and review `references/tune_plan_schema.md`, then populate the plan's
   `source_sha256`, distinct not-yet-existing `output_path`, edits, and
   per-edit `confirmations`; finally run `pipeline.py apply`. Apply exclusively
@@ -114,6 +123,12 @@ Run these with the user's files; they are the deterministic layer.
   before a fresh plan may contain EQ-domain edits (T=17 PEQ or T=3/4 shelves).
   `python pipeline.py selftest` self-tests analysis and documentation routing on
   synthetic fixtures.
+- **`decay.py reflections <ir.wav>`** — secondary arrivals from the impulse
+  response: delay, level, path-length difference, and the comb each one must
+  produce. `--dips 340 1020 ...` tests those predictions against the dips you
+  actually measured, which is what turns an arrival into a diagnosis. A
+  reflection is not an EQ problem — read §Reflections, before spending a filter
+  on a dip you haven't explained.
 - **`decay.py`** — waterfall/CSD decay analysis on an impulse-response `.wav`
   (REW "Export IR" or similar), for when a problem is ringing/decay-shaped
   rather than magnitude-shaped (see §Beyond magnitude, methodology.md).
@@ -276,6 +291,24 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   solo model must reproduce the measured sum, or the complex data is misaligned and
   phase decisions must be blocked (re-measure).
 
+### 2b. Audit the source — before correcting anything downstream
+
+Steps 3 onward all assume the signal reaching the DSP is a clean,
+level-independent copy of the recording. If the head unit applies a loudness
+contour, dynamic bass, or compression, that assumption is false and a tune
+corrected at one volume is wrong at every other — and no single-level
+measurement can reveal it.
+
+Ask whether the user can capture the same sweep at three or more source volume
+settings. If they can, run `pipeline.py source-audit` and read §Audit the
+source, before interpreting the result. If they can't, say plainly that the
+source is unverified and that every later conclusion inherits that assumption —
+don't silently proceed as though it were checked.
+
+A `level_dependent_shape` verdict is not a blocker. It changes the job: decide
+with the user which volume the tune is *for*, state that choice, and tune
+there. What is not acceptable is discovering it afterwards.
+
 ### 3. Analyze — classify, don't just subtract
 
 For each region, decide the *type* of problem before proposing a fix
@@ -291,6 +324,14 @@ For each region, decide the *type* of problem before proposing a fix
 Use the `interference_audit` (power-sum vs measured) to tell a real magnitude dip
 from destructive summation. Use `tune_scorecard` for every before/after comparison
 so the math is identical each time.
+
+If the user reports an imaging problem — vocals off-centre, a stage that won't
+hold still, an instrument that moves as it changes pitch — run `pipeline.py
+imaging` before proposing a delay. A `smeared` verdict means the bands disagree
+and **no single delay value can fix it**; proposing one anyway improves some
+bands and worsens others. Read §Image position is frequency-dependent, for what
+to do instead. And when a dip has no explanation yet, an impulse response and
+`decay.py reflections` will often supply one — §Reflections, covers reading it.
 
 Before proposing any **boost**, read its `boost_gate` verdict from the analyze
 report (or run `gate_boost_bands` on the candidate cascade). A `BLOCK` means the

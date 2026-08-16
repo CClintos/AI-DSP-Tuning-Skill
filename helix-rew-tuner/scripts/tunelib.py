@@ -1717,8 +1717,23 @@ def perceptual_score(freqs, dev_db, left_db=None, right_db=None, band=(60.0, 160
             'stereo': round(float(stereo), 4)}
 
 def octave_smooth_log(freqs, y, oct_frac):
+    """Fractional-octave boxcar smoothing on a log-spaced axis.
+
+    EDGE-EXTENDED, not zero-padded. `np.convolve(..., 'same')` treats everything
+    outside the array as zero, which is harmless on a zero-mean curve (a
+    deviation) and destructive on an absolute one: a flat 80 dB trace came back
+    reading 40 dB at its first bin, purely from averaging in samples that do not
+    exist. That silently understated the ends of any absolute magnitude curve
+    passed through here -- the trust-band derivation and the bandwidth check
+    both do exactly that. Repeating the end value instead is the standard
+    treatment and is correct in both cases."""
+    y = np.asarray(y, dtype=float)
     w = max(1, int(round((1.0 / np.log10(LOGSTEP)) * np.log10(2 ** oct_frac))))
-    return np.convolve(y, np.ones(w) / w, mode='same')
+    if w <= 1:
+        return y.copy()
+    pad = w // 2
+    return np.convolve(np.pad(y, pad, mode='edge'),
+                       np.ones(w) / w, mode='same')[pad:pad + len(y)]
 
 
 # --------------------------------------------------------------------------
@@ -2634,6 +2649,298 @@ def reaches_target_after_boost(current_db, target_db, proposed_boost_db, max_boo
             'likely_phase_problem': bool(short > 1.5 and applied >= max_boost_db - 0.25)}
 
 
+# --------------------------------------------------------------------------
+# SOURCE / OEM AUDIT -- is the signal ENTERING the DSP already being processed?
+#
+# Every other function in this module assumes the input is a clean, level-
+# independent copy of the recording. If the head unit applies a loudness
+# contour, dynamic bass, or compression, that assumption is false and every
+# correction downstream is right at exactly ONE volume and wrong at every
+# other. Nothing else in this skill can see that, because everything else
+# measures at a single level.
+#
+# The method is deliberately simple: capture the same sweep at several source
+# volumes, align each to its own broadband level, and look at whether the
+# SHAPE moved. Level-independent processing produces identical shapes.
+#
+# THE CONFOUND, STATED UP FRONT: an acoustic capture cannot by itself tell
+# source processing from driver compression. A loudness contour ADDS bass at
+# low volume; a midbass running out of excursion REMOVES bass at high volume.
+# Relative to each other those are the same measurement. The discriminator is
+# WHERE you capture, not what you compute -- take the sweep electrically at
+# the DSP input (line-out to interface, or a loopback) and the drivers are no
+# longer in the path. `electrical=True` records that you did, and only then
+# will this report name the source as the cause.
+
+def source_level_audit(freqs, traces_db, commanded_db=None, anchor_band=(300.0, 3000.0),
+                       shape_flag_db=1.0, tracking_flag_db=0.75, smooth_oct=1 / 3.0,
+                       electrical=False):
+    """Compare one sweep captured at several SOURCE volume settings.
+
+    freqs        -- shared frequency axis.
+    traces_db    -- list of magnitude arrays, one per volume setting.
+    commanded_db -- what each setting SHOULD have delivered, relative in dB
+                    (e.g. [0, -6, -12, -18]). Optional: without it the level
+                    tracking test is skipped and only the shape test runs,
+                    which is still the more diagnostic half.
+    electrical   -- True if these were captured at the DSP input rather than
+                    acoustically. Only then can a finding be attributed to the
+                    source; see the module note above on the confound.
+
+    The loudest trace is the reference. Each other trace is aligned to it by
+    its own median level in `anchor_band` -- so a pure volume change cancels
+    exactly, and whatever remains is a change of SHAPE.
+
+    Returns dict:
+      reference_index  -- which trace everything is compared against
+      steps            -- per trace: measured_db (level relative to reference),
+                          tracking_error_db (measured minus commanded; negative
+                          means the system delivered less than asked -- the
+                          signature of compression or limiting), max_shape_db,
+                          shape_delta_db (the full smoothed curve, for region
+                          finding by the caller), and a per-step verdict
+      verdict          -- 'clean' | 'level_dependent_shape' | 'compression' |
+                          'both' | 'insufficient_traces'
+      attribution      -- 'source' when electrical, else
+                          'source_or_driver_compression'
+      notes            -- plain-language findings, safe to show the user
+    """
+    traces = [np.asarray(t, dtype=float) for t in traces_db]
+    if len(traces) < 2:
+        return {'reference_index': 0, 'steps': [], 'verdict': 'insufficient_traces',
+                'attribution': None,
+                'notes': ['need at least two volume settings to audit the source']}
+    sel = (freqs >= anchor_band[0]) & (freqs <= anchor_band[1])
+    if not np.any(sel):
+        raise ValueError('anchor_band %r does not overlap the measured axis' % (anchor_band,))
+
+    levels = np.array([float(np.median(t[sel])) for t in traces])
+    ref = int(np.argmax(levels))
+    shape_ref = octave_smooth_log(freqs, traces[ref] - levels[ref], smooth_oct)
+
+    cmd = None
+    if commanded_db is not None:
+        cmd = np.asarray(commanded_db, dtype=float)
+        if len(cmd) != len(traces):
+            raise ValueError('commanded_db has %d entries for %d traces'
+                             % (len(cmd), len(traces)))
+
+    steps, notes = [], []
+    worst_shape, worst_track = 0.0, 0.0
+    for i, t in enumerate(traces):
+        delta = octave_smooth_log(freqs, t - levels[i], smooth_oct) - shape_ref
+        max_shape = float(np.max(np.abs(delta)))
+        step = {'index': i,
+                'measured_db': round(float(levels[i] - levels[ref]), 2),
+                'max_shape_db': round(max_shape, 2),
+                'shape_delta_db': delta,
+                'tracking_error_db': None}
+        if cmd is not None:
+            err = float((levels[i] - levels[ref]) - (cmd[i] - cmd[ref]))
+            step['tracking_error_db'] = round(err, 2)
+            if i != ref and abs(err) >= tracking_flag_db:
+                worst_track = max(worst_track, abs(err))
+        if i != ref:
+            worst_shape = max(worst_shape, max_shape)
+        flags = []
+        if max_shape >= shape_flag_db:
+            flags.append('shape')
+        if step['tracking_error_db'] is not None and abs(step['tracking_error_db']) >= tracking_flag_db:
+            flags.append('level')
+        step['verdict'] = 'clean' if not flags else '+'.join(flags) + '_changed'
+        steps.append(step)
+
+    shape_bad = worst_shape >= shape_flag_db
+    track_bad = worst_track >= tracking_flag_db
+    verdict = ('both' if shape_bad and track_bad else
+               'level_dependent_shape' if shape_bad else
+               'compression' if track_bad else 'clean')
+
+    if verdict == 'clean':
+        notes.append('response shape and level both track the volume control '
+                     '-- no evidence of level-dependent processing')
+    if shape_bad:
+        notes.append('response SHAPE changes by up to %.1f dB across the volume '
+                     'range -- a tune corrected at one volume will not be correct '
+                     'at the others' % worst_shape)
+    if track_bad:
+        notes.append('measured level departs from the commanded level by up to '
+                     '%.1f dB -- the signature of compression or limiting '
+                     'somewhere in the chain' % worst_track)
+    if verdict != 'clean' and not electrical:
+        notes.append('CANNOT ATTRIBUTE from an acoustic capture: source processing '
+                     'and driver compression produce the same relative signature. '
+                     'Re-capture at the DSP input (electrical) to separate them.')
+    return {'reference_index': ref, 'steps': steps, 'verdict': verdict,
+            'attribution': ('source' if electrical else 'source_or_driver_compression'),
+            'notes': notes}
+
+
+# --------------------------------------------------------------------------
+# FREQUENCY-DEPENDENT IMAGE POSITION (duplex theory, applied to a car)
+#
+# Standard car practice sets one delay per side from path length and calls
+# imaging done. That is a single number for a mechanism that is not single:
+#
+#   * BELOW ~1.5 kHz the ear localizes by INTERAURAL TIME DIFFERENCE. Half a
+#     wavelength still spans the head, so the phase/arrival difference is
+#     unambiguous and dominant.
+#   * ABOVE ~1.5 kHz the wavelength is shorter than the head, time cues
+#     become ambiguous, and the head's own shadowing makes LEVEL DIFFERENCE
+#     the dominant cue.
+#
+# One delay value cannot serve both regimes, so an image can sit centred at
+# 2 kHz and pull left at 250 Hz -- a real, audible, extremely common fault
+# that no conventional car measurement reports, because magnitude-vs-target
+# and L/R level matching are both blind to it.
+#
+# WHAT THIS IS NOT: a calibrated localization model. Real localization
+# involves the listener's own head, pinnae and head movement, none of which a
+# microphone at the seat has. Read the output as "which way, how much, in
+# which band" -- an ordering, not degrees of arc.
+
+def band_itd_ild(freqs, left_db, right_db, left_phase_deg=None, right_phase_deg=None,
+                 bands=((80, 160), (160, 315), (315, 630), (630, 1250),
+                        (1250, 2500), (2500, 5000), (5000, 10000)),
+                 min_bins=8):
+    """Per-band interaural time and level difference between two solo captures.
+
+    Inputs are solo-left and solo-right measured AT THE SAME seat position
+    (the pair the workflow already asks for at intake). Phase is optional --
+    without it, ITD is unavailable and only the level cue is reported.
+
+    ITD is fitted, not differentiated: inside each band, the unwrapped phase
+    difference is regressed against angular frequency and the slope taken as
+    the effective arrival-time difference. A slope fit over a band is far more
+    robust than a pointwise group delay, which amplifies measurement noise
+    exactly where the phase is least trustworthy.
+
+    Sign convention throughout: POSITIVE means the LEFT side leads (arrives
+    earlier) or is louder -- i.e. positive pulls the image left.
+
+    Returns a list of per-band dicts: f_lo, f_hi, ild_db, itd_us (None without
+    phase), and itd_fit_quality (0..1, the R^2 of the phase-difference
+    regression -- a low value means the phase difference is not behaving like
+    a delay in that band, so the ITD number should not be trusted)."""
+    freqs = np.asarray(freqs, dtype=float)
+    ldb = np.asarray(left_db, dtype=float)
+    rdb = np.asarray(right_db, dtype=float)
+    dphi = None
+    if left_phase_deg is not None and right_phase_deg is not None:
+        dphi = np.unwrap(np.deg2rad(np.asarray(left_phase_deg, dtype=float))) - \
+            np.unwrap(np.deg2rad(np.asarray(right_phase_deg, dtype=float)))
+
+    out = []
+    for lo, hi in bands:
+        sel = (freqs >= lo) & (freqs <= hi)
+        n = int(np.count_nonzero(sel))
+        row = {'f_lo': float(lo), 'f_hi': float(hi), 'bins': n,
+               'ild_db': None, 'itd_us': None, 'itd_fit_quality': None}
+        if n < min_bins:
+            out.append(row)
+            continue
+        row['ild_db'] = round(float(np.median(ldb[sel]) - np.median(rdb[sel])), 2)
+        if dphi is not None:
+            w = 2 * np.pi * freqs[sel]
+            y = dphi[sel]
+            # slope of phase difference vs omega = -delay difference (seconds)
+            A = np.vstack([w, np.ones_like(w)]).T
+            slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
+            resid = y - (slope * w + intercept)
+            ss_tot = float(np.sum((y - np.mean(y)) ** 2))
+            r2 = 1.0 - float(np.sum(resid ** 2)) / ss_tot if ss_tot > 1e-12 else 0.0
+            row['itd_us'] = round(float(-slope) * 1e6, 1)
+            row['itd_fit_quality'] = round(max(0.0, min(1.0, r2)), 2)
+        out.append(row)
+    return out
+
+
+def image_pull(band_rows, itd_full_scale_us=650.0, ild_full_scale_db=12.0,
+               duplex_hz=1500.0, duplex_width_oct=1.0, min_fit_quality=0.5,
+               flag_pull=0.15):
+    """Blend per-band ITD and ILD into a predicted lateral image position.
+
+    Each cue is normalized to its own full-scale (about 650 us of interaural
+    delay, or about 12 dB of level difference, fully lateralizes an image),
+    then crossfaded across `duplex_hz` -- time below, level above -- following
+    duplex theory. The crossfade is smooth over `duplex_width_oct` because the
+    transition in hearing is gradual, not a switch.
+
+    An ITD whose regression quality is below `min_fit_quality` is discarded
+    rather than blended: a phase difference that isn't behaving like a delay
+    is not an arrival-time cue, and averaging it in would manufacture a
+    confident number out of noise.
+
+    Returns dict:
+      bands   -- per band: pull (-1 full left .. +1 full right), which cue
+                 dominates there, and the inputs it came from
+      spread  -- max pull minus min pull across bands. THE headline number:
+                 a stable image has a small spread regardless of where it
+                 sits, while a large spread means the image is smeared across
+                 frequency and no single delay will fix it
+      verdict -- 'stable' | 'pulled' (consistently off-centre, a delay/level
+                 job) | 'smeared' (band-to-band disagreement, not fixable by
+                 one delay) | 'insufficient_data'
+    """
+    rows, pulls = [], []
+    for r in band_rows:
+        if r.get('ild_db') is None:
+            continue
+        fc = (r['f_lo'] * r['f_hi']) ** 0.5
+        # duplex weighting: 1 = pure ITD, 0 = pure ILD
+        w_itd = 1.0 / (1.0 + 2.0 ** ((np.log2(fc / duplex_hz)) * (4.0 / duplex_width_oct)))
+        p_ild = float(np.clip(r['ild_db'] / ild_full_scale_db, -1.0, 1.0))
+        p_itd, usable = None, False
+        if r.get('itd_us') is not None and (r.get('itd_fit_quality') or 0.0) >= min_fit_quality:
+            p_itd = float(np.clip(r['itd_us'] / itd_full_scale_us, -1.0, 1.0))
+            usable = True
+        if usable:
+            pull = w_itd * p_itd + (1.0 - w_itd) * p_ild
+            cue = 'time' if w_itd >= 0.5 else 'level'
+        else:
+            pull = p_ild
+            cue = 'level (time cue unusable)' if r.get('itd_us') is not None else 'level only'
+        rows.append({'f_lo': r['f_lo'], 'f_hi': r['f_hi'],
+                     'pull': round(float(pull), 3), 'dominant_cue': cue,
+                     'ild_db': r['ild_db'], 'itd_us': r.get('itd_us'),
+                     'itd_fit_quality': r.get('itd_fit_quality'),
+                     'side': 'left' if pull > 0.02 else 'right' if pull < -0.02 else 'centre'})
+        pulls.append(pull)
+
+    if not pulls:
+        return {'bands': rows, 'spread': None, 'mean_pull': None,
+                'verdict': 'insufficient_data'}
+    spread = float(max(pulls) - min(pulls))
+    mean_pull = float(np.mean(pulls))
+    verdict = ('smeared' if spread >= 2 * flag_pull else
+               'pulled' if abs(mean_pull) >= flag_pull else 'stable')
+    return {'bands': rows, 'spread': round(spread, 3),
+            'mean_pull': round(mean_pull, 3), 'verdict': verdict}
+
+
+def source_bandwidth_limits(freqs, trace_db, ref_band=(300.0, 3000.0), drop_db=6.0):
+    """Where a source trace is already rolled off, as (low_hz, high_hz).
+
+    A head unit that high-passes at 80 Hz, or a stream that dies at 15 kHz, sets
+    a ceiling on the whole system that no amount of output EQ can lift -- and
+    boosting into it just burns headroom against a wall. Returns the outermost
+    frequencies still within `drop_db` of the passband median, or None where the
+    trace never falls that far (i.e. no limit is visible inside the measured
+    axis)."""
+    freqs = np.asarray(freqs, dtype=float)
+    sel = (freqs >= ref_band[0]) & (freqs <= ref_band[1])
+    if not np.any(sel):
+        raise ValueError('ref_band %r does not overlap the measured axis' % (ref_band,))
+    sm = octave_smooth_log(freqs, np.asarray(trace_db, dtype=float), 1 / 3.0)
+    thresh = float(np.median(sm[sel])) - float(drop_db)
+    inside = sm >= thresh
+    lo_i = int(np.argmax(inside))
+    hi_i = len(freqs) - 1 - int(np.argmax(inside[::-1]))
+    return {'low_hz': (round(float(freqs[lo_i]), 1) if lo_i > 0 else None),
+            'high_hz': (round(float(freqs[hi_i]), 1) if hi_i < len(freqs) - 1 else None),
+            'threshold_db': round(thresh, 2)}
+
+
 if __name__ == '__main__':
     import struct
 
@@ -2752,6 +3059,94 @@ if __name__ == '__main__':
     assert _rows[1]['verdict'] == 'N/A', 'a CUT must bypass the boost gate: %r' % _rows[1]
     assert _summary['worst'] == _rows[0]['verdict'] and _summary['counts']['N/A'] == 1, _summary
     print('  cascade gating: %s' % _summary['counts'])
+
+    # ---- TEST 1c: SOURCE / OEM AUDIT ---------------------------------------
+    # A clean source scales exactly; a loudness contour does not. Both are
+    # built here at the SAME set of volumes so the only difference is shape.
+    print('TEST1c source/OEM audit:')
+    _cmd = [0.0, -6.0, -12.0, -18.0]
+    _base = 80.0 + peaking_db(freqs, 900.0, 1.2, -3.0)
+    _clean = [_base + c for c in _cmd]
+    # loudness contour: progressively more bass+top as volume drops
+    _contour = [_base + c + (abs(c) / 18.0) * (low_shelf_db(freqs, 120.0, 0.7, 6.0)
+                                               + high_shelf_db(freqs, 8000.0, 0.7, 3.0))
+                for c in _cmd]
+    # compression: delivers less than commanded at the loud end
+    _comp = [_base + c * 0.85 for c in _cmd]
+
+    _a_clean = source_level_audit(freqs, _clean, _cmd)
+    _a_cont = source_level_audit(freqs, _contour, _cmd)
+    _a_comp = source_level_audit(freqs, _comp, _cmd)
+    for _nm, _a in (('clean source', _a_clean), ('loudness contour', _a_cont),
+                    ('compressing', _a_comp)):
+        _ws = max(s['max_shape_db'] for s in _a['steps'])
+        _wt = max(abs(s['tracking_error_db'] or 0.0) for s in _a['steps'])
+        print('  %-17s -> %-22s max shape %.2f dB, max tracking %.2f dB'
+              % (_nm, _a['verdict'], _ws, _wt))
+    assert _a_clean['verdict'] == 'clean', _a_clean
+    assert _a_cont['verdict'] == 'level_dependent_shape', _a_cont
+    assert _a_comp['verdict'] == 'compression', _a_comp
+    # the contour's shape change must be found in the bass, where it was put
+    _worst = max(_a_cont['steps'], key=lambda s: s['max_shape_db'])
+    _i_worst = int(np.argmax(np.abs(_worst['shape_delta_db'])))
+    assert freqs[_i_worst] < 300.0, \
+        'contour flagged at %.0f Hz, expected the bass shelf' % freqs[_i_worst]
+    # an acoustic capture must refuse to name the source as the cause
+    assert _a_cont['attribution'] == 'source_or_driver_compression'
+    assert any('CANNOT ATTRIBUTE' in n for n in _a_cont['notes']), _a_cont['notes']
+    assert source_level_audit(freqs, _contour, _cmd, electrical=True)['attribution'] == 'source'
+    # bandwidth: a source high-passed at 80 Hz should be reported as such.
+    # 2nd-order Butterworth high-pass magnitude; its -6 dB point sits at
+    # ~0.76 x f0, so an 80 Hz corner should be reported around 61 Hz.
+    _x = (freqs / 80.0) ** 2
+    _hp_db = 20 * np.log10(_x / np.sqrt(1.0 + _x ** 2))
+    _bw = source_bandwidth_limits(freqs, _base + _hp_db)
+    print('  bandwidth limit  -> low %.0f Hz (built an 80 Hz 2nd-order high-pass)'
+          % _bw['low_hz'])
+    assert 45.0 < _bw['low_hz'] < 90.0, _bw
+
+    # ---- TEST 1d: FREQUENCY-DEPENDENT IMAGE POSITION -----------------------
+    # Ground truth a single delay value cannot represent: the left side leads
+    # by 300 us (pulls LOW frequencies left) while the right side is 6 dB
+    # louder up high (pulls HIGH frequencies right). Level matching alone sees
+    # only the second; a delay check alone sees only the first.
+    print('TEST1d frequency-dependent imaging:')
+    _lead_s = 300e-6
+    _l_db = 80.0 * np.ones_like(freqs)
+    _r_db = 80.0 + high_shelf_db(freqs, 2000.0, 0.7, 6.0)
+    _l_ph = np.zeros_like(freqs)
+    _r_ph = np.rad2deg(2 * np.pi * freqs * _lead_s)      # right lags by 300 us
+    _rows = band_itd_ild(freqs, _l_db, _r_db, _l_ph, _r_ph)
+    _img = image_pull(_rows)
+    for _b in _img['bands']:
+        print('   %5.0f-%-5.0f Hz  pull %+0.2f (%s)  ITD %s us  ILD %+0.1f dB'
+              % (_b['f_lo'], _b['f_hi'], _b['pull'], _b['side'],
+                 _b['itd_us'], _b['ild_db']))
+    _lo_b = [b for b in _img['bands'] if b['f_hi'] <= 400][0]
+    _hi_b = [b for b in _img['bands'] if b['f_lo'] >= 5000][0]
+    assert abs(_lo_b['itd_us'] - 300.0) < 25.0, \
+        'ITD not recovered: %.1f us, built 300' % _lo_b['itd_us']
+    assert _lo_b['pull'] > 0.15, 'low band should pull LEFT (time cue): %r' % _lo_b
+    assert _hi_b['pull'] < -0.15, 'high band should pull RIGHT (level cue): %r' % _hi_b
+    assert _img['verdict'] == 'smeared', \
+        'opposing cues across frequency is the definition of smeared: %r' % _img
+    print('  spread %.2f, mean %+0.2f -> %s'
+          % (_img['spread'], _img['mean_pull'], _img['verdict']))
+
+    # a genuinely centred system must not be flagged
+    _c = image_pull(band_itd_ild(freqs, _l_db, _l_db.copy(), _l_ph, _l_ph.copy()))
+    assert _c['verdict'] == 'stable', _c
+    # and a uniform whole-band offset is 'pulled' (one delay fixes it), not 'smeared'
+    _p = image_pull(band_itd_ild(freqs, _l_db + 3.0, _l_db, _l_ph, _l_ph.copy()))
+    assert _p['verdict'] == 'pulled', _p
+    print('  centred -> %s | uniform 3 dB offset -> %s' % (_c['verdict'], _p['verdict']))
+
+    # an unusable phase fit must be dropped, not blended into a confident number
+    _rng_ph = np.random.default_rng(5).normal(0, 120.0, len(freqs))
+    _noise_rows = band_itd_ild(freqs, _l_db, _l_db.copy(), _rng_ph, np.zeros_like(freqs))
+    assert any(b['dominant_cue'].startswith('level (time cue unusable)')
+               for b in image_pull(_noise_rows)['bands']), \
+        'garbage phase should disqualify the time cue, not be averaged in'
 
     # ---- TEST 2: optimizer recovers a known correction ---------------------
     dev = peaking_db(freqs, 500.0, 2.0, 5.0) + peaking_db(freqs, 2000.0, 1.0, 4.0)
