@@ -164,11 +164,13 @@ def _main():
                    b['worst_db'], b['worst_at_hz']))
         print('\nact on a deviation only above ~2.5x sigma for its band.')
         if a.json:
-            json.dump(fl, open(a.json, 'w'))
+            with open(a.json, 'w', encoding='utf-8') as fh:
+                json.dump(fl, fh)
             print('wrote %s' % a.json)
 
     elif a.cmd == 'check':
-        fl = json.load(open(a.floor))
+        with open(a.floor, encoding='utf-8') as fh:
+            fl = json.load(fh)
         devs = []
         for d in a.dev:
             hz, db = d.split(':')
@@ -219,7 +221,8 @@ def _selftest():
     shifted = []
     for i, p in enumerate(paths):
         q = p.replace('.txt', '_shift.txt')
-        lines = [l for l in open(p) if not l.startswith('*')]
+        with open(p) as src:
+            lines = [l for l in src if not l.startswith('*')]
         with open(q, 'w') as fh:
             fh.write('* synthetic\n')
             for l in lines:

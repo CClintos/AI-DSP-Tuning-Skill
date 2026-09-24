@@ -114,8 +114,9 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   creates a new output, re-decodes it, and returns the verification manifest.
   Any phase-domain edit (delay or T=19/20 APF) must be applied and remeasured
   before a fresh plan may contain EQ-domain edits (T=17 PEQ or T=3/4 shelves).
-  `python scripts/pipeline.py selftest` self-tests analysis and documentation routing on
-  synthetic fixtures.
+  `pipeline.py session check|save` reads and records the intake sidecar (step
+  1). `python scripts/pipeline.py selftest` self-tests analysis and
+  documentation routing on synthetic fixtures.
 - **`decay.py reflections <ir.wav>`** — secondary arrivals from the impulse
   response: delay, level, path-length difference, and the comb each one must
   produce. `--dips 340 1020 ...` tests those predictions against the dips you
@@ -208,8 +209,9 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   session's confirmed intake answers (schema: `dsp_model`, `sample_rate_hz`,
   `channel_map`, `listening_seat`, `drive_side`, `rear_channel_routing`,
   `target_curve_path`, `voicing`, and `afpx_sha256` — the SHA-256 of the
-  `.afpx` at the time it was written). If it exists, hash the *current*
-  `.afpx` and compare:
+  `.afpx` at the time it was written). Run `python scripts/pipeline.py
+  session check --tune <file>` — it reads the sidecar, hashes the *current*
+  file, and reports `hash_matches` plus which answers are `stale_fields`:
   - **Hash matches** → present the stored answers back ("here's what I have
     on file: channel 2 = tweeter/left, driver's seat, discrete rears,
     ResoNix target — still correct?") instead of re-deriving or re-asking
@@ -222,7 +224,9 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
     (seat, rear routing, target choice) can still be offered back for a
     quick "still correct?", just flag that the file itself moved.
   - **No file** → run intake normally, then write one at the end of this
-    step (and again after step 3b if voicing changes). This is bookkeeping
+    step (and again after step 3b if voicing changes) with `python
+    scripts/pipeline.py session save --tune <file> --answers <answers.json>`
+    — it computes the hash itself and never touches the tune. This is bookkeeping
     only — it does **not** relax Non-negotiable #9: always re-decode the
     current `.afpx` fresh before proposing edits, session file or not.
 - **File format**: if given a `.pct6` instead of `.afpx`, read

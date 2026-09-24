@@ -17,6 +17,7 @@
 # python pipeline.py analyze --measurement <export.txt> --target <target.txt|default> [options]
 # python pipeline.py plan --source <input.afpx> --output <new.afpx> --out <plan.json>
 # python pipeline.py apply --plan <plan.json>
+# python pipeline.py session check --tune <file>  |  session save --tune <file> --answers <json>
 #   --measurement FILE           REW text export (system sum or primary trace)
 #   --positions FILE [FILE...]   2+ position sweeps -> spatial_consistency
 #                                 (first one doubles as --measurement if that
@@ -412,6 +413,81 @@ def create_plan(source_path, output_path):
         'edits': [],
         'confirmations': {},
     }
+
+
+# ------------------------------------------------------------ intake session sidecar
+# core_workflow.md step 1: a small record of confirmed intake answers kept next
+# to the tune as <tune>.tuner_session.json, bound to the tune's SHA-256 so a
+# PC-Tool edit between sessions is detected instead of trusted.
+SESSION_FIELDS = ('dsp_model', 'sample_rate_hz', 'channel_map', 'listening_seat',
+                  'drive_side', 'rear_channel_routing', 'target_curve_path', 'voicing')
+# Answers read or inferred from the tune file's own bytes; stale once it changes.
+SESSION_FILE_DERIVED = ('dsp_model', 'sample_rate_hz', 'channel_map')
+
+
+def session_path(tune_path):
+    return os.fspath(tune_path) + '.tuner_session.json'
+
+
+def session_check(tune_path):
+    """Report the sidecar for `tune_path`: absent, hash-matching, or stale."""
+    tune_path = os.fspath(tune_path)
+    if not os.path.isfile(tune_path):
+        raise ValueError('tune file not found: %s' % tune_path)
+    path = session_path(tune_path)
+    current = _sha256_file(tune_path)
+    report = {'session_path': path, 'exists': os.path.isfile(path),
+              'current_sha256': current, 'hash_matches': None,
+              'answers': None, 'stale_fields': []}
+    if not report['exists']:
+        report['guidance'] = 'no prior session: run intake, then session save'
+        return report
+    try:
+        with open(path, encoding='utf-8') as fh:
+            stored = json.load(fh)
+    except (OSError, ValueError) as exc:
+        raise ValueError('cannot read session file %s: %s' % (path, exc)) from exc
+    if not isinstance(stored, dict):
+        raise ValueError('session file %s is not a JSON object' % path)
+    report['hash_matches'] = stored.get('afpx_sha256') == current
+    report['answers'] = {k: stored.get(k) for k in SESSION_FIELDS}
+    if report['hash_matches']:
+        report['guidance'] = ('tune unchanged since recorded: present these answers '
+                              'back for a quick "still correct?"')
+    else:
+        report['stale_fields'] = list(SESSION_FILE_DERIVED)
+        report['guidance'] = ('tune file changed since recorded: tell the user, re-run '
+                              'afpx.py inspect, and treat stale_fields as unconfirmed; '
+                              'offer the other answers back for confirmation')
+    return report
+
+
+def session_save(tune_path, answers):
+    """Write the sidecar from confirmed intake answers. Never touches the tune."""
+    tune_path = os.fspath(tune_path)
+    if not os.path.isfile(tune_path):
+        raise ValueError('tune file not found: %s' % tune_path)
+    if not isinstance(answers, dict):
+        raise ValueError('answers must be a JSON object')
+    if 'afpx_sha256' in answers:
+        raise ValueError('afpx_sha256 is computed from the tune file; do not supply it')
+    unknown = sorted(set(answers) - set(SESSION_FIELDS))
+    if unknown:
+        raise ValueError('unknown session field(s): %s (allowed: %s)'
+                         % (unknown, ', '.join(SESSION_FIELDS)))
+    record = {k: answers.get(k) for k in SESSION_FIELDS}
+    record['afpx_sha256'] = _sha256_file(tune_path)
+    path = session_path(tune_path)
+    fd, tmp = tempfile.mkstemp(prefix='.tuner-session-', suffix='.json',
+                               dir=os.path.dirname(os.path.abspath(path)))
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+            json.dump(record, fh, indent=2)
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+    return path
 
 
 def _find_regions(freqs, y, flag_db, smooth_oct=1.0 / 6.0):
@@ -973,9 +1049,25 @@ def main():
     im.add_argument('--solo-r', required=True)
     im.add_argument('--out')
 
+    se = sub.add_parser('session', help='read or record the intake session sidecar')
+    se_sub = se.add_subparsers(dest='session_cmd', required=True)
+    se_check = se_sub.add_parser('check', help='compare the sidecar against the tune hash')
+    se_check.add_argument('--tune', required=True)
+    se_save = se_sub.add_parser('save', help='record confirmed intake answers')
+    se_save.add_argument('--tune', required=True)
+    se_save.add_argument('--answers', required=True,
+                         help='JSON object with any of: ' + ', '.join(SESSION_FIELDS))
+
     args = ap.parse_args()
     if args.cmd == 'selftest':
         _selftest()
+    elif args.cmd == 'session':
+        if args.session_cmd == 'check':
+            print(json.dumps(session_check(args.tune), indent=2))
+        else:
+            with open(args.answers, encoding='utf-8') as fh:
+                answers = json.load(fh)
+            print('wrote %s' % session_save(args.tune, answers))
     elif args.cmd == 'plan':
         draft = create_plan(args.source, args.output)
         text = json.dumps(draft, indent=2)
@@ -992,7 +1084,8 @@ def main():
                   'imaging': imaging}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
-            open(args.out, 'w').write(text)
+            with open(args.out, 'w', encoding='utf-8') as fh:
+                fh.write(text)
             print('wrote %s' % args.out)
         else:
             print(text)

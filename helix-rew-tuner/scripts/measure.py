@@ -16,10 +16,25 @@
 # CLI:
 #   python measure.py textcols <export.txt>          # peek columns
 #   python measure.py mdat <file.mdat>               # list SPL arrays found + axis guess
+import re
 import struct
 import sys
 
 import numpy as np
+
+
+_DECIMAL_COMMA = re.compile(r'-?\d+,\d+')
+
+
+def _split_row(line):
+    """Split one numeric row. Whitespace/semicolon-separated tokens written
+    with a decimal comma ("20,508  72,3  -45,2", as REW writes in comma-decimal
+    locales) are read as decimals; otherwise commas are field separators."""
+    tokens = [t for t in re.split(r'[\s;]+', line) if t]
+    if (len(tokens) >= 2 and '.' not in line
+            and any(_DECIMAL_COMMA.fullmatch(t) for t in tokens)):
+        return [t.replace(',', '.') for t in tokens]
+    return line.replace(',', ' ').split()
 
 
 def load_text_export(path):
@@ -38,11 +53,13 @@ def load_text_export(path):
     Smaart-style trust signal this project's usual REW-only pipeline can't
     otherwise compute (see methodology.md)."""
     f, s, p, coh = [], [], [], []
-    for line in open(path, encoding='utf-8', errors='replace'):
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        lines = fh.read().splitlines()
+    for line in lines:
         line = line.strip()
         if not line or line[0].isalpha() or line[0] in '*#/':
             continue
-        parts = line.replace(',', ' ').split()
+        parts = _split_row(line)
         try:
             f.append(float(parts[0]))
             s.append(float(parts[1]))
@@ -53,7 +70,23 @@ def load_text_export(path):
     if len(f) < 8:
         raise ValueError('found <8 usable data rows in %s -- is this a REW text export?' % path)
     f, s, p, coh = np.array(f), np.array(s), np.array(p), np.array(coh)
+    _check_freq_axis(f, path)
+    if not np.isfinite(s).all():
+        raise ValueError('non-finite SPL value in %s' % path)
     return f, s, (p if np.isfinite(p).any() else None), (coh if np.isfinite(coh).any() else None)
+
+
+def _check_freq_axis(f, path):
+    """np.interp and every log-frequency step assume a positive, strictly
+    increasing axis; anything else resamples to plausible-looking garbage
+    instead of failing. A decimal-comma export ("20,508  72,3") is the usual
+    cause: the comma splits each number, so the axis repeats values."""
+    if not np.isfinite(f).all() or (f <= 0).any():
+        raise ValueError('frequency column must be finite and positive in %s' % path)
+    if (np.diff(f) <= 0).any():
+        raise ValueError('frequency column is not strictly increasing in %s -- a '
+                         'decimal-comma export? Re-export from REW with "." as the '
+                         'decimal separator' % path)
 
 
 def resample_log(freqs_src, y_src, freqs_dst):
@@ -72,7 +105,8 @@ def mdat_spl_arrays(path, min_len=256):
     """Extract float32 SPL arrays from a REW .mdat (Java-serialized). Returns list
     of (offset, length, array). The frequency AXIS is NOT in here reliably -- you
     must reconstruct and validate it (see reconstruct_axis)."""
-    data = open(path, 'rb').read()
+    with open(path, 'rb') as fh:
+        data = fh.read()
     out, i = [], 0
     while True:
         j = data.find(b'\x75\x71\x00\x7e', i)
@@ -123,18 +157,28 @@ def load_target(path, freqs):
     """Load a target curve (freq, level) text file, interpolate onto `freqs`.
     Level anchoring (matching overall loudness) is done by the caller."""
     f, s = [], []
-    for line in open(path, encoding='utf-8', errors='replace'):
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        lines = fh.read().splitlines()
+    for line in lines:
         line = line.strip()
         if not line or line[0].isalpha() or line[0] in '*#/':
             continue
-        parts = line.replace(',', ' ').split()
+        parts = _split_row(line)
         try:
             f.append(float(parts[0])); s.append(float(parts[1]))
         except (ValueError, IndexError):
             continue
     if len(f) < 2:
         raise ValueError('target curve needs >=2 (freq, level) rows: %s' % path)
-    return np.interp(np.log10(freqs), np.log10(np.array(f)), np.array(s))
+    f, s = np.array(f), np.array(s)
+    order = np.argsort(f, kind='stable')   # hand-made curves are often high-to-low
+    f, s = f[order], s[order]
+    if (np.diff(f) == 0).any():
+        raise ValueError('target curve has duplicate frequencies: %s' % path)
+    _check_freq_axis(f, path)
+    if not np.isfinite(s).all():
+        raise ValueError('non-finite level value in target curve %s' % path)
+    return np.interp(np.log10(freqs), np.log10(f), s)
 
 
 def _main():

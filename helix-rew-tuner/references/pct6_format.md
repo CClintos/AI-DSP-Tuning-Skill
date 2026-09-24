@@ -57,8 +57,9 @@ version, or attribute this project hasn't seen yet.
   possible and no information is lost, unlike `errors='replace'`.
 - **`write_preserving_crossovers(source_path, xml, output_path)`** — the only
   public helper that creates a `.pct6`. It binds the candidate to the decoded
-  source, compares the complete channel/slot crossover signature, and opens a
-  distinct output exclusively. The `encode` CLI requires those same three
+  source, compares the complete channel/slot crossover signature, opens a
+  distinct output exclusively, and re-decodes it — removing the output if it
+  does not reproduce the candidate byte-for-byte. The `encode` CLI requires those same three
   paths. There is no public unchecked raw encoder.
 
 **Don't parse this text with `xml.etree` or another strict XML parser

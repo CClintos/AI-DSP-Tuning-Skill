@@ -23,29 +23,36 @@ def decode(path):
     return decode_bytes(raw, path)
 
 
+# Byte-preserving text codec. 'surrogateescape' maps any byte that isn't valid
+# UTF-8 to a lone surrogate and back to the same byte on encode, so untouched
+# fields (paths in FN=, binary-ish attributes) round-trip exactly. 'replace'
+# would substitute U+FFFD and silently rewrite those bytes on every write.
+_TEXT_CODEC = ('utf-8', 'surrogateescape')
+
+
 def decode_bytes(raw, source='<bytes>'):
-    """Decode one immutable AFPX byte snapshot."""
+    """Decode one immutable AFPX byte snapshot (byte-preserving text view)."""
     raw = bytes(raw)
     if len(raw) < 5:
         raise ValueError('file too short to be a valid .afpx: %s' % source)
     declared = struct.unpack('>I', raw[:4])[0]
-    xml = zlib.decompress(raw[4:]).decode('utf-8', 'replace')
-    if declared != len(xml.encode('utf-8')):
-        print('warning: header length %d != decoded length %d' % (declared, len(xml.encode('utf-8'))),
+    payload = zlib.decompress(raw[4:])
+    if declared != len(payload):
+        print('warning: header length %d != decoded length %d' % (declared, len(payload)),
               file=sys.stderr)
-    return xml
+    return payload.decode(*_TEXT_CODEC)
 
 
 def _encode_unchecked(xml, path):
     """Internal fixture/temp codec. Public outputs must be source-bound."""
-    payload = xml.encode('utf-8')
+    payload = xml.encode(*_TEXT_CODEC)
     with open(path, 'wb') as fh:
         fh.write(struct.pack('>I', len(payload)) + zlib.compress(payload, 9))
 
 
 def _encode_exclusive_unchecked(xml, path):
     """Internal exclusive codec used only after a source-bound safety check."""
-    payload = xml.encode('utf-8')
+    payload = xml.encode(*_TEXT_CODEC)
     with open(path, 'xb') as fh:
         fh.write(struct.pack('>I', len(payload)) + zlib.compress(payload, 9))
 

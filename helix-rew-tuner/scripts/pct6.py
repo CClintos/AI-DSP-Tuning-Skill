@@ -60,7 +60,9 @@
 #
 # CLI:
 #   python pct6.py decode <file.pct6>              # writes file.decoded.xml (raw bytes)
-#   python pct6.py encode <file.xml> <out.pct6>     # reads file.xml as raw bytes
+#   python pct6.py encode <source.pct6> <file.xml> <out.pct6>
+#                                                  # crossover-checked against source;
+#                                                  # out.pct6 must not already exist
 #   python pct6.py selftest                        # synthetic round-trip check
 import sys
 import zlib
@@ -87,7 +89,12 @@ def decode_bytes(path):
     if len(unxored) < 4:
         raise ValueError('file too short to be a valid .pct6: %s' % path)
     declared = int.from_bytes(unxored[:4], 'big')
-    xml_bytes = zlib.decompress(unxored[4:])
+    try:
+        xml_bytes = zlib.decompress(unxored[4:])
+    except zlib.error as exc:
+        raise ValueError('cannot unpack %s (%s) -- this file may be password-protected, '
+                         'or the key/container has changed on this PC-Tool version. '
+                         'Do not trust any output from it.' % (path, exc)) from exc
     if declared != len(xml_bytes):
         print('warning: declared length %d != decoded length %d -- verify this decode carefully'
               % (declared, len(xml_bytes)), file=sys.stderr)
@@ -121,7 +128,11 @@ def write_preserving_crossovers(source_path, xml, output_path):
     if afpx.semantic_xover_key(source_xml) != afpx.semantic_xover_key(xml):
         raise ValueError(
             'crossover state or channel/slot identity changed; refusing PCT6 output')
-    _encode_bytes_unchecked(xml.encode('latin-1'), output_path, exclusive=True)
+    payload = xml.encode('latin-1')
+    _encode_bytes_unchecked(payload, output_path, exclusive=True)
+    if decode_bytes(output_path) != payload:
+        Path(output_path).unlink()
+        raise ValueError('PCT6 output did not decode back to the candidate; removed it')
 
 
 def _selftest():

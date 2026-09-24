@@ -68,7 +68,9 @@ def load_ir_wav(path):
 def load_ir_text(path):
     """REW 'export impulse response as text': time(s or ms) + amplitude columns."""
     t, v = [], []
-    for line in open(path, encoding='utf-8', errors='replace'):
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        lines = fh.read().splitlines()
+    for line in lines:
         line = line.strip()
         if not line or line[0].isalpha() or line[0] in '*#/':
             continue
