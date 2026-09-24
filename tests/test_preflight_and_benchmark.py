@@ -155,11 +155,12 @@ class BenchmarkTests(unittest.TestCase):
         self.assertTrue(report["passed"])
         self.assertEqual(
             {"stable_peaks", "wandering_nulls", "level_offsets",
-             "confidence_blocked_lr_matching", "worst_position_harm"},
+             "confidence_blocked_lr_matching", "worst_position_harm",
+             "heldout_tuning_quality"},
             {case["id"] for case in report["cases"]},
         )
-        self.assertEqual(5, report["summary"]["total"])
-        self.assertEqual(5, report["summary"]["passed"])
+        self.assertEqual(6, report["summary"]["total"])
+        self.assertEqual(6, report["summary"]["passed"])
         self.assertEqual(0, report["summary"]["failed"])
         for case in report["cases"]:
             self.assertTrue(case["passed"], case)

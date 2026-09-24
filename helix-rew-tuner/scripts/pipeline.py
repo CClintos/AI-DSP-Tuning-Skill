@@ -17,6 +17,7 @@
 # python pipeline.py analyze --measurement <export.txt> --target <target.txt|default> [options]
 # python pipeline.py plan --source <input.afpx> --output <new.afpx> --out <plan.json>
 # python pipeline.py apply --plan <plan.json>
+# python pipeline.py propose --measurement <export.txt> | --positions A B C ... --target <file|default>
 # python pipeline.py session check --tune <file>  |  session save --tune <file> --answers <json>
 #   --measurement FILE           REW text export (system sum or primary trace)
 #   --positions FILE [FILE...]   2+ position sweeps -> spatial_consistency
@@ -567,11 +568,13 @@ def _parse_voice(pairs):
     return knobs
 
 
-def analyze(args):
-    freqs = measure.common_grid(20.0, 20000.0, 96)
-    report = {}
-    notes = []
+def _load_session(args, freqs):
+    """Load measurement/positions/target the same way for analyze and propose.
 
+    Tonal deviation comes from the level-aligned mean when two or more
+    positions exist -- EQ what is common, not what one mic spot happened to
+    see (methodology.md §Multi-position variance). The phase-bearing
+    --measurement, when given, stays the trace for phase-based checks."""
     positions_db = []
     for p in (args.positions or []):
         f, s, _ph, _coh = measure.load_text_export(p)
@@ -589,18 +592,63 @@ def analyze(args):
 
     target_path = ASSETS_DEFAULT_TARGET if args.target == 'default' else args.target
     target_db = measure.load_target(target_path, freqs)
-
     voice_knobs = _parse_voice(args.voice)
     if voice_knobs:
         target_db = tunelib.voice_target(freqs, target_db, **voice_knobs)
-        report['voicing_applied'] = voice_knobs
 
-    anchor = tunelib.target_anchor_offset(freqs, primary_db, target_db)
-    dev_db = primary_db - (target_db + anchor)
+    sc = aligned = None
+    if len(positions_db) >= 2:
+        sc = tunelib.spatial_consistency(freqs, positions_db, min_positions=2)
+        aligned = np.vstack(positions_db) - np.asarray(sc['level_offsets_db'])[:, None]
+        basis_db = sc['mean_db']
+        source = 'mean of %d positions' % len(positions_db)
+    else:
+        basis_db = primary_db
+        source = 'single position'
+    # Two positions cannot separate a real dip from a seat-specific null, so
+    # only three or more earn a mask/confidence.
+    authority = sc if len(positions_db) >= 3 else None
+    conf = authority['conf'] if authority else None
+    anchor = tunelib.target_anchor_offset(freqs, basis_db, target_db, confidence=conf)
+    return {
+        'positions_db': positions_db, 'primary_db': primary_db,
+        'measurement_phase': measurement_phase, 'meas_axis': meas_axis,
+        'target_db': target_db, 'voice_knobs': voice_knobs,
+        'basis_db': basis_db, 'deviation_source': source, 'aligned': aligned,
+        'mask': authority['mask'] if authority else None, 'conf': conf,
+        'anchor': anchor, 'dev_db': basis_db - (target_db + anchor),
+    }
+
+
+def _phase_fields(args, freqs, sess):
+    trust = tuple(args.trust_band) if args.trust_band else _trust_band(freqs, sess['primary_db'])
+    fields = tunelib.excess_phase_fields(
+        freqs,
+        sess['primary_db'],
+        measure.resample_log(
+            sess['meas_axis'],
+            np.rad2deg(np.unwrap(np.deg2rad(sess['measurement_phase']))),
+            freqs),
+        trust_band=trust)
+    return trust, fields
+
+
+def analyze(args):
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    report = {}
+    notes = []
+
+    sess = _load_session(args, freqs)
+    positions_db = sess['positions_db']
+    measurement_phase, target_db = sess['measurement_phase'], sess['target_db']
+    anchor, dev_db = sess['anchor'], sess['dev_db']
+    if sess['voice_knobs']:
+        report['voicing_applied'] = sess['voice_knobs']
 
     report['meta'] = {
         'measurement_file': args.measurement,
         'positions_used': len(positions_db),
+        'deviation_source': sess['deviation_source'],
         'target_file': ('assets/default_incar_target.txt' if args.target == 'default' else args.target),
         'anchor_offset_db': round(float(anchor), 2),
         'phase_available': measurement_phase is not None,
@@ -609,7 +657,7 @@ def analyze(args):
         notes.append('no phase column in --measurement -- minimum-phase/delay '
                      'decisions are unavailable from this file alone')
 
-    report['tilt'] = {'measured': tunelib.measure_tilt(freqs, primary_db),
+    report['tilt'] = {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                       'target': tunelib.measure_tilt(freqs, target_db)}
     report['deviation_regions'] = _find_regions(freqs, dev_db, args.dev_flag_db)
 
@@ -626,16 +674,8 @@ def analyze(args):
         notes.append('boost gate not run -- no dip regions deep enough to flag '
                      '(nothing here tempts a boost)')
     else:
-        trust = tuple(args.trust_band) if args.trust_band else _trust_band(freqs, primary_db)
         try:
-            fields = tunelib.excess_phase_fields(
-                freqs,
-                primary_db,
-                measure.resample_log(
-                    meas_axis,
-                    np.rad2deg(np.unwrap(np.deg2rad(measurement_phase))),
-                    freqs),
-                trust_band=trust)
+            trust, fields = _phase_fields(args, freqs, sess)
         except ValueError as exc:
             notes.append('boost gate skipped: %s' % exc)
         else:
@@ -714,6 +754,111 @@ def analyze(args):
 
     report['notes'] = notes
     return report
+
+
+PROPOSE_FIT_BAND = (60.0, 12000.0)
+
+
+def propose(args):
+    """Deterministic EQ proposal: fit, gate boosts, predict. Writes nothing.
+
+    One entry point instead of re-deriving the fitter call each session, so
+    the same data always gets the same proposal. The judgment calls stay
+    with the agent and the user: every band still needs a stated reason,
+    per-edit confirmation, and pipeline.py plan/apply to be written."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    notes = []
+    sess = _load_session(args, freqs)
+    band = tuple(args.fit_band) if args.fit_band else PROPOSE_FIT_BAND
+    mask, conf, dev_db = sess['mask'], sess['conf'], sess['dev_db']
+
+    if sess['aligned'] is not None:
+        deviations = sess['aligned'] - (sess['target_db'] + sess['anchor'])
+        bands, fit_report = tunelib.fit_peq_robust(
+            freqs, deviations, band, n_bands_max=args.max_bands,
+            mask=mask, conf=conf, fit_smoothed=True)
+    else:
+        deviations = None
+        bands, fit_report = tunelib.fit_peq(
+            freqs, dev_db, band, n_bands_max=args.max_bands, fit_smoothed=True)
+        notes.append('single position: the fit cannot tell a real feature from '
+                     'a seat-specific one -- capture 3+ positions (or MMM) '
+                     'before trusting narrow bands')
+
+    gate = {}
+    has_boost = any(g > 0 for _f, _q, g in bands)
+    if sess['measurement_phase'] is not None and has_boost:
+        try:
+            _trust, fields = _phase_fields(args, freqs, sess)
+            rows, _summary = tunelib.gate_boost_bands(fields, bands)
+            gate = {(r['f_hz'], r['q'], r['gain_db']): r['verdict'] for r in rows}
+            if fields['mad_floored']:
+                notes.append('boost gate ran on a trace too smooth to support it -- '
+                             're-export WITHOUT smoothing before trusting it')
+        except ValueError as exc:
+            notes.append('boost gate skipped: %s' % exc)
+    elif has_boost:
+        notes.append('boosts are UNGATED: no phase column in --measurement, so the '
+                     'boost gate could not check them for cancellation '
+                     '(methodology.md §The boost gate)')
+
+    kept, rejected = [], []
+    for F, Q, G in bands:
+        tunelib.validate_peq_band(F, Q, G)
+        verdict = gate.get((float(F), float(Q), float(G)))
+        row = {'f_hz': F, 'q': Q, 'gain_db': G,
+               'kind': 'boost' if G > 0 else 'cut', 'boost_gate': verdict}
+        if verdict == 'BLOCK':
+            row['reason'] = 'boost gate BLOCK: the dip is phase-anomalous; gain would be eaten'
+            rejected.append(row)
+            continue
+        if verdict == 'WARN':
+            row['caution'] = 're-measure with the mic moved ~10 cm before proposing this boost'
+        kept.append(row)
+    final = [(r['f_hz'], r['q'], r['gain_db']) for r in kept]
+
+    eq = tunelib.cascade_db(freqs, final)
+    smoothed_before = tunelib.erb_smooth(freqs, dev_db)
+    smoothed_after = tunelib.erb_smooth(freqs, dev_db + eq)
+    for row in kept:
+        i = int(np.argmin(np.abs(freqs - row['f_hz'])))
+        row['predicted_deviation_db'] = {'before': round(float(smoothed_before[i]), 2),
+                                         'after': round(float(smoothed_after[i]), 2)}
+    prediction = {
+        'score_before_db': round(tunelib.audibility_score(
+            freqs, dev_db, band=band, mask=mask, conf=conf), 3),
+        'score_after_db': round(tunelib.audibility_score(
+            freqs, dev_db + eq, band=band, mask=mask, conf=conf), 3),
+        'max_cascade_boost_db': round(float(np.max(eq)), 2) if final else 0.0,
+    }
+    if deviations is not None:
+        prediction['position_scores_before_db'] = [
+            round(tunelib.audibility_score(freqs, d, band=band), 3) for d in deviations]
+        prediction['position_scores_after_db'] = [
+            round(tunelib.audibility_score(freqs, d + eq, band=band), 3) for d in deviations]
+    if not final:
+        notes.append('no band earned its place: nothing here is both fixable and '
+                     'worth a filter -- stopping is a valid outcome')
+
+    return {
+        'meta': {'measurement_file': args.measurement,
+                 'positions_used': len(sess['positions_db']),
+                 'deviation_source': sess['deviation_source'],
+                 'fit_band_hz': list(band),
+                 'anchor_offset_db': round(float(sess['anchor']), 2),
+                 'voicing_applied': sess['voice_knobs'] or None},
+        'tilt': {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
+                 'target': tunelib.measure_tilt(freqs, sess['target_db'])},
+        'proposal': {'bands': kept, 'rejected': rejected},
+        'prediction': prediction,
+        'fitter': {k: v for k, v in fit_report.items()
+                   if isinstance(v, (int, float, bool, str))},
+        'notes': notes,
+        'predicted_not_measured': True,
+        'next_step': ('present each band with its reason and predicted before/after; '
+                      'write only user-confirmed bands via pipeline.py plan/apply, '
+                      'then re-measure'),
+    }
 
 
 def source_audit(args):
@@ -1031,6 +1176,18 @@ def main():
     an.add_argument('--dev-flag-db', type=float, default=2.0)
     an.add_argument('--out')
 
+    pr = sub.add_parser('propose',
+                        help='deterministic PEQ proposal from the same inputs (writes nothing)')
+    pr.add_argument('--measurement')
+    pr.add_argument('--positions', nargs='+')
+    pr.add_argument('--target', required=True, help='target curve file, or "default"')
+    pr.add_argument('--voice', nargs='+', help='e.g. tilt=-0.5 bass=2 presence=1 air=0')
+    pr.add_argument('--fit-band', nargs=2, type=float, metavar=('LO_HZ', 'HI_HZ'),
+                    help='band to correct (default %g-%g Hz)' % PROPOSE_FIT_BAND)
+    pr.add_argument('--max-bands', type=int, default=5)
+    pr.add_argument('--trust-band', nargs=2, type=float, metavar=('LO_HZ', 'HI_HZ'))
+    pr.add_argument('--out')
+
     sa = sub.add_parser('source-audit',
                         help='is the signal entering the DSP level-independent?')
     sa.add_argument('--at', nargs='+', required=True, metavar='PATH=DB',
@@ -1079,8 +1236,8 @@ def main():
             print(text)
     elif args.cmd == 'apply':
         print(json.dumps(apply_plan(args.plan), indent=2))
-    elif args.cmd in ('analyze', 'source-audit', 'imaging'):
-        report = {'analyze': analyze, 'source-audit': source_audit,
+    elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging'):
+        report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:

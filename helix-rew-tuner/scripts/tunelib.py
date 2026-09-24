@@ -441,17 +441,16 @@ def erb_smooth(freqs, y):
     y = np.asarray(y, dtype=float)
     ratio = 1 + 0.5 * erb_hz(f) / f
     dlog = _uniform_log_step(f)
-    out = np.empty_like(y)
     if dlog is not None:
         half = np.maximum(1, np.round(np.log(ratio) / dlog).astype(int))
-        for i in range(len(y)):
-            hb = half[i]
-            out[i] = np.mean(y[max(0, i - hb):min(len(y), i + hb + 1)])
-        return out
-    # Any other increasing axis (e.g. REW's linear FFT spacing): window by Hz.
+        idx = np.arange(len(y))
+        lo = np.maximum(0, idx - half)
+        hi = np.minimum(len(y), idx + half + 1)
+    else:
+        # Any other increasing axis (e.g. REW's linear FFT spacing): window by Hz.
+        lo = np.searchsorted(f, f / ratio, side='left')
+        hi = np.searchsorted(f, f * ratio, side='right')
     csum = np.concatenate([[0.0], np.cumsum(y)])
-    lo = np.searchsorted(f, f / ratio, side='left')
-    hi = np.searchsorted(f, f * ratio, side='right')
     return (csum[hi] - csum[lo]) / np.maximum(hi - lo, 1)
 
 def masked_erb_smooth(freqs, y, mask=None):
@@ -531,7 +530,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             hf_q_knee=4.0, transition_hz=1000.0, selection_tax_weight=0.25,
             null_boost_penalty=0.8, partner_target_db=None, partner_weight=0.0,
             partner_band=(700.0, 5000.0), partner_conf=None, dip_weight=1.0,
-            fit_smoothed=False, verbose=False):
+            fit_smoothed=False, seed_retries=0, verbose=False):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -588,6 +587,18 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         it; don't just crank it by default. Prefer improving the worse
         channel directly when that's possible instead of degrading the
         better one to match it.
+
+      - fit_smoothed=True fits the masked ERB-smoothed deviation (what the
+        ear integrates) instead of raw bins. Held-out synthetic-car test:
+        better or equal on every car; pipeline.py propose uses it.
+      - dip_weight < 1 discounts below-target error. TESTED AND REJECTED as
+        a default: the fitter over-cuts peaks because landing below target
+        becomes cheap, and real-fault error got worse. "Peaks cost more than
+        dips" is already expressed by the boost tax; leave this at 1.0.
+      - seed_retries > 0 tries the next-largest residual after a rejected
+        candidate instead of stopping. Corrects more on average but mostly
+        via boosts, reduces real-fault correction, and harms more unseen
+        seats from a single position -- opt-in only, never a default.
 
     Returns (bands, report) - bands as [(F, Q, G), ...] rounded to hardware
     steps (0.25 dB gain), report dict with before/after scores (plus
@@ -694,7 +705,13 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     cur_score = base_combined
     cur_select_score = base_combined
 
-    for k in range(n_bands_max):
+    # A rejected candidate normally ends the fit. seed_retries > 0 instead
+    # blocks +/-1/3 octave around the failed seed and tries the next-largest
+    # residual, so one unfixable feature (a comb dip at the mic) cannot stop
+    # the fitter before it reaches a real, fixable one elsewhere.
+    blocked = np.zeros(len(freqs), dtype=bool)
+    failures = 0
+    while len(params) // 3 < n_bands_max:
         # seed the next band at the biggest remaining weighted, smoothed bump.
         # Blends in partner mismatch (when active) so a channel that's
         # already flat vs target but diverging from its partner still gets a
@@ -715,6 +732,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             res_w = np.where(res_now < 0.0, dip_weight * res_w, res_w)
         if conf is not None:
             res_w *= np.clip(conf, 0.0, 1.0)
+        res_w = np.where(blocked, 0.0, res_w)
         i0 = int(np.argmax(res_w))
         if res_w[i0] <= 0:
             break
@@ -733,7 +751,11 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             print('  band %d: score %.3f -> %.3f (%.1f%%) | selection %.3f -> %.3f (%.1f%%)' %
                   (nb, cur_score, new_score, raw_gain_pct, cur_select_score, new_select_score, select_gain_pct))
         if raw_gain_pct < improve_pct or select_gain_pct < improve_pct:
-            break                                    # parsimony gate
+            failures += 1                            # parsimony gate
+            if failures > seed_retries:
+                break
+            blocked |= np.abs(np.log2(freqs / seed_F)) <= 1.0 / 3.0
+            continue
         params, cur_score, cur_select_score = fit.x, new_score, new_select_score
 
     bands = []

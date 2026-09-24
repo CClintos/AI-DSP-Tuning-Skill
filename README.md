@@ -129,7 +129,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.4.0`) so you can tell whether an already-installed copy is current — open
+`1.5.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -228,8 +228,10 @@ Claude will:
 2. Validate the measurement data.
 3. Offer to voice the target (tilt/bass/presence/air) before proposing anything —
    the goal, not the correction, comes first.
-4. Classify each problem region and propose a conservative, budgeted set of edits,
-   showing predicted before → after with a confidence level per claim.
+4. Classify each problem region and propose a conservative, budgeted set of edits
+   (starting from the deterministic `pipeline.py propose`, which averages multiple
+   mic positions and gates boosts), showing predicted before → after with a
+   confidence level per claim.
 5. Write a verified `.afpx` only through `pipeline.py plan` followed by
    `pipeline.py apply`, always preserving crossovers and requiring a specific
    confirmation for every edit.
@@ -279,7 +281,7 @@ helix-rew-tuner/
 │   ├── tunelib.py                    verified DSP + acoustic-analysis core (self-tests)
 │   ├── afpx.py                       decode / inspect / internal write verification
 │   ├── measure.py                    load REW exports & .mdat, validate axis, targets
-│   ├── pipeline.py                   analysis plus required AFPX plan/apply boundary
+│   ├── pipeline.py                   analysis, EQ proposal, and required AFPX plan/apply boundary
 │   ├── pct6.py                       BETA source-bound .pct6 decode/encode
 │   ├── alpine_jssh.py                BETA source-bound Alpine .jssh decode/encode
 │   ├── preflight.py                  read-only dependency and path readiness check
@@ -305,6 +307,7 @@ tests/
 ├── test_codec_and_loader_integrity.py  tune-codec byte integrity and REW/target loader validation
 ├── test_pipeline_apply.py            deterministic tune plan/apply integration tests
 ├── test_preflight_and_benchmark.py   install and optimizer benchmark tests
+├── test_propose.py                  deterministic EQ proposal and position averaging
 ├── test_session_file.py              intake session sidecar check/save
 ├── test_source_and_imaging.py        source-audit and frequency-dependent imaging tests
 └── test_tunelib_regressions.py       acoustic-analysis and optimizer regressions

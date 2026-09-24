@@ -113,6 +113,8 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   LO HI` sets the driver's passband explicitly). Before quoting a verdict read
   methodology.md §The boost gate, which covers why ALLOW is not a certificate.
   Analysis writes nothing to a DSP file.
+  `pipeline.py propose` (same inputs) turns that analysis into a
+  deterministic PEQ proposal — see step 4.
   Two further read-only commands share the same loader and conventions:
   `pipeline.py source-audit --at ref.txt=0 down6.txt=-6 ...` asks whether the
   signal ENTERING the DSP is level-independent (read §Audit the source, first —
@@ -268,6 +270,14 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
 - **What each measurement is**: a system-sum/response is the minimum. Solo drivers,
   L+R "together" pairs, and multi-position sweeps unlock progressively more (pair
   summation analysis, per-side imaging, robustness). Ask what they captured.
+- **Ask for 3+ mic positions (or an MMM average) before any EQ proposal** — it
+  is the single biggest lever on how good the tune ends up. From one sweep the
+  fitter cannot tell a real response fault from a reflection comb at that mic
+  spot, so it correctly holds back and fixes little; on synthetic held-out
+  tests, fitting the average of three positions roughly doubled the
+  improvement heard at unmeasured seat positions versus one position. A
+  single sweep still supports broad, conservative moves — say that's what
+  they're getting and why.
 - **Listening seat / drive side** (LHD/RHD or "which seat did you measure"): needed
   to interpret near vs far speaker for imaging — never assume it.
 - **Measurement method**: fixed-position sweep (phase-valid → usable for timing/APF)
@@ -373,6 +383,20 @@ car.
 
 ### 4. Propose — jointly, within budget
 
+- **Start from `python scripts/pipeline.py propose`** with the same inputs you
+  gave `analyze` (`--measurement` and/or `--positions`, `--target`, `--voice`,
+  optionally `--fit-band LO HI` per channel and `--max-bands N`). It runs the
+  joint fitter the same way every session — multi-position robust fit with
+  spatial mask/confidence when 3+ positions exist, the boost gate on any boost
+  when the measurement carries phase (BLOCKed boosts land in `rejected`), and
+  hardware validation — and returns each band with its predicted before/after
+  deviation plus per-position scores. It writes nothing. Treat it as the
+  starting proposal: you still classify each band (step 3), drop or relax any
+  you can't justify, and confirm each one with the user. Hand-roll a
+  `fit_peq` call only for something `propose` can't express (e.g. partner
+  L/R matching), and say so.
+- With 2+ positions, `analyze` and `propose` take the tonal deviation from
+  the level-aligned position average, not the first file — EQ what's common.
 - Model every candidate edit as a biquad and **predict the summed result** before
   writing (bands within an octave interact — never set gain = −deviation naively).
 - Prefer few, broad, low-Q moves. Peaks cost more than dips. Do not fill narrow

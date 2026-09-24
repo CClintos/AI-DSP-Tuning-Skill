@@ -235,12 +235,83 @@ def worst_position_harm_case():
     }
 
 
+def _synthetic_car(rng, freqs):
+    """A real tonal fault shared by every seat + per-position combs/modes/noise."""
+    real = []
+    for _ in range(rng.integers(3, 6)):
+        real.append((10 ** rng.uniform(np.log10(80), np.log10(8000)),
+                     rng.uniform(0.8, 3.0), rng.uniform(2.0, 6.0)))
+    for _ in range(rng.integers(1, 3)):
+        real.append((10 ** rng.uniform(np.log10(150), np.log10(6000)),
+                     rng.uniform(0.7, 1.5), -rng.uniform(1.5, 4.0)))
+    fault = tunelib.cascade_db(freqs, real)
+
+    def position():
+        y = np.zeros_like(freqs)
+        for _ in range(2):
+            tau = rng.uniform(0.25e-3, 2.0e-3)
+            y += 20 * np.log10(np.abs(
+                1 + rng.uniform(0.3, 0.7) * np.exp(-2j * np.pi * freqs * tau)))
+        for _ in range(3):
+            y += tunelib.peaking_db(freqs, 10 ** rng.uniform(np.log10(40), np.log10(300)),
+                                    rng.uniform(3, 10), rng.uniform(-8, 5))
+        return y + rng.normal(0, 0.3, len(freqs))
+
+    return fault, position
+
+
+def heldout_tuning_quality_case(n_cars=6):
+    """Does the EQ fitted from three positions help seats it never measured?
+
+    Synthetic cars: a real fault every seat shares plus seat-specific
+    reflection combs and cabin modes. The fit sees three positions (the path
+    pipeline.py propose takes); it is scored on eight unseen ones and on the
+    real fault alone. Floors sit below measured performance so a regression
+    in how the fitter chooses filters fails here instead of in someone's car.
+    """
+    freqs = np.geomspace(20.0, 20000.0, int(round(np.log2(1000.0) * 96)) + 1)
+    band = (60.0, 12000.0)
+    held_gains, true_gains, boosts = [], [], []
+    for car in range(n_cars):
+        rng = np.random.default_rng(4200 + car)
+        fault, position = _synthetic_car(rng, freqs)
+        fit_positions = np.vstack([fault + position() for _ in range(3)])
+        held = [fault + position() for _ in range(8)]
+        bands, _report = tunelib.fit_peq_robust(
+            freqs, fit_positions, band, n_bands_max=5, fit_smoothed=True)
+        eq = tunelib.cascade_db(freqs, bands)
+        held_gains.append(float(np.mean(
+            [tunelib.audibility_score(freqs, h, band=band)
+             - tunelib.audibility_score(freqs, h + eq, band=band) for h in held])))
+        true_gains.append(tunelib.audibility_score(freqs, fault, band=band)
+                          - tunelib.audibility_score(freqs, fault + eq, band=band))
+        boosts.append(sum(max(0.0, g) for _f, _q, g in bands))
+    mean_held = round(float(np.mean(held_gains)), 3)
+    worst_held = round(float(np.min(held_gains)), 3)
+    mean_true = round(float(np.mean(true_gains)), 3)
+    return {
+        "id": "heldout_tuning_quality",
+        "metrics": {
+            "mean_unseen_position_gain_db": mean_held,
+            "worst_car_unseen_position_gain_db": worst_held,
+            "mean_real_fault_gain_db": mean_true,
+            "mean_total_boost_db": round(float(np.mean(boosts)), 2),
+        },
+        "guards": [
+            make_guard("unseen seats improve on average", mean_held, ">=", 0.35),
+            make_guard("no car is made worse at unseen seats", worst_held, ">=", -0.05),
+            make_guard("the real shared fault is reduced", mean_true, ">=", 0.5),
+        ],
+    }
+
+
 CASE_RUNNERS = [
     stable_peaks_case,
     wandering_nulls_case,
     level_offsets_case,
     confidence_blocked_lr_matching_case,
     worst_position_harm_case,
+    heldout_tuning_quality_case,
 ]
 
 
