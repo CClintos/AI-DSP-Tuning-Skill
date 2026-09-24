@@ -422,13 +422,48 @@ def gate_boost_bands(fields, bands, z_warn=7.0, z_block=11.0, dip_db=4.0,
 def erb_hz(fc):
     return 24.7 * (4.37 * fc / 1000.0 + 1.0)
 
+def _uniform_log_step(freqs):
+    """Natural-log step of a uniformly log-spaced axis, else None. Smoothing
+    windows are counted in bins, so they must use the axis's real spacing:
+    assuming 96 PPO on a 48 PPO axis silently doubles every window."""
+    f = np.asarray(freqs, dtype=float)
+    if f.ndim != 1 or len(f) < 3 or not np.all(f > 0):
+        return None
+    d = np.diff(np.log(f))
+    if d.min() <= 0 or d.max() - d.min() > 0.01 * d.mean():
+        return None
+    return float(d.mean())
+
+
 def erb_smooth(freqs, y):
-    dlog = np.log(LOGSTEP)
+    """Average over one ERB centred on each bin (the ear's integration width)."""
+    f = np.asarray(freqs, dtype=float)
+    y = np.asarray(y, dtype=float)
+    ratio = 1 + 0.5 * erb_hz(f) / f
+    dlog = _uniform_log_step(f)
     out = np.empty_like(y)
-    for i in range(len(y)):
-        hb = max(1, int(round(np.log(1 + 0.5 * erb_hz(freqs[i]) / freqs[i]) / dlog)))
-        out[i] = np.mean(y[max(0, i - hb):min(len(y), i + hb + 1)])
-    return out
+    if dlog is not None:
+        half = np.maximum(1, np.round(np.log(ratio) / dlog).astype(int))
+        for i in range(len(y)):
+            hb = half[i]
+            out[i] = np.mean(y[max(0, i - hb):min(len(y), i + hb + 1)])
+        return out
+    # Any other increasing axis (e.g. REW's linear FFT spacing): window by Hz.
+    csum = np.concatenate([[0.0], np.cumsum(y)])
+    lo = np.searchsorted(f, f / ratio, side='left')
+    hi = np.searchsorted(f, f * ratio, side='right')
+    return (csum[hi] - csum[lo]) / np.maximum(hi - lo, 1)
+
+def masked_erb_smooth(freqs, y, mask=None):
+    """erb_smooth that ignores mask=False bins instead of averaging them in, so
+    an excluded null cannot drag its neighbours' smoothed level down."""
+    y = np.asarray(y, dtype=float)
+    if mask is None:
+        return erb_smooth(freqs, y)
+    m = np.asarray(mask, dtype=float)
+    num = erb_smooth(freqs, np.where(m > 0, y, 0.0))
+    den = erb_smooth(freqs, m)
+    return np.where(den > 1e-9, num / np.maximum(den, 1e-9), y)
 
 def audibility_weight(freqs):
     """Simple sensitivity weighting, PROVISIONAL (Toole/Olive tables still not
@@ -442,7 +477,8 @@ def audibility_weight(freqs):
     w[hi] = 1.0 - 0.6 * (np.log2(freqs[hi] / 6000.0) / np.log2(16000.0 / 6000.0))
     return np.clip(w, 0.3, 1.0)
 
-def audibility_score(freqs, dev_db, band=(60.0, 16000.0), mask=None, conf=None):
+def audibility_score(freqs, dev_db, band=(60.0, 16000.0), mask=None, conf=None,
+                     dip_weight=1.0):
     """One number for 'how audibly wrong is this curve' (lower = better).
     ERB-smooth first (what the ear integrates), weight by sensitivity, RMS.
     `conf` is an optional 0..1 per-bin confidence array. Use it for spatial
@@ -460,7 +496,10 @@ def audibility_score(freqs, dev_db, band=(60.0, 16000.0), mask=None, conf=None):
     den = np.sum(w ** 2)
     if den <= 1e-12:
         return float('inf')
-    return float(np.sqrt(np.sum((sm[sel] * w) ** 2) / den))
+    err = sm[sel]
+    if dip_weight != 1.0:
+        err = np.where(err < 0.0, dip_weight * err, err)
+    return float(np.sqrt(np.sum((err * w) ** 2) / den))
 
 
 def _peq_filter_penalties(bands, boost_penalty, hf_q_penalty,
@@ -491,7 +530,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             improve_pct=6.0, boost_penalty=0.5, hf_q_penalty=0.4,
             hf_q_knee=4.0, transition_hz=1000.0, selection_tax_weight=0.25,
             null_boost_penalty=0.8, partner_target_db=None, partner_weight=0.0,
-            partner_band=(700.0, 5000.0), partner_conf=None, verbose=False):
+            partner_band=(700.0, 5000.0), partner_conf=None, dip_weight=1.0,
+            fit_smoothed=False, verbose=False):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -559,6 +599,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     if mask is not None:
         sel &= mask
     fsel = freqs[sel]
+    fit_dev = (masked_erb_smooth(freqs, dev_db, mask) if fit_smoothed
+               else np.asarray(dev_db, dtype=float))
     w = audibility_weight(fsel)
     if conf is not None:
         w = w * np.clip(conf[sel], 0.0, 1.0)     # continuous confidence down-weight
@@ -596,8 +638,10 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     def resid(params):
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
-        r = (dev_db[sel] + cascade_db(fsel, bands)) * w
-        parts = [r, penalties(bands)]
+        r = fit_dev[sel] + cascade_db(fsel, bands)
+        if dip_weight != 1.0:
+            r = np.where(r < 0.0, dip_weight * r, r)
+        parts = [r * w, penalties(bands)]
         if psel is not None:
             own_p = dev_db[psel] + cascade_db(freqs[psel], bands)
             parts.append(partner_weight * pw * (own_p - ptarget))
@@ -607,7 +651,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
         full = dev_db + cascade_db(freqs, bands)
-        return audibility_score(freqs, full, band=fit_band, mask=mask, conf=conf)
+        return audibility_score(freqs, full, band=fit_band, mask=mask, conf=conf,
+                                dip_weight=dip_weight)
 
     def combined_score_of(params):
         """score_of plus the partner-match penalty, when active. This (not
@@ -641,7 +686,9 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
 
     base_score = audibility_score(freqs, dev_db, band=fit_band, mask=mask, conf=conf)
     base_partner = partner_mismatch([])
-    base_combined = base_score + partner_weight * base_partner
+    base_combined = (audibility_score(freqs, dev_db, band=fit_band, mask=mask, conf=conf,
+                                      dip_weight=dip_weight)
+                     + partner_weight * base_partner)
     params = np.array([])
     lo_f, hi_f = np.log10(fit_band[0] * 1.02), np.log10(fit_band[1] * 0.98)
     cur_score = base_combined
@@ -664,6 +711,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
                                 * (raw_now[psel] - ptarget))
         res_now = erb_smooth(freqs, seed_basis)
         res_w = np.where(sel, np.abs(res_now) * audibility_weight(freqs), 0)
+        if dip_weight != 1.0:
+            res_w = np.where(res_now < 0.0, dip_weight * res_w, res_w)
         if conf is not None:
             res_w *= np.clip(conf, 0.0, 1.0)
         i0 = int(np.argmax(res_w))
@@ -715,7 +764,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                    boost_penalty=0.5, hf_q_penalty=0.4, hf_q_knee=4.0,
                    transition_hz=1000.0, selection_tax_weight=0.25,
                    null_boost_penalty=0.8, tail_weight=0.75,
-                   max_worst_loss_db=0.25, verbose=False):
+                   max_worst_loss_db=0.25, fit_smoothed=False, verbose=False):
     """Fit one quantized PEQ cascade across multiple measured positions.
 
     ``deviations_db`` is shaped ``(positions, frequencies)``. ``mask`` and
@@ -766,6 +815,9 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         else:
             sanitized[position] = 0.0
     deviations = sanitized
+    fit_deviations = (np.vstack([masked_erb_smooth(freqs, deviations[i], masks[i])
+                                 for i in range(shape[0])])
+                      if fit_smoothed else deviations)
     inband = (freqs >= fit_band[0]) & (freqs <= fit_band[1])
     authority = masks & inband[None, :]
     weights = audibility_weight(freqs)[None, :] * confidence * authority
@@ -825,7 +877,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
 
     def resid(params):
         bands = raw_bands(params)
-        errors = deviations + cascade_db(freqs, bands)[None, :]
+        errors = fit_deviations + cascade_db(freqs, bands)[None, :]
         weighted = errors * weights
         median_error = authoritative_median(errors)
         median_weight = np.median(weights, axis=0)
@@ -1728,7 +1780,8 @@ def octave_smooth_log(freqs, y, oct_frac):
     both do exactly that. Repeating the end value instead is the standard
     treatment and is correct in both cases."""
     y = np.asarray(y, dtype=float)
-    w = max(1, int(round((1.0 / np.log10(LOGSTEP)) * np.log10(2 ** oct_frac))))
+    dlog = _uniform_log_step(freqs) or np.log(LOGSTEP)
+    w = max(1, int(round(np.log(2 ** oct_frac) / dlog)))
     if w <= 1:
         return y.copy()
     pad = w // 2

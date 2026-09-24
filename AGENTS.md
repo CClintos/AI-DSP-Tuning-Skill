@@ -262,8 +262,8 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
 - **Target curve**: the user supplies their own (any `freq level` text file —
   ResoNix, Harman in-car, personal house curve, flat, etc.); load it with
   `measure.load_target`. **If they have none, default to
-  `assets/default_incar_target.txt`** (a gentle downward-tilted in-car curve with a
-  bass lift) and tell them that's what you're using and that they can swap in their
+  `assets/default_incar_target.txt`** (a downward-tilted in-car curve, about
+  −0.9 dB/oct, with a ~+9 dB bass shelf and flat 300 Hz–1 kHz) and tell them that's what you're using and that they can swap in their
   own at any time. Only the shape matters — the tuner anchors overall level itself.
 - **What each measurement is**: a system-sum/response is the minimum. Solo drivers,
   L+R "together" pairs, and multi-position sweeps unlock progressively more (pair

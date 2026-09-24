@@ -94,8 +94,9 @@ def resample_log(freqs_src, y_src, freqs_dst):
     return np.interp(np.log10(freqs_dst), np.log10(freqs_src), y_src)
 
 
-def common_grid(lo=20.0, hi=20000.0, ppo=48):
-    """A clean log grid (points-per-octave). Use to align multiple traces."""
+def common_grid(lo=20.0, hi=20000.0, ppo=96):
+    """A clean log grid (points-per-octave). Use to align multiple traces.
+    96 PPO matches REW's default and pipeline.py's analysis grid."""
     n = int(round(np.log2(hi / lo) * ppo)) + 1
     return lo * 2 ** (np.arange(n) / ppo)
 

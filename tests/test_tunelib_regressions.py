@@ -168,5 +168,18 @@ class ConfidenceAwareScorecardTests(unittest.TestCase):
         self.assertEqual(1.0, scorecard["tweeter_balance_abs_rms_db"])
 
 
+class DefaultTargetVoicingTests(unittest.TestCase):
+    def test_bundled_default_target_sits_in_recommended_incar_tilt_range(self):
+        """The default target must not be one measure_tilt itself calls bright."""
+        import measure
+        freqs = measure.common_grid(20.0, 20000.0, 96)
+        target = measure.load_target(
+            SCRIPTS.parent / "assets" / "default_incar_target.txt", freqs)
+        tilt = tunelib.measure_tilt(freqs, target)
+        low, high = tilt["good_incar_range"]
+        self.assertGreaterEqual(tilt["tilt_db_per_oct"], low)
+        self.assertLessEqual(tilt["tilt_db_per_oct"], high)
+
+
 if __name__ == "__main__":
     unittest.main()
