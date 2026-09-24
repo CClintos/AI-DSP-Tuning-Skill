@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import importlib.util
 import os
+import re
 from pathlib import Path
 import subprocess
 import sys
@@ -53,6 +55,16 @@ Re-measure after changes.
 
 
 class RepositoryReleaseContractsTests(unittest.TestCase):
+    def test_readme_install_version_matches_skill_version(self):
+        spec = importlib.util.spec_from_file_location("build_skill", BUILD_SCRIPT)
+        build_skill = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(build_skill)
+        version = build_skill.SKILL_VERSION
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        stated = re.search(r"\(currently\s+`([^`]+)`\)", readme)
+        self.assertIsNotNone(stated, "README no longer states the current version")
+        self.assertEqual(stated.group(1), version)
+
     def test_afpx_write_guidance_routes_through_plan_apply_and_generated_doctrine(self):
         core = (REPO_ROOT / "helix-rew-tuner" / "references" / "core_workflow.md").read_text(
             encoding="utf-8")

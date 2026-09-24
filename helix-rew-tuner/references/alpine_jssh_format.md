@@ -195,7 +195,7 @@ than claiming the requested Q applied exactly.
 
 A file that decodes cleanly and "looks right" as JSON is **not** the same as
 a file Alpine will accept and apply. Three separate things have to hold, and
-`preflight_real_file()` (CLI: `python alpine_jssh.py preflight <file>`) is
+`preflight_real_file()` (CLI: `python scripts/alpine_jssh.py preflight <file>`) is
 the gate that checks them. **Run it on a real preset and report its verdict
 before trusting any generated file on hardware.**
 

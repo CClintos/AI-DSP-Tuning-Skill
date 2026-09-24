@@ -129,7 +129,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.0.0`) so you can tell whether an already-installed copy is current — open
+`1.2.1`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -304,6 +304,7 @@ tests/
 ├── test_build_skill.py               build, metadata, anchor, and archive parity tests
 ├── test_pipeline_apply.py            deterministic tune plan/apply integration tests
 ├── test_preflight_and_benchmark.py   install and optimizer benchmark tests
+├── test_source_and_imaging.py        source-audit and frequency-dependent imaging tests
 └── test_tunelib_regressions.py       acoustic-analysis and optimizer regressions
 ```
 

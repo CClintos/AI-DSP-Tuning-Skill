@@ -17,16 +17,20 @@ spending a limited filter budget where it improves the whole system.
 
 ## The scripts (in `scripts/`)
 
-Run these with the user's files; they are the deterministic layer.
+Run these with the user's files; they are the deterministic layer. Commands
+below are written relative to the skill directory (the folder holding
+`SKILL.md` and `requirements.txt`) — run them from there, or prefix the
+skill directory's absolute path. For ad-hoc Python that imports them, put
+`scripts/` on the path first: `sys.path.insert(0, r'<skill_dir>/scripts')`.
 
-- **`preflight.py`** — read-only install check. Run `python preflight.py
+- **`preflight.py`** — read-only install check. Run `python scripts/preflight.py
   --json` before first use in a new environment; it reports Python, NumPy,
   SciPy, required skill paths, actionable failures, and overall readiness.
   Install declared dependencies with `python -m pip install -r requirements.txt`.
 - **`benchmark.py`** — deterministic synthetic robust-fitting regression gate.
-  Run `python benchmark.py --json`; any failed declared guard exits nonzero.
+  Run `python scripts/benchmark.py --json`; any failed declared guard exits nonzero.
 - **`tunelib.py`** — the verified analysis + DSP core (import it). Pure,
-  deterministic, self-tested (`python tunelib.py` → `ALL TESTS PASSED`). This
+  deterministic, self-tested (`python scripts/tunelib.py` → `ALL TESTS PASSED`). This
   is a lookup table, not the rationale — each function's *why* and *when*
   lives in `references/methodology.md` (section noted below; read that
   before using a function you haven't used yet this session):
@@ -41,6 +45,7 @@ Run these with the user's files; they are the deterministic layer.
   | `delay_sweep`, `overlap_weighted_delay_gain` | in-band-only delay search (run alongside `polarity_delay_search` whenever either driver is band-limited — its damage-band safety net can hide a real gain there); maximin across multiple sessions; flags cycle-ambiguous results | §When `polarity_delay_search` says |
   | `spatial_consistency`, `complex_vector_average` | multi-position averaging | §Multi-position variance |
   | `phase_linearity_residual` | single-position phase reliability | §Quantify single-position phase reliability |
+  | `prediction_confidence` | do complex solos reproduce the measured pair sum? gates every phase decision (step 2) | §Quantify single-position phase reliability |
   | `excess_gd_mask` | minimum-phase / EQ-ability classifier | §Minimum-phase |
   | `excess_phase_fields` + `boost_gate_verdict` / `gate_boost_bands` | is a specific BOOST pushing gain into a cancellation? (ALLOW/WARN/BLOCK; specific, not sensitive — ALLOW proves nothing, and it needs UNSMOOTHED data) | §The boost gate |
   | `lr_match_report` | L/R image-stability diagnostic | §Imaging |
@@ -63,7 +68,7 @@ Run these with the user's files; they are the deterministic layer.
   | `validate_peq_band` | hardware gain/Q limits | — |
   | `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | §Shelf cookbook, §All-pass cookbook |
 - **`afpx.py`** — decode/inspect a `.afpx`, **auto-detect channel roles from
-  crossovers**, and lint writes (`roundtrip_lint`). `python afpx.py inspect <file>`.
+  crossovers**, and lint writes (`roundtrip_lint`). `python scripts/afpx.py inspect <file>`.
   Direct `afpx.py` write helpers are implementation/reference only; never call
   them as a user-facing file-output route.
   `channels()[ch]['slots']` gives every filter's stable `slot_index`/`fn`;
@@ -78,12 +83,12 @@ Run these with the user's files; they are the deterministic layer.
   mandatory before reporting any `headroom_report` clip risk (that flag is
   PEQ-only and usually a false alarm once the existing trim is counted);
   its internal writer is attenuation-only by construction (≤0 dB, ≥−6 dB,
-  relative to current). `python afpx.py selftest` self-tests these implementation
+  relative to current). `python scripts/afpx.py selftest` self-tests these implementation
   primitives on synthetic XML; it does not replace the plan/apply boundary.
 - **`measure.py`** — load REW text exports (robust) or `.mdat` (validate first),
   resample onto a common grid, load target curves.
 - **`pipeline.py`** — one deterministic entry point for step 2-3's analysis
-  instead of a bespoke `python -c` each session. `python pipeline.py analyze
+  instead of a bespoke `python -c` each session. `python scripts/pipeline.py analyze
   --measurement <export.txt> --target <file|default> [--positions ... |
   --solo-a/--solo-b/--together --pair-band LO HI | --gate-ms N | --afpx
   <file> | --voice tilt=X bass=Y presence=Z air=W]` → one JSON report: tilt,
@@ -109,7 +114,7 @@ Run these with the user's files; they are the deterministic layer.
   creates a new output, re-decodes it, and returns the verification manifest.
   Any phase-domain edit (delay or T=19/20 APF) must be applied and remeasured
   before a fresh plan may contain EQ-domain edits (T=17 PEQ or T=3/4 shelves).
-  `python pipeline.py selftest` self-tests analysis and documentation routing on
+  `python scripts/pipeline.py selftest` self-tests analysis and documentation routing on
   synthetic fixtures.
 - **`decay.py reflections <ir.wav>`** — secondary arrivals from the impulse
   response: delay, level, path-length difference, and the comb each one must
@@ -120,15 +125,15 @@ Run these with the user's files; they are the deterministic layer.
 - **`decay.py`** — waterfall/CSD decay analysis on an impulse-response `.wav`
   (REW "Export IR" or similar), for when a problem is ringing/decay-shaped
   rather than magnitude-shaped (see §Beyond magnitude, methodology.md).
-  `python decay.py t20 <ir.wav>` (RT20-style decay time per band),
-  `python decay.py csd <ir.wav>` (cumulative spectral decay slices), `python
-  decay.py compare <a.wav> <b.wav>` (before/after). Self-contained CLI, no
+  `python scripts/decay.py t20 <ir.wav>` (RT20-style decay time per band),
+  `python scripts/decay.py csd <ir.wav>` (cumulative spectral decay slices),
+  `python scripts/decay.py compare <a.wav> <b.wav>` (before/after). Self-contained CLI, no
   `tunelib`/`afpx` dependency.
 - **`repeatability.py`** — build a same-sitting noise-floor from repeat
   sweeps and check a proposed deviation against it, when you need a real
   measured floor instead of `historical_repeatability`'s cross-session
-  heuristic. `python repeatability.py floor <file> [<file> ...] [--json
-  out.json]`, then `python repeatability.py check --floor <floor.json> --dev
+  heuristic. `python scripts/repeatability.py floor <file> [<file> ...] [--json
+  out.json]`, then `python scripts/repeatability.py check --floor <floor.json> --dev
   <hz:db> [...]`. Imports `measure.py` for loading.
 - **`pct6.py`** — **BETA, personal-use only** — decode and source-bound encode
   `.pct6` (DSP PC-Tool 6, no-password saves only). `decode()` gives a byte-
@@ -180,7 +185,7 @@ never hand-guess `.afpx`/`.pct6` bytes or filter codes.
 If this is the first tune session in this environment (a fresh Claude Code
 project, a new machine, a container you haven't used this skill in before) —
 or you're simply unsure whether Python/NumPy/SciPy are set up here — run
-`python preflight.py --json` before anything else. It's read-only and checks
+`python scripts/preflight.py --json` before anything else. It's read-only and checks
 Python version, both dependencies, and the required skill paths in one call.
 If it reports any failure, tell the user plainly what's missing (usually
 `python -m pip install -r requirements.txt`) and stop there — don't start
@@ -235,7 +240,7 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   is unchanged, but every Helix-specific limit must be swapped for Alpine's
   (see the `alpine_jssh.py` entry above).
 - **DSP model** and how many channels (read from the `.afpx` — `afpx.py` lists them).
-- **Channel map**: run `python afpx.py inspect <file>` to auto-detect roles from
+- **Channel map**: run `python scripts/afpx.py inspect <file>` to auto-detect roles from
   crossovers, then **show the user and have them confirm/correct** which channel is
   which driver and which side (L/R). The inference is a starting point, not truth.
 - **Target curve**: the user supplies their own (any `freq level` text file —
@@ -393,6 +398,19 @@ car.
 - Supported plan edits are PEQ (`T=17`), justified shelves (`T=3/4`, end slots
   only), all-passes (`T=19/20`), confirmed delays, and attenuation-only output
   trims. Direct `afpx.py` write helpers are implementation/reference only.
+- **Beta `.pct6` and Alpine `.jssh` writes have no plan file, so nothing
+  enforces the rules for you — apply them by hand.** The plan schema is
+  AFPX-only; these formats write through their own
+  `write_preserving_crossovers` (crossover-safe, exclusive new output), which
+  does not check confirmations or edit domains. Every rule in this step and
+  in Non-negotiables still applies unchanged: per-edit user confirmation
+  (ordinary PEQ included), delays only under the conditions below, and no
+  phase-domain edit in the same written file as an EQ-domain edit. After
+  writing, verify before handing off: for `.pct6`, re-decode the output and
+  run `afpx.roundtrip_lint(source_xml, output_xml, ...)`; for `.jssh`, run
+  `alpine_jssh.verify_write` with exactly the channels and byte offsets you
+  intended to change. Report that verification to the user, as the AFPX
+  manifest would.
 - **Never write or change crossovers, even if the user asks.** Preserve them
   unconditionally. Preserve delays unless the user explicitly confirms the
   specific delay write under the conditions below. Apply enforces source-bound
@@ -464,7 +482,8 @@ reverted band without telling the user why.
 5. **Classify before correcting.** Never boost a null or a reflection. Never EQ a
    phase problem.
 6. **Never combine a phase-domain write (delay/APF) with an EQ-domain write
-   (PEQ/shelf) anywhere in one plan, even across channels.** A phase fix changes
+   (PEQ/shelf) anywhere in one plan or one written file, in any format, even
+   across channels.** A phase fix changes
    the summed response that the EQ prediction used. Apply the phase-only plan,
    remeasure, then create a fresh EQ-only plan — see methodology.md's crossover
    ladder for why.
