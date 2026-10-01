@@ -977,6 +977,15 @@ first when both are needed.
 
 ## The crossover action-ladder (cheapest, safest first)
 
+**Confidence is part of every recommendation.** A delay comes from
+`delay_consensus` (junction score, magnitude search, cross-correlation, phase
+slope): report the agreed value, how many estimators agree and the spread; a
+`low` result or `timing_suspect` is "re-measure / check the timing
+reference", never a number to write. An EQ band from `propose` with 3+
+positions carries its held-out stability and action; present APPLY bands as
+the proposal, REVIEW bands as questions, and say why DO NOT APPLY bands were
+dropped.
+
 **Start with `tunelib.crossover_confidence(freqs, solo_a, solo_b, together_db,
 band)`, band-limited to just that crossover** (e.g. `(50.0, 120.0)` for sub/
 midbass, `(1800.0, 4500.0)` for mid/tweeter) — not the whole trace. It bundles

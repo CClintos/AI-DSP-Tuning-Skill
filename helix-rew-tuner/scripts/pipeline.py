@@ -800,18 +800,39 @@ def propose(args):
     band = tuple(args.fit_band) if args.fit_band else PROPOSE_FIT_BAND
     mask, conf, dev_db = sess['mask'], sess['conf'], sess['dev_db']
 
-    if sess['aligned'] is not None:
+    held_out = None
+    band_validation = {}
+    if sess['aligned'] is not None and sess['aligned'].shape[0] >= 3:
+        deviations = sess['aligned'] - (sess['target_db'] + sess['anchor'])
+        # Leave-one-position-out: the proposal must help positions it was not
+        # fitted on (tunelib.held_out_band_validation). Its final fit IS the
+        # proposal, so validation and proposal cannot drift apart.
+        held_out = tunelib.held_out_band_validation(
+            freqs, deviations, band, mask=mask, conf=conf,
+            fitter_kwargs={'n_bands_max': args.max_bands})
+        bands = [(r['f_hz'], r['q'], r['gain_db']) for r in held_out['bands']]
+        band_validation = {(r['f_hz'], r['q'], r['gain_db']): r for r in held_out['bands']}
+        fit_report = {'held_out_verdict': held_out['verdict'],
+                      'median_held_out_gain_db': held_out['median_held_out_gain_db'],
+                      'worst_held_out_gain_db': held_out['worst_held_out_gain_db']}
+        if held_out['verdict'] == 'not_validated':
+            notes.append('held-out validation FAILED: refitted without each position in '
+                         'turn, the proposal did not reliably help the position left out -- '
+                         'treat every band as position-specific until more positions agree')
+    elif sess['aligned'] is not None:
         deviations = sess['aligned'] - (sess['target_db'] + sess['anchor'])
         bands, fit_report = tunelib.fit_peq_robust(
             freqs, deviations, band, n_bands_max=args.max_bands,
             mask=mask, conf=conf, fit_smoothed=True)
+        notes.append('two positions: fitted jointly, but held-out validation needs 3+ '
+                     'positions, so no band carries a generalisation check')
     else:
         deviations = None
         bands, fit_report = tunelib.fit_peq(
             freqs, dev_db, band, n_bands_max=args.max_bands, fit_smoothed=True)
         notes.append('single position: the fit cannot tell a real feature from '
-                     'a seat-specific one -- capture 3+ positions (or MMM) '
-                     'before trusting narrow bands')
+                     'a seat-specific one, and held-out validation needs 3+ '
+                     'positions -- capture them (or MMM) before trusting narrow bands')
 
     gate = {}
     has_boost = any(g > 0 for _f, _q, g in bands)
@@ -836,6 +857,17 @@ def propose(args):
         verdict = gate.get((float(F), float(Q), float(G)))
         row = {'f_hz': F, 'q': Q, 'gain_db': G,
                'kind': 'boost' if G > 0 else 'cut', 'boost_gate': verdict}
+        validation = band_validation.get((F, Q, G))
+        if validation:
+            for key in ('confidence', 'action', 'stability', 'held_out_help',
+                        'median_held_out_gain_db', 'worst_held_out_dig_db'):
+                row[key] = validation[key]
+            if validation['action'] == 'DO NOT APPLY':
+                row['reason'] = ('held-out validation: refitted without each position in '
+                                 'turn, this band did not reliably come back or did not help '
+                                 'the position left out -- it is fitted to particular seats')
+                rejected.append(row)
+                continue
         if verdict == 'BLOCK':
             row['reason'] = 'boost gate BLOCK: the dip is phase-anomalous; gain would be eaten'
             rejected.append(row)
@@ -878,6 +910,10 @@ def propose(args):
         'tilt': {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                  'target': tunelib.measure_tilt(freqs, sess['target_db'])},
         'proposal': {'bands': kept, 'rejected': rejected},
+        'held_out_validation': None if held_out is None else {
+            'verdict': held_out['verdict'], 'folds': held_out['folds'],
+            'median_held_out_gain_db': held_out['median_held_out_gain_db'],
+            'worst_held_out_gain_db': held_out['worst_held_out_gain_db']},
         'prediction': prediction,
         'fitter': {k: v for k, v in fit_report.items()
                    if isinstance(v, (int, float, bool, str))},
@@ -979,6 +1015,43 @@ def _complex_export(path, freqs):
     return mag * np.exp(1j * phase)
 
 
+def probe(args):
+    """What would these candidate changes do, at every junction they touch?
+    Reads complex exports named in a JSON spec; writes nothing."""
+    with open(args.spec, encoding='utf-8') as fh:
+        spec = json.load(fh)
+    if not isinstance(spec, dict):
+        raise ValueError('probe spec must be a JSON object')
+    unknown = set(spec) - {'dsp_sample_rate_hz', 'drivers', 'junctions', 'variants', 'notes'}
+    if unknown:
+        raise ValueError('probe spec has unknown field(s): %s' % sorted(unknown))
+    fs = spec.get('dsp_sample_rate_hz')
+    if not isinstance(fs, (int, float)) or fs <= 0:
+        raise ValueError('dsp_sample_rate_hz is required -- the CONFIRMED internal rate, '
+                         'never assumed (it decides how every filter is realized)')
+    base_dir = os.path.dirname(os.path.abspath(args.spec))
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    drivers = {}
+    for name, path in (spec.get('drivers') or {}).items():
+        path = path if os.path.isabs(path) else os.path.join(base_dir, path)
+        drivers[name] = _complex_export(path, freqs)
+    if len(drivers) < 2:
+        raise ValueError('probe needs at least two drivers on one time base')
+    junctions = []
+    for j in spec.get('junctions') or []:
+        junctions.append((j['lower'], j['upper'], float(j['crossover_hz'])))
+    results = tunelib.probe_variants(freqs, drivers, junctions, spec.get('variants') or [],
+                                     fs=float(fs))
+    return {'meta': {'spec': args.spec, 'dsp_sample_rate_hz': fs,
+                     'drivers': sorted(drivers), 'junctions': [j[0] + '-' + j[1] for j in junctions],
+                     'convention': 'delay_ms positive = later; changes are added on top of '
+                                   'the tune the exports were measured through'},
+            'variants': results,
+            'predicted_not_measured': True,
+            'note': ('a probe ranks candidates; the chosen one still goes through a plan '
+                     '(per-edit confirmation) and a re-measure')}
+
+
 def junction(args):
     """Phase score + sum loss for one crossover pair (methodology.md
     §The crossover action-ladder). Read-only; writes nothing."""
@@ -1007,6 +1080,7 @@ def junction(args):
                      'window': 'direct-sound (FDW)' if args.direct_sound else 'as exported',
                      'convention': 'extra delay/polarity apply to the LOWER channel'},
             'phase': phase,
+            'delay_consensus': tunelib.delay_consensus(freqs, lower, upper, fc),
             'sum_loss': tunelib.junction_sum_loss(freqs, lower, upper, band),
             'notes': notes,
             'reminder': ('a channel hands over twice: re-check its OTHER junction with '
@@ -1286,6 +1360,10 @@ def main():
                          'adds centre-steering options')
     im.add_argument('--out')
 
+    pb = sub.add_parser('probe', help='evaluate candidate changes at every junction (writes nothing)')
+    pb.add_argument('--spec', required=True, help='JSON: dsp_sample_rate_hz, drivers, junctions, variants')
+    pb.add_argument('--out')
+
     jn = sub.add_parser('junction', help='phase score and sum loss for one crossover pair')
     jn.add_argument('--lower', required=True, help='lower driver export (with phase)')
     jn.add_argument('--upper', required=True, help='upper driver export (with phase)')
@@ -1324,9 +1402,9 @@ def main():
             print(text)
     elif args.cmd == 'apply':
         print(json.dumps(apply_plan(args.plan), indent=2))
-    elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction'):
+    elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe'):
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
-                  'imaging': imaging, 'junction': junction}[args.cmd](args)
+                  'imaging': imaging, 'junction': junction, 'probe': probe}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
             with open(args.out, 'w', encoding='utf-8') as fh:

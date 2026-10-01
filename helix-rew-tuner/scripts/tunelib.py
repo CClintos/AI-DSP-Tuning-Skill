@@ -844,13 +844,34 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     return bands, report
 
 
+def eq_dig_depth(freqs, dev_before, eq_db, band, falloff_db=3.0):
+    """Deepest NEW hole an EQ digs below target at one position (dB).
+
+    A band-wide RMS can read a trade -- a peak taken down here, a fresh hole
+    dug there -- as neutral or even better, which is how a cut aimed between
+    two positions' peaks could notch the position whose peak was elsewhere.
+    This measures the hole directly, on ERB-smoothed curves: the depth below
+    target after EQ minus the depth already there, discounted by
+    1/sqrt(1 + (D / falloff_db)^2) where the point already sat D dB under
+    (Resonalyze's rule: digging a point that was already deep changes little
+    that anyone hears). Returns the worst value inside `band`."""
+    f = np.asarray(freqs, dtype=float)
+    d0 = erb_smooth(f, np.asarray(dev_before, dtype=float))
+    d1 = erb_smooth(f, np.asarray(dev_before, dtype=float) + np.asarray(eq_db, dtype=float))
+    depth0 = np.maximum(-d0, 0.0)
+    dug = np.maximum(np.maximum(-d1, 0.0) - depth0, 0.0) / np.sqrt(1.0 + (depth0 / falloff_db) ** 2)
+    sel = (f >= band[0]) & (f <= band[1])
+    return float(np.max(dug[sel])) if np.any(sel) else 0.0
+
+
 def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                    mask=None, conf=None, g_lim=(-15.0, 3.0),
                    q_lim=(0.5, 8.0), min_gain=1.0, improve_pct=6.0,
                    boost_penalty=0.5, hf_q_penalty=0.4, hf_q_knee=4.0,
                    transition_hz=1000.0, selection_tax_weight=0.25,
                    null_boost_penalty=0.8, tail_weight=0.75,
-                   max_worst_loss_db=0.25, fit_smoothed=False, verbose=False):
+                   max_worst_loss_db=0.25, fit_smoothed=False, dig_weight=1.0,
+                   max_dig_db=6.0, verbose=False):
     """Fit one quantized PEQ cascade across multiple measured positions.
 
     ``deviations_db`` is shaped ``(positions, frequencies)``. ``mask`` and
@@ -862,7 +883,25 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
     Every candidate is snapped to the returned hardware steps before the
     parsimony and worst-position gates. A candidate is rejected when any
     position's audibility score is more than ``max_worst_loss_db`` worse than
-    its no-EQ baseline.
+    its no-EQ baseline, and -- because a band-wide score can hide a local
+    hole -- when the MEDIAN position's new hole (eq_dig_depth) is deeper than
+    ``max_dig_db``: a band that digs below target at most measured positions
+    is aimed at something that moves between seats (a peak that wanders
+    +/-1/4 octave drew a -12.5 dB Q8 notch before this check). The median,
+    not the worst, because per-seat reflection combs are broad: a legitimate
+    cut on a shared fault routinely digs at the one seat where a comb happened
+    to cancel it, and the per-position score guard already protects the worst
+    seat. A dig rejection blocks that seed's region (+/- 1/3 octave) and the
+    search moves on, so one wandering feature cannot stop a real shared fault
+    elsewhere from being fitted. max_dig_db=None disables the check.
+
+    That check is the backstop; the main defence is ``dig_weight``: every
+    position's NEW depth below target (as eq_dig_depth measures it, per bin)
+    is charged inside the least-squares objective at EVERY in-band bin,
+    masked ones included -- a masked bin means "don't chase this", not "free
+    to dig here". The optimizer then shapes a band to take a peak down without
+    gouging its neighbours (Resonalyze charges dug depth the same way).
+    dig_weight=0 restores the old objective.
     """
     from scipy.optimize import least_squares
 
@@ -905,6 +944,9 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                                  for i in range(shape[0])])
                       if fit_smoothed else deviations)
     inband = (freqs >= fit_band[0]) & (freqs <= fit_band[1])
+    dig_w = (audibility_weight(freqs) * inband)[None, :]
+    depth_before = np.maximum(-fit_deviations, 0.0)
+    dig_scale = 1.0 / np.sqrt(1.0 + (depth_before / 3.0) ** 2)
     authority = masks & inband[None, :]
     weights = audibility_weight(freqs)[None, :] * confidence * authority
     if np.any(np.sum(weights ** 2, axis=1) <= 1e-12):
@@ -987,6 +1029,9 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                  median_error * median_weight,
                  tail_weight * tail,
                  penalties(bands)]
+        if dig_weight:
+            dug = np.maximum(np.maximum(-errors, 0.0) - depth_before, 0.0) * dig_scale
+            parts.append(dig_weight * (dug * dig_w).ravel() / np.sqrt(shape[0]))
         return np.concatenate(parts)
 
     before_scores = position_scores([])
@@ -996,14 +1041,18 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
     current_selection = base_score
     rejected_worst = False
     rejected_candidate_loss = 0.0
+    dig_rejections = []
+    blocked = np.zeros(len(freqs), dtype=bool)
     lo_f = np.log10(fit_band[0] * 1.02)
     hi_f = np.log10(fit_band[1] * 0.98)
 
-    for _ in range(n_bands_max):
+    attempts = 0
+    while len(accepted) < n_bands_max and attempts < n_bands_max + 3:
+        attempts += 1
         current_error = deviations + cascade_db(freqs, accepted)[None, :]
         median_error = erb_smooth(freqs, authoritative_median(current_error))
         seed_weight = np.median(weights, axis=0)
-        seed_basis = np.abs(median_error) * seed_weight
+        seed_basis = np.where(blocked, 0.0, np.abs(median_error) * seed_weight)
         i0 = int(np.argmax(seed_basis))
         if seed_basis[i0] <= 0:
             break
@@ -1033,6 +1082,15 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
             rejected_worst = True
             rejected_candidate_loss = worst_loss
             break
+        if max_dig_db is not None:
+            eq_c = cascade_db(freqs, candidate)
+            dig = float(np.median([eq_dig_depth(freqs, deviations[i], eq_c, fit_band)
+                                   for i in range(shape[0])]))
+            if dig > max_dig_db:
+                dig_rejections.append({'seed_hz': round(float(freqs[i0]), 1),
+                                       'dig_db': round(dig, 2)})
+                blocked |= np.abs(np.log2(freqs / freqs[i0])) <= 1.0 / 3.0
+                continue
         if raw_gain_pct < improve_pct or select_gain_pct < improve_pct:
             break
         accepted = candidate
@@ -1053,6 +1111,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         'worst_position_loss_db': round(worst_position_loss, 3),
         'rejected_worst_position': rejected_worst,
         'rejected_candidate_worst_loss_db': round(rejected_candidate_loss, 3),
+        'dig_rejections': dig_rejections,
         'selection_score_before': round(base_score, 3),
         'selection_score_after': round(selection_score(accepted), 3),
         'bands_used': len(accepted),
@@ -1072,6 +1131,115 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
 # the incoherent sum -- proof the two sides are partially cancelling, not a
 # modal/boundary null. That reclassified it from "leave forever" to
 # "all-pass candidate."
+def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=None,
+                             match_oct=1.0 / 3.0, fitter_kwargs=None,
+                             high_stability=0.8, medium_stability=0.5,
+                             high_help_fraction=0.75, max_held_out_loss_db=0.25,
+                             max_held_out_dig_db=3.0):
+    """Leave-one-position-out validation of a multi-position PEQ proposal.
+
+    A correction has to help mic positions it was NOT fitted on -- the
+    acceptance rule both audio-calibration-mcp (train + withheld traces) and
+    autoeq's room-EQ quality gates (training + held-out seats) enforce.
+    `deviations_db` is (positions, freqs), level-aligned, >= 3 positions.
+
+    1. The proposal is fitted on every position (fit_peq_robust, as
+       pipeline.py propose does).
+    2. Each position is withheld in turn: the fit is repeated on the others
+       (their own spatial mask/confidence recomputed when >= 3 remain, so the
+       withheld position cannot leak in) and scored on the withheld one.
+    3. Each proposed band is matched to the fold fits (same sign, centre
+       within `match_oct`). `stability` = fraction of folds that found it
+       again; `held_out_help` = fraction of those folds where removing it
+       makes the WITHHELD position worse (i.e. it helped a position it never
+       saw) without digging a new hole there deeper than
+       `max_held_out_dig_db` (eq_dig_depth).
+
+    Per band: confidence 'high' (stability >= 0.8 and help >= 0.75 and a
+    positive median held-out gain) -> action APPLY; 'medium' (stability >=
+    0.5 and help >= 0.5) -> REVIEW; otherwise 'low' -> DO NOT APPLY.
+    Whole proposal: 'validated' when the median held-out gain is positive and
+    no withheld position loses more than `max_held_out_loss_db`;
+    'nothing_to_validate' when the fit proposes no band.
+    """
+    freqs = np.asarray(freqs, dtype=float)
+    devs = np.asarray(deviations_db, dtype=float)
+    if devs.ndim != 2 or devs.shape[0] < 3:
+        raise ValueError('held-out validation needs at least three positions')
+    kw = dict(fit_smoothed=True)
+    kw.update(fitter_kwargs or {})
+    n = devs.shape[0]
+
+    def authority(rows):
+        if rows.shape[0] >= 3:
+            sc = spatial_consistency(freqs, list(rows), min_positions=3, align_levels=False)
+            return sc['mask'], sc['conf']
+        return None, None
+
+    final, _report = fit_peq_robust(freqs, devs, fit_band, mask=mask, conf=conf, **kw)
+
+    def score(d):
+        return audibility_score(freqs, d, band=fit_band)
+
+    folds = []
+    for i in range(n):
+        keep = [j for j in range(n) if j != i]
+        f_mask, f_conf = authority(devs[keep])
+        bands_i, _ = fit_peq_robust(freqs, devs[keep], fit_band, mask=f_mask, conf=f_conf, **kw)
+        before = score(devs[i])
+        after = score(devs[i] + cascade_db(freqs, bands_i))
+        folds.append({'held_out_position': i, 'bands': bands_i,
+                      'held_out_gain_db': round(before - after, 3)})
+
+    rows = []
+    for F, Q, G in final:
+        found, helped, gains, digs = 0, 0, [], []
+        for fold in folds:
+            match = [k for k, (f2, _q2, g2) in enumerate(fold['bands'])
+                     if np.sign(g2) == np.sign(G) and abs(np.log2(f2 / F)) <= match_oct]
+            if not match:
+                continue
+            found += 1
+            k = min(match, key=lambda m: abs(np.log2(fold['bands'][m][0] / F)))
+            held = devs[fold['held_out_position']]
+            without = [b for j, b in enumerate(fold['bands']) if j != k]
+            rest = held + cascade_db(freqs, without)
+            gain = score(rest) - score(held + cascade_db(freqs, fold['bands']))
+            dig = eq_dig_depth(freqs, rest, cascade_db(freqs, [fold['bands'][k]]), fit_band)
+            gains.append(gain)
+            digs.append(dig)
+            helped += gain > 0 and dig <= max_held_out_dig_db
+        stability = found / n
+        help_fraction = helped / found if found else 0.0
+        median_gain = float(np.median(gains)) if gains else 0.0
+        if stability >= high_stability and help_fraction >= high_help_fraction and median_gain > 0:
+            confidence, action = 'high', 'APPLY'
+        elif stability >= medium_stability and help_fraction >= 0.5:
+            confidence, action = 'medium', 'REVIEW'
+        else:
+            confidence, action = 'low', 'DO NOT APPLY'
+        rows.append({'f_hz': F, 'q': Q, 'gain_db': G,
+                     'stability': round(stability, 2),
+                     'held_out_help': round(help_fraction, 2),
+                     'median_held_out_gain_db': round(median_gain, 3),
+                     'worst_held_out_dig_db': round(max(digs), 2) if digs else None,
+                     'confidence': confidence, 'action': action})
+
+    gains = [f['held_out_gain_db'] for f in folds]
+    if not final:
+        verdict = 'nothing_to_validate'
+    elif float(np.median(gains)) > 0 and min(gains) >= -max_held_out_loss_db:
+        verdict = 'validated'
+    else:
+        verdict = 'not_validated'
+    return {'verdict': verdict, 'bands': rows,
+            'folds': [{'held_out_position': f['held_out_position'],
+                       'held_out_gain_db': f['held_out_gain_db'],
+                       'bands_found': len(f['bands'])} for f in folds],
+            'median_held_out_gain_db': round(float(np.median(gains)), 3),
+            'worst_held_out_gain_db': round(float(min(gains)), 3)}
+
+
 def interference_audit(freqs, solo_a_db, solo_b_db, together_db, flag_db=2.0,
                        smooth_oct=1 / 12.0):
     """psum = incoherent (power) sum: the floor you'd get if A and B were
@@ -3356,6 +3524,289 @@ def junction_phase_score(freqs, lower, upper, crossover_hz, band_oct=1.0,
         'note': ('extra delay applies to the LOWER channel relative to its current '
                  'setting (negative = advance it, i.e. delay the upper one instead)'),
     }
+
+
+def delay_consensus(freqs, lower, upper, crossover_hz, band_oct=1.0, min_tolerance_ms=0.02,
+                    tolerance_periods=1.0 / 16.0):
+    """One delay recommendation from four independent estimators, with the
+    agreement between them made explicit.
+
+    All four answer "how much extra delay should the LOWER channel get?"
+    (negative = delay the UPPER channel by that much instead), over +/-band_oct
+    around the crossover:
+      * junction_phase_score  -- the weighted phase-alignment optimum
+      * polarity_delay_search -- the summed-magnitude optimum (its B-side
+                                 correction, sign-converted)
+      * estimate_delay_xcorr  -- GCC cross-correlation peak (only if reliable)
+      * phase_slope_fit       -- straight-line fit of the cross-phase; blind to
+                                 whole-period hops, so it checks the lobe the
+                                 others picked
+    The consensus is the median of the estimates; one `agrees` when it sits
+    within the tolerance (max(min_tolerance_ms, period/16) -- a sub junction
+    tolerates a millisecond, a tweeter junction hundredths). Confidence: 'high'
+    when >= 3 agree, the junction is alignable and its lobe margin >= 0.05;
+    'medium' when >= 2 agree; otherwise 'low', and no number is recommended.
+    Polarity: invert only when the junction score and the magnitude search
+    both choose it.
+
+    Gross-offset guard: the phase estimators only search about one period
+    each way, so a timing-reference error of several periods (a lost acoustic
+    reference, REW locking onto the wrong cycle) would alias onto a lobe and
+    look confident. A wide envelope cross-correlation (+/- max(20 ms, 3
+    periods)) times where the energy really arrives; if that is more than
+    1.25 periods away, `timing_suspect` is set, confidence is 'low' and no
+    number is recommended -- check the timing reference first."""
+    f = np.asarray(freqs, dtype=float)
+    lo_f, hi_f = crossover_hz / 2 ** band_oct, crossover_hz * 2 ** band_oct
+    band = (max(lo_f, f[0]), min(hi_f, f[-1]))
+    period_ms = 1000.0 / crossover_hz
+    tol = max(min_tolerance_ms, tolerance_periods * period_ms)
+    estimates = []
+
+    js = junction_phase_score(f, lower, upper, crossover_hz, band_oct=band_oct)
+    if js and js['best_extra_delay_ms'] is not None:
+        estimates.append({'method': 'junction_phase_score',
+                          'extra_delay_lower_ms': float(js['best_extra_delay_ms'])})
+    pds = polarity_delay_search(f, lower, upper, band, max_delay_ms=max(1.5, 1.25 * period_ms),
+                                damage_band=band, cross_check=False)
+    estimates.append({'method': 'polarity_delay_search',
+                      'extra_delay_lower_ms': -float(pds['delay_ms_B'])})
+    try:
+        xc = estimate_delay_xcorr(f, lower, upper, band, max_delay_ms=max(5.0, 2 * period_ms))
+        if xc['reliable']:
+            estimates.append({'method': 'estimate_delay_xcorr',
+                              'extra_delay_lower_ms': -float(xc['delay_ms'])})
+    except ValueError:
+        xc = None
+    sel = (f >= band[0]) & (f <= band[1])
+    w = np.abs(lower[sel]) * np.abs(upper[sel])
+    if np.count_nonzero(sel) >= 8 and np.sum(w) > 0:
+        dphi = np.unwrap(np.angle(lower[sel] * np.conj(upper[sel])))
+        if js and js['recommend_invert']:
+            dphi = np.unwrap(np.angle(-lower[sel] * np.conj(upper[sel])))
+        A = np.vstack([2 * np.pi * f[sel], np.ones(np.count_nonzero(sel))]).T
+        sw = np.sqrt(w / np.max(w))
+        slope = np.linalg.lstsq(A * sw[:, None], dphi * sw, rcond=None)[0][0]
+        estimates.append({'method': 'phase_slope_fit',
+                          'extra_delay_lower_ms': float(slope * 1000.0)})
+
+    gross = None
+    try:
+        wide = estimate_delay_xcorr(f, lower, upper, band,
+                                    max_delay_ms=max(20.0, 3.0 * period_ms), n_uniform=16384)
+        if wide['reliable']:
+            gross = -float(wide['delay_ms'])
+    except ValueError:
+        pass
+    timing_suspect = bool(gross is not None and abs(gross) > 1.25 * period_ms + tol)
+
+    values = np.array([e['extra_delay_lower_ms'] for e in estimates])
+    consensus = float(np.median(values)) if values.size else None
+    for e in estimates:
+        e['extra_delay_lower_ms'] = round(e['extra_delay_lower_ms'], 4)
+        e['agrees'] = bool(consensus is not None and abs(e['extra_delay_lower_ms'] - consensus) <= tol)
+    agreeing = sum(e['agrees'] for e in estimates)
+    alignable = bool(js and js['alignable'])
+    margin = js['lobe_margin'] if js else float('nan')
+    if timing_suspect:
+        confidence = 'low'
+    elif agreeing >= 3 and alignable and margin == margin and margin >= 0.05:
+        confidence = 'high'
+    elif agreeing >= 2 and alignable:
+        confidence = 'medium'
+    else:
+        confidence = 'low'
+    invert = bool(js and js['recommend_invert'] and pds['polarity_flip_B'])
+    spread = float(values.max() - values.min()) if values.size else None
+    return {'crossover_hz': float(crossover_hz),
+            'extra_delay_lower_ms': None if consensus is None else round(consensus, 4),
+            'recommended_extra_delay_lower_ms': (None if confidence == 'low' or consensus is None
+                                                 else round(consensus, 4)),
+            'invert': invert,
+            'polarity_agreement': bool(js and js['recommend_invert'] == bool(pds['polarity_flip_B'])),
+            'confidence': confidence, 'agreeing_estimators': agreeing,
+            'spread_ms': None if spread is None else round(spread, 4),
+            'agreement_tolerance_ms': round(tol, 4), 'estimates': estimates,
+            'lobe_margin': margin, 'alignable': alignable,
+            'timing_suspect': timing_suspect,
+            # same convention as extra_delay_lower_ms (+ = the upper arrives late)
+            'gross_offset_ms': None if gross is None else round(gross, 3),
+            'note': ('extra delay for the LOWER channel relative to its current setting; '
+                     'a negative value means delay the UPPER channel by that amount instead')}
+
+
+def peaking_H(freqs, f0, Q, gain_db, fs=FS):
+    """Complex RBJ peaking response (peaking_db is its magnitude). A bell near
+    a crossover moves that driver's phase too, which the junction sees."""
+    A = 10 ** (gain_db / 40.0)
+    w0 = 2 * np.pi * f0 / fs
+    al = np.sin(w0) / (2 * Q)
+    b0, b1, b2 = 1 + al * A, -2 * np.cos(w0), 1 - al * A
+    a0, a1, a2 = 1 + al / A, -2 * np.cos(w0), 1 - al / A
+    w = 2 * np.pi * np.asarray(freqs, dtype=float) / fs
+    z1, z2 = np.exp(-1j * w), np.exp(-2j * w)
+    return (b0 + b1 * z1 + b2 * z2) / (a0 + a1 * z1 + a2 * z2)
+
+
+def shelf_H(freqs, kind, f0, Q, gain_db, fs=FS):
+    """Complex RBJ shelf response ('low' or 'high'); magnitude matches
+    low_shelf_db / high_shelf_db."""
+    A = 10 ** (gain_db / 40.0)
+    w0 = 2 * np.pi * f0 / fs
+    cw, al = np.cos(w0), np.sin(w0) / (2 * Q)
+    sA = 2 * np.sqrt(A) * al
+    if kind == 'low':
+        b0 = A * ((A + 1) - (A - 1) * cw + sA)
+        b1 = 2 * A * ((A - 1) - (A + 1) * cw)
+        b2 = A * ((A + 1) - (A - 1) * cw - sA)
+        a0 = (A + 1) + (A - 1) * cw + sA
+        a1 = -2 * ((A - 1) + (A + 1) * cw)
+        a2 = (A + 1) + (A - 1) * cw - sA
+    elif kind == 'high':
+        b0 = A * ((A + 1) + (A - 1) * cw + sA)
+        b1 = -2 * A * ((A - 1) + (A + 1) * cw)
+        b2 = A * ((A + 1) + (A - 1) * cw - sA)
+        a0 = (A + 1) - (A - 1) * cw + sA
+        a1 = 2 * ((A - 1) - (A + 1) * cw)
+        a2 = (A + 1) - (A - 1) * cw - sA
+    else:
+        raise ValueError("shelf kind must be 'low' or 'high'")
+    w = 2 * np.pi * np.asarray(freqs, dtype=float) / fs
+    z1, z2 = np.exp(-1j * w), np.exp(-2j * w)
+    return (b0 + b1 * z1 + b2 * z2) / (a0 + a1 * z1 + a2 * z2)
+
+
+CHAIN_CHANGE_KEYS = ('delay_ms', 'invert', 'gain_db', 'phase_deg', 'phase_reference_hz',
+                     'allpass', 'peq', 'shelves')
+
+
+def chain_response(freqs, fs=FS, delay_ms=0.0, invert=False, gain_db=0.0,
+                   phase_deg=None, phase_reference_hz=None, allpass=(), peq=(), shelves=()):
+    """Complex response of the CHANGES a candidate makes to one channel.
+
+    Measurements already include the tune that was loaded; this is what a
+    candidate adds on top: delay (ms, positive = later), polarity, gain, the
+    channel Phase control (angle + that channel's crossover reference),
+    all-passes [(F, Q, order)], PEQ bells [(F, Q, G)] and shelves
+    [(kind, F, Q, G)], realized at the DSP's rate `fs`."""
+    f = np.asarray(freqs, dtype=float)
+    H = np.ones(len(f), dtype=complex)
+    if gain_db:
+        H *= 10 ** (float(gain_db) / 20.0)
+    if delay_ms:
+        H *= np.exp(-2j * np.pi * f * float(delay_ms) / 1000.0)
+    if invert:
+        H *= -1.0
+    if phase_deg:
+        if not phase_reference_hz:
+            raise ValueError('phase_deg needs phase_reference_hz (the channel crossover '
+                             'the Phase control is stated at)')
+        H *= helix_phase_rotation_H(f, phase_deg, phase_reference_hz, fs)
+    for F, Q, order in allpass:
+        H *= allpass_H(f, float(F), float(Q), order=int(order), fs=fs)
+    for F, Q, G in peq:
+        H *= peaking_H(f, float(F), float(Q), float(G), fs)
+    for kind, F, Q, G in shelves:
+        H *= shelf_H(f, kind, float(F), float(Q), float(G), fs)
+    return H
+
+
+def probe_variants(freqs, drivers, junctions, variants, fs=FS,
+                   sum_bands=((40, 160), (160, 630), (630, 2500), (2500, 10000), (10000, 16000)),
+                   better_score=0.01, worse_score=-0.01, worse_loss_db=-0.25):
+    """Evaluate candidate changes deterministically, before anything is written.
+
+    drivers: {name: complex response} measured on ONE time base (one side's
+    drivers plus any shared sub). junctions: [(lower, upper, crossover_hz)].
+    variants: [{'name', 'changes': {driver: {chain_response kwargs}}}]. A
+    'baseline' (no change) is always evaluated first.
+
+    For every variant and EVERY junction -- a channel hands over twice -- it
+    reports the phase-alignment score and sum loss and their change against
+    the baseline, which junctions the variant touches, how the summed
+    response moves per band (ERB-smoothed, dB vs baseline), the largest boost
+    its chains add, and a plain verdict. Prediction, not measurement: the
+    winner still goes through a plan and a re-measure. (Resonalyze's "probe"
+    idea: the agent asks, deterministic code answers.)"""
+    f = np.asarray(freqs, dtype=float)
+    names = set(drivers)
+    for lo, up, _fc in junctions:
+        if lo not in names or up not in names:
+            raise ValueError('junction %s-%s names an unknown driver' % (lo, up))
+    for v in variants:
+        for drv, change in v.get('changes', {}).items():
+            if drv not in names:
+                raise ValueError('variant %r changes unknown driver %r' % (v.get('name'), drv))
+            unknown = set(change) - set(CHAIN_CHANGE_KEYS)
+            if unknown:
+                raise ValueError('variant %r: unknown change(s) %s (allowed: %s)'
+                                 % (v.get('name'), sorted(unknown), ', '.join(CHAIN_CHANGE_KEYS)))
+
+    def evaluate(changes):
+        chains = {n: chain_response(f, fs, **changes.get(n, {})) for n in drivers}
+        proc = {n: drivers[n] * chains[n] for n in drivers}
+        rows = []
+        for lo, up, fc in junctions:
+            ps = junction_phase_score(f, proc[lo], proc[up], fc)
+            sl = junction_sum_loss(f, proc[lo], proc[up], (fc / 2.0, fc * 2.0))
+            rows.append({'id': '%s-%s' % (lo, up), 'crossover_hz': float(fc),
+                         'phase_score': ps['current_score'] if ps else None,
+                         'best_extra_delay_ms': ps['best_extra_delay_ms'] if ps else None,
+                         'recommend_invert': ps['recommend_invert'] if ps else None,
+                         'sum_loss_db': sl['average_db'], 'sum_dip_db': sl['dip_db']})
+        total = sum(proc.values())
+        boost = max((float(np.max(20 * np.log10(np.abs(chains[n]) + 1e-12)))
+                     for n in changes), default=0.0)
+        return rows, 20 * np.log10(np.abs(total) + 1e-12), boost
+
+    base_rows, base_sum, _ = evaluate({})
+    out = []
+    for v in [{'name': 'baseline', 'changes': {}}] + list(variants):
+        changes = v.get('changes', {})
+        rows, sum_db, boost = evaluate(changes)
+        touched = set(changes)
+        better, worse = [], []
+        for row, base in zip(rows, base_rows):
+            lo, up = row['id'].split('-', 1)
+            row['touched'] = lo in touched or up in touched
+            d_score = (None if row['phase_score'] is None or base['phase_score'] is None
+                       else round(row['phase_score'] - base['phase_score'], 3))
+            d_loss = round(row['sum_loss_db'] - base['sum_loss_db'], 3)
+            row['delta_phase_score'] = d_score
+            row['delta_sum_loss_db'] = d_loss
+            if row['touched']:
+                if (d_score is not None and d_score < worse_score) or d_loss < worse_loss_db:
+                    worse.append(row['id'])
+                elif d_score is not None and d_score > better_score and d_loss >= -0.1:
+                    better.append(row['id'])
+        delta = erb_smooth(f, sum_db - base_sum)
+        bands = []
+        for lo_hz, hi_hz in sum_bands:
+            sel = (f >= lo_hz) & (f <= hi_hz)
+            if np.any(sel):
+                bands.append({'band_hz': [lo_hz, hi_hz],
+                              'mean_change_db': round(float(np.mean(delta[sel])), 2),
+                              'max_abs_change_db': round(float(np.max(np.abs(delta[sel]))), 2)})
+        touched_ids = [r['id'] for r in rows if r['touched']]
+        if not changes:
+            verdict = 'reference'
+        elif not touched_ids:
+            verdict = 'touches no junction'
+        elif worse and not better:
+            verdict = ('worse at ALL %d touched junctions' % len(touched_ids)
+                       if len(worse) == len(touched_ids) else 'worse at %s' % ', '.join(worse))
+        elif better and not worse:
+            verdict = ('better at ALL %d touched junctions' % len(touched_ids)
+                       if len(better) == len(touched_ids) else 'better at %s' % ', '.join(better))
+        elif better and worse:
+            verdict = 'mixed: better at %s, worse at %s' % (', '.join(better), ', '.join(worse))
+        else:
+            verdict = 'no material change at the touched junctions'
+        out.append({'name': v.get('name', 'variant'), 'changes': changes,
+                    'touched_junctions': touched_ids, 'junctions': rows,
+                    'sum_change_by_band': bands,
+                    'max_chain_boost_db': round(boost, 2), 'verdict': verdict})
+    return out
 
 
 def junction_sum_loss(freqs, a, b, band, weighted=True):

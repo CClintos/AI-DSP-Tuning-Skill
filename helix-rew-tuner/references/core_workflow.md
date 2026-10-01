@@ -52,6 +52,9 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   | `source_level_audit`, `source_bandwidth_limits` | is the signal ENTERING the DSP level-independent? (cannot attribute to the source from an acoustic capture — see the docstring) | §Audit the source |
   | `band_itd_ild`, `image_pull` | where the phantom image sits vs FREQUENCY (inter-channel model: ~1 ms or ~16 dB = full shift, cues trade); `smeared` means no single delay or trim fixes it | §Image position is frequency-dependent |
   | `centre_steering` | centre the image at an off-centre seat: level-only vs far-side time lead + smaller trim, with the robustness trade | §Placing the phantom centre |
+  | `held_out_band_validation`, `eq_dig_depth` | leave-one-position-out check of a multi-position proposal: per band stability, held-out help and APPLY / REVIEW / DO NOT APPLY; dug depth = the new hole an EQ digs below target | §Multi-position variance |
+  | `delay_consensus` | one delay from four estimators with agreement, confidence, and a gross-timing guard (refuses when the energy arrives several periods away) | §Reading a junction |
+  | `probe_variants`, `chain_response` | what-if: candidate delay / polarity / Phase angle / all-pass / PEQ evaluated at EVERY junction it touches, before anything is written | §A channel hands over twice |
   | `junction_phase_score`, `junction_sum_loss` | one crossover's phase alignment (both polarities, flip margin, lobe margin) and how far its sum falls short of coherent | §Reading a junction |
   | `helix_phase_rotation`, `helix_phase_rotation_H`, `phase_control_check` | PC-Tool's channel Phase control: the Q=1 AP2 an angle builds at the channel's crossover, and a check that this unit builds it (two solo sweeps) | helix_hardware.md |
   | `predicted_vs_measured` | predict → re-measure loop (step 7) | §Verification & honesty |
@@ -115,7 +118,13 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   is frequency-dependent, for how to read a `smeared` verdict — and, with
   `--near-side`, the options for centring it. `pipeline.py junction --lower A.txt
   --upper B.txt --crossover HZ [--direct-sound]` reads one crossover's phase
-  score and sum loss (§Reading a junction,). **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
+  score, sum loss and a four-estimator `delay_consensus` (§Reading a junction,).
+  `pipeline.py probe --spec probe.json` evaluates candidate changes (delay,
+  polarity, Phase angle, all-pass, PEQ) at every junction they touch and
+  returns a verdict per candidate — ask it instead of estimating a change's
+  effect (§A channel hands over twice,). With 3+ positions, `propose` validates
+  itself leave-one-position-out: each band carries APPLY / REVIEW / DO NOT
+  APPLY, and DO NOT APPLY bands land in `rejected`. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
   and review `references/tune_plan_schema.md`, then populate the plan's
   `source_sha256`, distinct not-yet-existing `output_path`, edits, and
   per-edit `confirmations`; finally run `pipeline.py apply`. Apply exclusively
@@ -125,6 +134,13 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   `pipeline.py session check|save` reads and records the intake sidecar (step
   1). `python scripts/pipeline.py selftest` self-tests analysis and
   documentation routing on synthetic fixtures.
+- **`rew_api.py`** — READ-ONLY bridge to a running REW 5.40+ (Preferences → API;
+  default `127.0.0.1:4735`). `python scripts/rew_api.py list` shows measurements
+  with timing reference and SNR; `rew_api.py export "FL tweeter" --out fl_tw.txt`
+  writes a text export every tool reads, and `--direct-sound` builds the
+  8-cycle direct-sound response from REW's impulse response on the shared
+  timing-reference axis — no manual exports, no WAV peak-alignment trap. It
+  never triggers sweeps or changes anything in REW. Prefer it when REW is open.
 - **`decay.py fdw <ir.txt> --out DRIVER_direct.txt`** — the DIRECT-SOUND
   response through an 8-cycle frequency-dependent window from the driver's
   arrival, written as a REW-style text export every other tool reads. Use it

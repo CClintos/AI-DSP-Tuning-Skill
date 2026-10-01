@@ -117,6 +117,33 @@ class ProposeTests(unittest.TestCase):
                    if r["f_lo"] <= 1000.0 <= r["f_hi"]]
         self.assertTrue(all(abs(r["peak_db"]) < 6.0 for r in near_1k))
 
+    def test_three_or_more_positions_are_validated_leave_one_out(self):
+        shared = tunelib.cascade_db(FREQS, [(300.0, 1.5, 6.0)])
+        paths = []
+        for i in range(4):
+            rng = np.random.default_rng(20 + i)
+            path = self.root / ("v%d.txt" % i)
+            _write_export(path, 79 + _target() + shared + rng.normal(0.0, 0.3, len(FREQS)))
+            paths.append(str(path))
+
+        report = self.run_cli("propose", "--positions", *paths, "--target", "default")
+
+        hv = report["held_out_validation"]
+        self.assertEqual(hv["verdict"], "validated")
+        self.assertEqual(len(hv["folds"]), 4)
+        near = [b for b in report["proposal"]["bands"] if abs(np.log2(b["f_hz"] / 300.0)) < 0.3]
+        self.assertTrue(near)
+        self.assertEqual(near[0]["action"], "APPLY")
+        self.assertIn("stability", near[0])
+
+    def test_a_single_position_explains_why_nothing_was_validated(self):
+        spl = 80 + _target() + tunelib.cascade_db(FREQS, [(180.0, 1.5, 5.0)])
+        meas = self.root / "one.txt"
+        _write_export(meas, spl)
+        report = self.run_cli("propose", "--measurement", str(meas), "--target", "default")
+        self.assertIsNone(report["held_out_validation"])
+        self.assertTrue(any("3+" in n or "three" in n for n in report["notes"]))
+
 
 if __name__ == "__main__":
     unittest.main()
