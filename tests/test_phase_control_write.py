@@ -154,5 +154,36 @@ class PhaseModelCheckTests(unittest.TestCase):
         self.assertFalse(r['consistent'])
 
 
+class ChannelTypeRuleTests(unittest.TestCase):
+    """Audiotec Fischer knowledge base: fine phase (5.625 deg steps) exists only
+    on channels defined as subwoofer or mid/high in a fully active system;
+    "low" and "fullrange" channels get polarity only. On the user's tune PM
+    was 4 on exactly the High and Subwoofer channels and 1 on Low and Full."""
+
+    LOW_CHANNEL = REAL_LAYOUT.replace('<T T="182" P="0" PM="4"/>', '<T T="182" P="0" PM="1"/>')
+
+    def test_channels_flag_where_fine_phase_exists(self):
+        chans = afpx.channels(self.LOW_CHANNEL)
+        self.assertTrue(chans[0]['fine_phase_available'])
+        self.assertFalse(chans[1]['fine_phase_available'])
+
+    def test_write_is_refused_on_a_polarity_only_channel(self):
+        with self.assertRaisesRegex(ValueError, 'polarity only'):
+            afpx.write_phase_rotation(self.LOW_CHANNEL, 1, 84.375)
+
+    def test_plan_refuses_a_polarity_only_channel(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 's.afpx'
+            _encode(self.LOW_CHANNEL, source)
+            plan = {'version': 1, 'source_path': str(source),
+                    'source_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                    'format': 'afpx', 'output_path': str(Path(tmp) / 'o.afpx'),
+                    'edits': [{'id': 'p', 'kind': 'phase_rotation', 'channel': 1,
+                               'degrees': 84.375}],
+                    'confirmations': {'p': True}}
+            with self.assertRaisesRegex(ValueError, 'polarity only'):
+                pipeline.validate_plan(plan, source)
+
+
 if __name__ == '__main__':
     unittest.main()

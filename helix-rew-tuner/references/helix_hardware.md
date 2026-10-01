@@ -75,16 +75,37 @@ convert to samples last.
 
 ## Channel Phase control (PC-Tool "Phase")
 
-Audiotec-Fischer processors offer a per-channel **Phase** setting in PC-Tool.
-It is not an all-pass you place by frequency: you dial an ANGLE, and the
-processor builds ONE second-order all-pass with **Q = 1** whose phase lag at the
-channel's **configured crossover** (its high-pass corner; the low-pass on a
-subwoofer channel) equals that angle. Measured by Resonalyze's author on a
-DSP ULTRA S over ~60 electrical sweeps (github.com/DIMOSUS/Resonalyze,
-`docs/tech/dsp-helix-phase-control.md`, MIT): nine ratio curves fit one RBJ
-all-pass at 0.11–0.17° rms with Q = 1.0000, and the fitted corners match
-"phase = setting at the crossover" to 0.2 % (90° at a 5 kHz reference → 7977 Hz
-corner at 96 kHz; 180° → 5000 Hz; 270° → 3107 Hz).
+Audiotec-Fischer processors offer a per-channel **Phase** setting in PC-Tool
+("Phase, Polarity & Time"). **Audiotec Fischer's own knowledge base** (DSP
+PC-Tool → Time alignment, audiotec-fischer.de/en/knowledge-base/DSP-PC-Tool/time/)
+documents it: a **2nd-order all-pass with a variable corner frequency** that
+PC-Tool calculates automatically from the channel's **high-pass** setting so the
+dialled shift lands there — on a **subwoofer** channel the **low-pass** is the
+reference instead — in **5.625° steps from 0 to 354.375°** (their example: HP at
+1008 Hz, 90° → 90° of shift at 1008 Hz). It is not an all-pass you place by
+frequency: you dial an ANGLE. The one thing the manufacturer does not publish is
+the filter's width; Resonalyze's author measured it on a DSP ULTRA S over ~60
+electrical sweeps (github.com/DIMOSUS/Resonalyze,
+`docs/tech/dsp-helix-phase-control.md`, MIT) as **Q = 1** — nine ratio curves fit
+one RBJ all-pass at 0.11–0.17° rms with Q = 1.0000, corners matching "phase =
+setting at the crossover" to 0.2 % (90° at a 5 kHz reference → 7977 Hz corner at
+96 kHz; 180° → 5000 Hz; 270° → 3107 Hz). The same PC-Tool calculation serves the
+whole range, so the model is used for the P SIX as well.
+
+**Only some channel types have it.** Per the same knowledge-base page, the fine
+5.625° control exists only on channels the **IO menu** defines as **subwoofer**
+or **mid/high in a fully active system**; channels defined as **"low"** or
+**"fullrange"** get polarity only (0°/180°). In `.afpx` the delay tag's `PM`
+tracks this: on a real P SIX MK2 tune it read `4` on exactly the High and
+Subwoofer channels and `1` on the Low and Full ones. `afpx.channels()` reports
+`fine_phase_available` from it, and a `phase_rotation` write on any other channel
+is refused — change the channel's type in the IO menu first if a fine phase is
+really wanted there.
+
+**Order (manufacturer's advice):** in a fully active system set the phase
+relations bottom-up — subwoofer↔woofer first, then woofer↔midrange, then
+midrange↔tweeter. Each channel's control acts at its OWN lower crossover, so a
+later (higher) adjustment barely disturbs the junctions already set below it.
 
 - **Grid**: 64 steps of 5.625°, 0–354.375° (measured on a subwoofer channel;
   older tool generations reportedly step mid/high channels by 11.25°).
@@ -109,14 +130,13 @@ on the channel's delay tag — one controlled diff, one changed attribute (see
 is **phase-domain**: per-edit confirmation, never in the same plan as EQ, and a
 re-measure afterwards like any delay or all-pass.
 
-**The acoustic model is measured on a DSP ULTRA S, not yet on a P SIX.** Before
-leaning on predictions for another unit, verify it once:
+If a prediction and a re-measure ever disagree about a Phase setting,
 `tunelib.phase_control_check(freqs, before, after, angle, reference_hz, fs)` on
-two solo captures of ONE driver — Phase 0° and Phase N°, same mic position and
-timing reference — fits out any timing-reference jitter and reports whether the
-measured phase change matches the Q=1 all-pass at the reference (rms and the lag
-at the reference). If measurements were taken with a Phase setting active, it
-is already inside them; `afpx.channels()` shows every channel's angle.
+two solo captures of ONE driver (Phase 0° and N°, same mic position and timing
+reference) fits out timing-reference jitter and tests the Q=1 assumption
+directly — optional, not a precondition. If measurements were taken with a Phase
+setting active, it is already inside them; `afpx.channels()` shows every
+channel's angle.
 
 ## Driver excursion safety (optional — only with driver specs)
 

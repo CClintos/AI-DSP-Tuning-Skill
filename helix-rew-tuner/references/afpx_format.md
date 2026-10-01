@@ -266,9 +266,12 @@ channel's high-pass corner; its low-pass on a sub). Write it only through a
 plan's `phase_rotation` edit (`afpx.write_phase_rotation` /
 `verify_phase_write`; `roundtrip_lint(allow_phase=True)` excuses `P` and nothing
 else) — applied to the original file in memory, that writer reproduced PC-Tool's
-own save byte for byte. `PM` is still unexplained: on that tune it read 4 on the
-tweeters and subs and 1 on the mids and rears, and it did not move with the
-Phase change. Never write `PM`.
+own save byte for byte. `PM` did not move with the Phase change; on that tune
+it read `4` on exactly the channels whose IO-menu type has the fine Phase
+control (High, Subwoofer) and `1` on the polarity-only ones (Low, Full) — the
+rule Audiotec Fischer documents (see `helix_hardware.md`). It is read as
+`fine_phase_available` and a Phase write is refused unless `PM="4"`. Never write
+`PM`.
 
 ## Round-trip gotcha (important for verification)
 

@@ -92,7 +92,10 @@ channels: apply the phase edit, remeasure, then create a fresh EQ plan.
 ```
 
 `degrees` is the PC-Tool Phase setting: a multiple of 5.625 from 0 to 354.375
-(off-grid values are refused, not rounded). It is written to `P` on the
+(off-grid values are refused, not rounded), on a channel whose IO-menu type
+offers the fine Phase control (`PM="4"`: subwoofer, or mid/high in a fully
+active system — "low" and "fullrange" channels are polarity-only and refused).
+It is written to `P` on the
 channel's delay tag and nothing else; the processor turns it into one Q=1
 all-pass whose lag at the channel's crossover equals the angle
 (`tunelib.helix_phase_rotation`). It is phase-domain: it needs its own `true`

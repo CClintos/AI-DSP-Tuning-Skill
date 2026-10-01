@@ -1407,9 +1407,15 @@ needs it (equal, or the chosen far-side lead) and fit the junctions around
 that, rather than letting a junction delay drag one side's driver off its
 twin. Below ~300 Hz arrival carries little localization: there the junction
 summation decides, and the L/R split only has to stay on the right lobe.
-Align from the TOP junction down: the tweeter junction needs hundredths of a
-millisecond, the sub junction tolerates about one, so anchoring on the top
-puts the error where the ear forgives it.
+For DELAYS, align from the TOP junction down: the tweeter junction needs
+hundredths of a millisecond, the sub junction tolerates about one, and a delay
+moves a channel at every frequency, so anchoring on the top puts the error
+where the ear forgives it (Resonalyze's auto-alignment archive). For the
+channel PHASE controls the manufacturer advises the opposite order —
+sub↔woofer, woofer↔mid, mid↔tweeter — and for them that is right: each
+control acts at its own channel's lower crossover, so a higher one barely
+disturbs a junction already set below it. Delays first, then phase controls
+bottom-up, then re-check every junction.
 
 ### Polarity belongs to the driver
 

@@ -265,6 +265,7 @@ def channels(xml):
                 s['phase_deg'] = float(delays[i]['P']) if 'P' in delays[i] else None
             except ValueError:
                 s['phase_deg'] = None
+            s['fine_phase_available'] = fine_phase_available(delays[i])
         # The Phase control is stated at the channel's configured crossover:
         # its low-pass on a subwoofer channel, its high-pass otherwise.
         s['phase_reference_hz'] = (s.get('lp_hz') if s.get('inferred_role') == 'sub'
@@ -331,6 +332,18 @@ def write_delay_samples(xml, channel_index, samples):
 
 
 PHASE_STEP_DEG = 360.0 / 64.0
+# Audiotec Fischer knowledge base (DSP PC-Tool > Time alignment): the fine
+# Phase slider exists only on channels the IO menu defines as subwoofer or
+# mid/high in a fully active system; "low" and "fullrange" channels get
+# polarity only (0/180 deg). On a real P SIX MK2 tune PM read "4" on exactly
+# the High and Subwoofer channels and "1" on the Low and Full ones, so PM="4"
+# is read as "fine phase available" -- an observed correlation consistent with
+# the documented rule, used to FAIL CLOSED: anything else refuses a write.
+FINE_PHASE_PM = '4'
+
+
+def fine_phase_available(delay_tag_attrs):
+    return delay_tag_attrs.get('PM') == FINE_PHASE_PM
 PHASE_MAX_DEG = 360.0 - PHASE_STEP_DEG
 
 
@@ -363,6 +376,12 @@ def write_phase_rotation(xml, channel_index, degrees):
     old_tag = m.group(0)
     if not re.search(r'(?<![A-Za-z])P="[^"]*"', old_tag):
         raise ValueError('no P= attribute in tag %s -- unknown layout, refusing' % old_tag)
+    if not fine_phase_available(attrs(old_tag)):
+        raise ValueError('channel %d is set up for polarity only (PM=%r): PC-Tool offers '
+                         'the 5.625 deg Phase control only on subwoofer and mid/high '
+                         'channels of a fully active system -- change the channel type '
+                         'in the IO menu first if a fine phase is really wanted'
+                         % (channel_index, attrs(old_tag).get('PM')))
     new_tag = re.sub(r'(?<![A-Za-z])P="[^"]*"', 'P="%s"' % _fmt_phase(degrees),
                      old_tag, count=1)
     return xml[:m.start()] + new_tag + xml[m.end():]

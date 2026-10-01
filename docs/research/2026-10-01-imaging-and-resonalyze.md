@@ -74,9 +74,14 @@ few more unseen seats. Kept opt-in, not a default.
   4.80b) and `.afpx` stores it as `P` in degrees on the delay tag (controlled
   diff: one attribute changed). The skill now reads it and writes it through a
   confirmed `phase_rotation` plan edit; our writer reproduced PC-Tool's save
-  byte for byte. Still open: confirming on the P SIX that the angle builds the
-  same Q=1 all-pass the ULTRA S was measured to build (`phase_control_check`
-  with two solo sweeps of one driver).
+  byte for byte. Audiotec Fischer's knowledge base confirms the mechanism (2nd-
+  order all-pass, corner auto-set so the angle lands at the channel's HP — LP on
+  a sub — 5.625° steps) and adds the rule that only subwoofer and mid/high
+  channels of a fully active system have it; "low"/"fullrange" channels are
+  polarity-only, which matches `PM` (4 vs 1) on the user's tune and is now
+  enforced. Q=1 (not published by the manufacturer) comes from Resonalyze's
+  measurement and is assumed; `phase_control_check` remains as an optional
+  cross-check.
 - **Hybrid sum** (spatial-average magnitude with point phase, summed as
   phasors) for predicting the averaged result of a junction change.
 - **Headphone audition** of a predicted tune (convolving music with each
