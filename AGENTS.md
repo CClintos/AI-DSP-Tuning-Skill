@@ -62,7 +62,10 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   | `excess_phase_fields` + `boost_gate_verdict` / `gate_boost_bands` | is a specific BOOST pushing gain into a cancellation? (ALLOW/WARN/BLOCK; specific, not sensitive — ALLOW proves nothing, and it needs UNSMOOTHED data) | §The boost gate |
   | `lr_match_report` | L/R image-stability diagnostic | §Imaging |
   | `source_level_audit`, `source_bandwidth_limits` | is the signal ENTERING the DSP level-independent? (cannot attribute to the source from an acoustic capture — see the docstring) | §Audit the source |
-  | `band_itd_ild`, `image_pull` | where the image sits vs FREQUENCY; `smeared` means no single delay fixes it | §Image position is frequency-dependent |
+  | `band_itd_ild`, `image_pull` | where the phantom image sits vs FREQUENCY (inter-channel model: ~1 ms or ~16 dB = full shift, cues trade); `smeared` means no single delay or trim fixes it | §Image position is frequency-dependent |
+  | `centre_steering` | centre the image at an off-centre seat: level-only vs far-side time lead + smaller trim, with the robustness trade | §Placing the phantom centre |
+  | `junction_phase_score`, `junction_sum_loss` | one crossover's phase alignment (both polarities, flip margin, lobe margin) and how far its sum falls short of coherent | §Reading a junction |
+  | `helix_phase_rotation`, `helix_phase_rotation_H` | model PC-Tool's channel Phase control (Q=1 AP2 at the channel's crossover) to RECOMMEND an angle — never written | helix_hardware.md |
   | `predicted_vs_measured` | predict → re-measure loop (step 7) | §Verification & honesty |
   | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | §Two checks |
   | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | §Sweep capture setup |
@@ -119,9 +122,12 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   `pipeline.py source-audit --at ref.txt=0 down6.txt=-6 ...` asks whether the
   signal ENTERING the DSP is level-independent (read §Audit the source, first —
   and note it will not attribute a finding to the source without `--electrical`),
-  and `pipeline.py imaging --solo-l L.txt --solo-r R.txt` reports where the image
-  sits as a function of frequency — see §Image position is frequency-dependent,
-  for how to read a `smeared` verdict. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
+  and `pipeline.py imaging --solo-l L.txt --solo-r R.txt [--near-side right|left]`
+  reports where the image sits as a function of frequency — see §Image position
+  is frequency-dependent, for how to read a `smeared` verdict — and, with
+  `--near-side`, the options for centring it. `pipeline.py junction --lower A.txt
+  --upper B.txt --crossover HZ [--direct-sound]` reads one crossover's phase
+  score and sum loss (§Reading a junction,). **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
   and review `references/tune_plan_schema.md`, then populate the plan's
   `source_sha256`, distinct not-yet-existing `output_path`, edits, and
   per-edit `confirmations`; finally run `pipeline.py apply`. Apply exclusively
@@ -131,6 +137,13 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   `pipeline.py session check|save` reads and records the intake sidecar (step
   1). `python scripts/pipeline.py selftest` self-tests analysis and
   documentation routing on synthetic fixtures.
+- **`decay.py fdw <ir.txt> --out DRIVER_direct.txt`** — the DIRECT-SOUND
+  response through an 8-cycle frequency-dependent window from the driver's
+  arrival, written as a REW-style text export every other tool reads. Use it
+  for imaging and junction TIMING decisions above ~500 Hz (the ear places a
+  source on the first arrival); keep full-window / spatial-average data for
+  tone. Prefer REW *text* IR exports — they carry the shared time base; a WAV
+  does not. See §Two windows,
 - **`decay.py reflections <ir.wav>`** — secondary arrivals from the impulse
   response: delay, level, path-length difference, and the comb each one must
   produce. `--dips 340 1020 ...` tests those predictions against the dips you
@@ -346,7 +359,11 @@ so the math is identical each time.
 
 If the user reports an imaging problem — vocals off-centre, a stage that won't
 hold still, an instrument that moves as it changes pitch — run `pipeline.py
-imaging` before proposing a delay. A `smeared` verdict means the bands disagree
+imaging` before proposing a delay, from direct-sound exports when you have them
+(§Two windows,). A consistently `pulled` image at an off-centre seat is a stage
+decision with two established answers — level only, or a small far-side time
+lead plus a smaller trim — so present both from `--near-side` (§Placing the
+phantom centre,) and let the user choose by ear. A `smeared` verdict means the bands disagree
 and **no single delay value can fix it**; proposing one anyway improves some
 bands and worsens others. Read §Image position is frequency-dependent, for what
 to do instead. And when a dip has no explanation yet, an impulse response and
@@ -382,6 +399,13 @@ car.
   correction (measurement-driven, toward that goal). Say which is which.
 
 ### 4. Propose — jointly, within budget
+
+**Order, when a tune needs both EQ and timing:** driver-local EQ the solos
+justify first, re-measure, then polarity/delay/all-pass on the corrected
+drivers, then broad system tone — EQ moves phase, so the reverse order undoes
+the alignment (§Tune order,). Any phase-domain change to a channel with two
+neighbours must be checked at BOTH of its junctions (§A channel hands over
+twice,).
 
 - **Start from `python scripts/pipeline.py propose`** with the same inputs you
   gave `analyze` (`--measurement` and/or `--positions`, `--target`, `--voice`,

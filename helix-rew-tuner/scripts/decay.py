@@ -31,6 +31,7 @@
 #   python decay.py t20 ir.wav --drop 10           # T10 (survives a high floor)
 #   python decay.py csd ir.wav --slices 12         # waterfall table
 #   python decay.py compare a.wav b.wav            # two IRs side by side
+#   python decay.py fdw ir.txt --out direct.txt     # direct-sound FR (8 cycles)
 import argparse
 import sys
 import wave
@@ -90,6 +91,99 @@ def load_ir_text(path):
     if fs < 1000:               # implausible as a sample rate -> axis was in ms
         fs = 1000.0 / dt
     return v, float(fs)
+
+
+def load_ir_text_timed(path):
+    """Like load_ir_text, but also returns the time of the first sample in
+    seconds. REW's text IR export writes each sample's time relative to the
+    measurement's t=0, so with a timing reference active every driver's
+    export shares one absolute time base -- which a direct-sound window must
+    keep, or the window placement itself reads as delay."""
+    t = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for line in fh.read().splitlines():
+            line = line.strip()
+            if not line or line[0].isalpha() or line[0] in '*#/':
+                continue
+            try:
+                t.append(float(line.replace(',', ' ').split()[0]))
+            except (ValueError, IndexError):
+                continue
+            break
+    ir, fs = load_ir_text(path)
+    t0 = t[0] if t else 0.0
+    dt_file = 1.0 / fs
+    # Same seconds-vs-milliseconds rule load_ir_text applies to the step.
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        nums = []
+        for line in fh.read().splitlines():
+            line = line.strip()
+            if not line or line[0].isalpha() or line[0] in '*#/':
+                continue
+            try:
+                nums.append(float(line.replace(',', ' ').split()[0]))
+            except (ValueError, IndexError):
+                continue
+            if len(nums) >= 2:
+                break
+    if len(nums) >= 2 and abs((nums[1] - nums[0]) - dt_file) > 0.5 * dt_file:
+        t0 = t0 / 1000.0
+    return ir, fs, float(t0)
+
+
+def fdw_response(ir, fs, freqs, cycles=8.0, t0_s=0.0, arrival_index=None,
+                 arrival_db=-20.0, pre_ms=0.25):
+    """Direct-sound frequency response through a frequency-dependent window.
+
+    For each frequency f the IR is windowed over `cycles` periods (cycles/f
+    seconds) starting at the driver's ARRIVAL -- flat for the first half,
+    half-Hann down over the second, with a short half-Hann lead-in of
+    `pre_ms` -- and evaluated at f alone. High frequencies therefore see only
+    the first fraction of a millisecond (direct sound, before most cabin
+    reflections), low frequencies see tens of milliseconds. 8 cycles is the
+    width Resonalyze validated for junction phase (its tweeter-junction
+    ceiling rose from ~0.69 through the full window to ~0.93): use this for
+    imaging and crossover TIMING decisions, which the ear makes on the first
+    arrival (precedence effect), and keep the full window / MMM for TONAL
+    balance, which is heard with the reflections.
+
+    Phase is computed against the ABSOLUTE time axis (`t0_s` + n/fs), not the
+    window start, so two drivers exported on one time base stay comparable:
+    the arrival-anchored placement must not read as delay.
+
+    arrival_index: sample where the direct sound starts; default is the first
+    sample whose |ir| reaches `arrival_db` relative to the peak.
+    Returns (spl_db, phase_deg) at `freqs` (phase wrapped to +/-180 like REW)."""
+    ir = np.asarray(ir, dtype=float)
+    f = np.asarray(freqs, dtype=float)
+    if arrival_index is None:
+        peak = float(np.max(np.abs(ir)))
+        if peak <= 0:
+            raise ValueError('impulse response is silent')
+        arrival_index = int(np.argmax(np.abs(ir) >= peak * 10 ** (arrival_db / 20.0)))
+    pre = max(2, int(round(pre_ms * 1e-3 * fs)))
+    spl = np.empty(len(f))
+    ph = np.empty(len(f))
+    for k, fk in enumerate(f):
+        length = max(8, int(round(cycles / fk * fs)))
+        start = max(0, arrival_index - pre)
+        stop = min(len(ir), arrival_index + length)
+        n = np.arange(start, stop)
+        w = np.ones(len(n))
+        lead = n < arrival_index
+        if np.any(lead):
+            m = int(np.count_nonzero(lead))
+            w[:m] = 0.5 - 0.5 * np.cos(np.pi * (np.arange(m) + 1) / (m + 1))
+        half = arrival_index + length // 2
+        tail = n >= half
+        if np.any(tail):
+            m = int(np.count_nonzero(tail))
+            w[-m:] = 0.5 + 0.5 * np.cos(np.pi * (np.arange(m) + 1) / (m + 1))
+        t = t0_s + n / fs
+        H = np.sum(ir[n] * w * np.exp(-2j * np.pi * fk * t))
+        spl[k] = 20 * np.log10(max(abs(H), 1e-15))
+        ph[k] = np.degrees(np.angle(H))
+    return spl, ph
 
 
 def ir_from_spectrum(freqs, spl_db, phase_deg, fs=48000.0, n=None):
@@ -392,7 +486,36 @@ def _main():
                    help='measured dip frequencies, to test against the '
                         'predicted comb -- this is what turns an arrival into '
                         'a diagnosis')
+    fd = sub.add_parser('fdw', help='direct-sound frequency response (frequency-dependent window)')
+    fd.add_argument('ir', help='REW IR export: text (keeps the time base) or WAV')
+    fd.add_argument('--cycles', type=float, default=8.0)
+    fd.add_argument('--out', required=True, help='write a REW-style freq/SPL/phase text file')
+    fd.add_argument('--t0-ms', type=float, default=None,
+                    help='time of the first sample; text exports carry it, WAV does not')
     a = ap.parse_args()
+
+    if a.cmd == 'fdw':
+        if a.ir.lower().endswith('.wav'):
+            ir, fs = load_ir_wav(a.ir)
+            t0 = 0.0
+            if a.t0_ms is None:
+                print('note: a WAV export carries no time origin -- phase is relative '
+                      'to the file start. Use REW text IR exports (or --t0-ms) when '
+                      'comparing drivers on one time base.', file=sys.stderr)
+        else:
+            ir, fs, t0 = load_ir_text_timed(a.ir)
+        if a.t0_ms is not None:
+            t0 = a.t0_ms / 1000.0
+        f = 20.0 * 2 ** (np.arange(int(round(np.log2(20000.0 / 20.0) * 96)) + 1) / 96.0)
+        f = f[f < fs / 2]
+        spl, ph = fdw_response(ir, fs, f, cycles=a.cycles, t0_s=t0)
+        with open(a.out, 'w', encoding='utf-8') as fh:
+            fh.write('* direct-sound response, %g-cycle frequency-dependent window '
+                     '(decay.py fdw)\n* Freq(Hz) SPL(dB) Phase(degrees)\n' % a.cycles)
+            for fk, sk, pk in zip(f, spl, ph):
+                fh.write('%.4f %.3f %.3f\n' % (fk, sk, pk))
+        print('wrote %s (%d points, %g cycles)' % (a.out, len(f), a.cycles))
+        return
 
     if a.cmd == 't20':
         ir, fs = _load_any(a.ir)

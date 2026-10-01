@@ -129,7 +129,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.5.0`) so you can tell whether an already-installed copy is current — open
+`1.6.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -305,6 +305,7 @@ tools/
 tests/
 ├── test_build_skill.py               build, metadata, anchor, and archive parity tests
 ├── test_codec_and_loader_integrity.py  tune-codec byte integrity and REW/target loader validation
+├── test_imaging_phase_and_windows.py  phantom-image model, centre steering, Helix phase, junctions, direct sound
 ├── test_pipeline_apply.py            deterministic tune plan/apply integration tests
 ├── test_preflight_and_benchmark.py   install and optimizer benchmark tests
 ├── test_propose.py                  deterministic EQ proposal and position averaging
@@ -577,6 +578,19 @@ than seconds (measured: normalizing seconds tilts it ~80× across the audio band
 on a fixture with no phase anomaly in it at all), and the thresholds were
 re-derived on synthetic ground truth for this path. Details and measured
 operating characteristics are in `boost_gate_verdict`'s docstring.
+
+Several imaging and junction methods come from
+[`DIMOSUS/Resonalyze`](https://github.com/DIMOSUS/Resonalyze) (MIT): the model of
+the Audiotec-Fischer channel **Phase** control (one Q=1 all-pass at the channel's
+crossover, measured there on a DSP ULTRA S), the junction phase score with its
+flip and lobe margins, the 8-cycle direct-sound window for timing decisions, the
+cut-only "crossover in the target" skirt correction, the asymmetric EQ objective
+tested as `fit_peq(objective='asymmetric')`, and the stereo-staging rules (image
+outranks the junction above ~300 Hz, polarity belongs to the driver, rear-fill
+timing, time-and-level centre placement). The phantom-image model follows Lee &
+Rumsey (2013) and De Sena et al. (2020). The research record, with what was
+adopted and what is still open, is in
+[`docs/research/2026-10-01-imaging-and-resonalyze.md`](docs/research/2026-10-01-imaging-and-resonalyze.md).
 
 ## License
 

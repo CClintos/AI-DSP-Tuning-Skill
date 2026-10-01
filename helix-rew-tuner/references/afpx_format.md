@@ -254,7 +254,10 @@ flip. Whatever `PM`/`P` encode (a real-world case showed `PM="4"` displayed as
 *Normal* — plausibly some delay-entry display-unit mode, still not confirmed),
 it isn't polarity. `afpx.channels()` now reports `polarity` from `CINV` (trust
 this) and keeps the delay tag's `PM`/`P` only as raw, uninterpreted context under
-`polarity_delay_tag_raw`.
+`polarity_delay_tag_raw`. One open hypothesis worth a controlled diff: `P` may be
+the channel **Phase** control (an angle the processor turns into a Q=1 all-pass at
+the channel's crossover — see `helix_hardware.md`). Until a diff confirms it,
+never write `P`.
 
 ## Round-trip gotcha (important for verification)
 

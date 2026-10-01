@@ -916,24 +916,73 @@ def imaging(args):
         rp = measure.resample_log(fr, np.rad2deg(np.unwrap(np.deg2rad(pr))), freqs)
     else:
         notes.append('no phase column in one or both solo exports -- the TIME cue '
-                     'is unavailable, so only level differences were used. Below '
-                     'about 1.5 kHz that is the WEAKER cue, and the low-frequency '
-                     'result should not be trusted')
+                     'is unavailable, so only level differences were used. Any '
+                     'arrival-time difference between the sides is missing from '
+                     'this prediction')
 
     rows = tunelib.band_itd_ild(freqs, left_db, right_db, lp, rp)
     pull = tunelib.image_pull(rows)
     if pull['verdict'] == 'smeared':
-        notes.append('image position disagrees across frequency -- one delay value '
-                     'cannot fix this; see methodology.md on the duplex region')
+        notes.append('image position disagrees across frequency -- one delay or trim '
+                     'cannot fix this; see methodology.md §Image position is '
+                     'frequency-dependent')
     elif pull['verdict'] == 'pulled':
         notes.append('image sits consistently off-centre -- this IS the case a '
-                     'delay or level trim addresses')
-    return {'meta': {'solo_l': args.solo_l, 'solo_r': args.solo_r,
-                     'phase_available': lp is not None,
-                     'convention': 'positive = image pulls LEFT'},
-            'verdict': pull['verdict'],
-            'spread': pull['spread'], 'mean_pull': pull['mean_pull'],
-            'bands': pull['bands'], 'notes': notes}
+                     'delay or level trim addresses (see centre_steering)')
+    report = {'meta': {'solo_l': args.solo_l, 'solo_r': args.solo_r,
+                       'phase_available': lp is not None,
+                       'convention': 'positive = image pulls LEFT',
+                       'model': 'inter-channel: ~1 ms or ~16 dB = full shift, cues trade'},
+              'verdict': pull['verdict'],
+              'spread': pull['spread'], 'mean_pull': pull['mean_pull'],
+              'bands': pull['bands'], 'notes': notes}
+    near_side = getattr(args, 'near_side', None)
+    if near_side:
+        report['centre_steering'] = tunelib.centre_steering(rows, near_side)
+    return report
+
+
+def _complex_export(path, freqs):
+    f, s, ph, _coh = measure.load_text_export(path)
+    if ph is None:
+        raise ValueError('%s has no phase column -- a junction needs complex data' % path)
+    mag = 10 ** (measure.resample_log(f, s, freqs) / 20.0)
+    phase = measure.resample_log(f, np.unwrap(np.deg2rad(ph)), freqs)
+    return mag * np.exp(1j * phase)
+
+
+def junction(args):
+    """Phase score + sum loss for one crossover pair (methodology.md
+    §The crossover action-ladder). Read-only; writes nothing."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    lower = _complex_export(args.lower, freqs)
+    upper = _complex_export(args.upper, freqs)
+    fc = float(args.crossover)
+    band = (fc / 2.0, fc * 2.0)
+    notes = []
+    phase = tunelib.junction_phase_score(freqs, lower, upper, fc)
+    if phase is None:
+        notes.append('fewer than 8 usable bins around the crossover -- no read-out')
+    else:
+        if not phase['alignable']:
+            notes.append('best score below 0.5: the two drivers do not hold one phase '
+                         'relation across the band -- no delay is trustworthy here')
+        if phase['lobe_margin'] == phase['lobe_margin'] and phase['lobe_margin'] < 0.05:
+            notes.append('lobe margin under 0.05: a whole-period hop cannot be ruled out')
+        if phase['polarity_ambiguous']:
+            notes.append('polarity is ambiguous here (within 0.05) -- keep the current one')
+        if fc >= 1000.0 and not args.direct_sound:
+            notes.append('above ~1 kHz full-window phase is decorrelated by the cabin; '
+                         'repeat with direct-sound exports (decay.py fdw) and pass '
+                         '--direct-sound before trusting a delay here')
+    return {'meta': {'lower': args.lower, 'upper': args.upper, 'crossover_hz': fc,
+                     'window': 'direct-sound (FDW)' if args.direct_sound else 'as exported',
+                     'convention': 'extra delay/polarity apply to the LOWER channel'},
+            'phase': phase,
+            'sum_loss': tunelib.junction_sum_loss(freqs, lower, upper, band),
+            'notes': notes,
+            'reminder': ('a channel hands over twice: re-check its OTHER junction with '
+                         'any delay/polarity you carry to it')}
 
 
 def check_doc_refs(core_path=None, methodology_path=None):
@@ -1204,7 +1253,18 @@ def main():
                         help='predicted image position vs frequency from solo L/R')
     im.add_argument('--solo-l', required=True)
     im.add_argument('--solo-r', required=True)
+    im.add_argument('--near-side', choices=('left', 'right'),
+                    help='the side nearer the listener (right = RHD driver seat): '
+                         'adds centre-steering options')
     im.add_argument('--out')
+
+    jn = sub.add_parser('junction', help='phase score and sum loss for one crossover pair')
+    jn.add_argument('--lower', required=True, help='lower driver export (with phase)')
+    jn.add_argument('--upper', required=True, help='upper driver export (with phase)')
+    jn.add_argument('--crossover', required=True, type=float, help='crossover frequency, Hz')
+    jn.add_argument('--direct-sound', action='store_true',
+                    help='the exports are direct-sound (decay.py fdw) responses')
+    jn.add_argument('--out')
 
     se = sub.add_parser('session', help='read or record the intake session sidecar')
     se_sub = se.add_subparsers(dest='session_cmd', required=True)
@@ -1236,9 +1296,9 @@ def main():
             print(text)
     elif args.cmd == 'apply':
         print(json.dumps(apply_plan(args.plan), indent=2))
-    elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging'):
+    elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction'):
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
-                  'imaging': imaging}[args.cmd](args)
+                  'imaging': imaging, 'junction': junction}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
             with open(args.out, 'w', encoding='utf-8') as fh:

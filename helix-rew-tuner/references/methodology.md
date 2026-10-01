@@ -22,12 +22,20 @@ before correcting, and prefer doing less.**
   - [The boost gate](#the-boost-gate-the-same-doctrine-scored-and-asked-only-of-boosts)
   - [Single-position phase reliability](#quantify-single-position-phase-reliability-before-trusting-it)
   - [Multi-position variance](#multi-position-variance-eq-whats-common-ignore-what-moves)
+- [Tune order](#tune-order-driver-local-eq-then-alignment-then-system-tone)
 - [The crossover action-ladder](#the-crossover-action-ladder-cheapest-safest-first)
+  - [A channel hands over twice](#a-channel-hands-over-twice)
+  - [Reading a junction](#reading-a-junction-phase-score-sum-loss-and-which-window)
+  - [Cut a shallow skirt onto the crossover](#cut-a-shallow-acoustic-skirt-down-onto-the-crossover-never-boost-one)
 - [Shelf cookbook](#shelf-cookbook-broad-tonal-balance-only)
 - [All-pass cookbook](#all-pass-cookbook-phase-only-use-sparingly)
+- [Two windows: image from the direct sound, tone from the whole field](#two-windows-image-from-the-direct-sound-tone-from-the-whole-field)
 - [Image position is frequency-dependent](#image-position-is-frequency-dependent-and-one-delay-cannot-fix-it)
 - [Reflections: find the cause first](#reflections-find-the-cause-before-reaching-for-a-filter)
 - [Imaging](#imaging)
+  - [Placing the phantom centre](#placing-the-phantom-centre-level-or-time-and-level)
+  - [The image outranks the crossover above ~300 Hz](#the-image-outranks-the-crossover-above-300-hz)
+  - [Polarity belongs to the driver](#polarity-belongs-to-the-driver)
 - [Restraint](#restraint-the-thing-that-beats-aggressive-auto-eq)
 - [Verification and honesty](#verification-honesty)
 - [REW IR-delay wrong-cycle trap](#rews-ir-delay-estimator-can-lock-onto-the-wrong-cycle-on-a-band-limited-driver)
@@ -941,6 +949,32 @@ ground. Where they disagree, or only one is available, treat the correction as
 unproven and say so — don't let a passing `excess_gd_mask` alone green-light a
 boost into what might still be a position-dependent cancellation.
 
+## Tune order: driver-local EQ, then alignment, then system tone
+
+A minimum-phase PEQ band changes phase with magnitude, so EQ placed on a
+driver after its junction is aligned moves that alignment. The order that
+does not undo itself (Resonalyze's manual makes the same argument):
+
+1. **Driver-local EQ first** — corrections a driver's SOLO measurement (or
+   its spatial average) justifies: its own resonances, a skirt brought down
+   onto the crossover (below). Flattening a genuine minimum-phase resonance
+   straightens that driver's phase too, which makes the next step easier.
+   Keep bands broad near a crossover — many narrow bands near a sub/midbass
+   junction turn the relative phase so fast that no single delay sums the
+   pair over a useful bandwidth.
+2. **Re-measure, then align** — polarity → delay → all-pass on the EQ'd
+   drivers (the ladder below), top junction first. Re-align after any
+   all-pass, which shifts group delay.
+3. **System tone last** — broad shelves and bells away from the junctions,
+   or applied to both drivers of a junction alike, so they do not disturb
+   what step 2 settled.
+
+This is not permission to EQ a summation problem: a dip that the solos do
+not show is a phase problem and goes to the ladder, never to a boost. And it
+does not relax the plan rule — phase-domain and EQ-domain writes still go in
+separate plans with a re-measure between them; this only fixes which comes
+first when both are needed.
+
 ## The crossover action-ladder (cheapest, safest first)
 
 **Start with `tunelib.crossover_confidence(freqs, solo_a, solo_b, together_db,
@@ -974,7 +1008,65 @@ it):
 
 Only after those, consider EQ — and only if the *solo* response justifies it.
 `polarity_delay_search` returns `residual_needs_apf` to tell you whether step 3 is
-even warranted.
+even warranted. (EQ that the solo justifies is driver-local and belongs BEFORE
+this ladder — see Tune order; EQ that only the sum "wants" is not EQ's job.)
+
+### A channel hands over twice
+
+A midrange meets the woofer below it and the tweeter above it. A delay,
+polarity or all-pass that wins at one junction is carried to the other one
+by the shared channel, and can spoil it. Before proposing any phase-domain
+change to a channel with two neighbours, evaluate BOTH junctions with the
+change applied, and say what the second one does. A delay applied to a
+channel carries everything above it only if you move the whole stack — so
+when the fix is "shift the midrange", ask whether the tweeter should move
+with it.
+
+### Reading a junction: phase score, sum loss, and which window
+
+`python scripts/pipeline.py junction --lower MID.txt --upper TW.txt
+--crossover 2500` (complex solos, one time base) reports two figures that
+answer different questions:
+
+- **`phase`** (`tunelib.junction_phase_score`) — Σw·cos(Δφ)/Σw with
+  w = |lower|·|upper| over ±1 octave: 1 in phase, −1 inverted. One delay
+  sweep of ±1.25 periods gives both polarities; a flip is recommended only
+  when it beats the kept polarity by 0.05 (a real 80 Hz sub junction had its
+  two best scores within 0.001 — that is a tie, not a flip). `lobe_margin`
+  under ~0.05 means a whole-period hop cannot be ruled out; a best score
+  under 0.5 means no delay is trustworthy (the drivers do not hold one phase
+  relation across the band). `phase_at_fc_deg` is withheld when the bins
+  around the corner disagree (a notch sits at the handover). Calibrated by
+  Resonalyze on 20 junctions in 8 cars.
+- **`sum_loss`** (`tunelib.junction_sum_loss`) — how far the complex sum
+  falls short of perfect coherent addition, average and worst dip. It moves
+  with the drivers' LEVEL ratio as much as with phase, so it never settles a
+  phase question alone. A junction within ~3 dB with its score near its best
+  is a working junction: leave it.
+
+**Which window.** Above ~1 kHz the cabin decorrelates the two drivers' phase
+in a full-window measurement — in Resonalyze's archive a correctly tuned
+tweeter junction could not score above ~0.69 through the full window, but
+reached ~0.93 through an 8-cycle frequency-dependent window. For junction
+TIMING above ~500 Hz, build direct-sound responses with
+`python scripts/decay.py fdw IR.txt --out DRIVER_direct.txt` from REW text
+IR exports (they carry the shared time base) and pass `--direct-sound`. Below
+~500 Hz the two windows agree (median 5°), so ordinary exports are fine.
+
+### Cut a shallow acoustic skirt down onto the crossover (never boost one)
+
+The crossover the user set is electrical; the drivers sum ACOUSTICALLY, and
+a driver whose own output falls slower than the filter leaves a wider,
+lumpier overlap than the crossover was chosen for. Treat the crossover's
+ideal acoustic slope as part of that driver's target outside its passband:
+where the measured skirt sits ABOVE that slope, a cut that brings it down is
+a legitimate driver-local correction (step 1 of Tune order) and improves
+summation — Resonalyze measured junction sum loss 0.37 → 0.30 dB on average
+and worst dip 2.0 → 1.6 dB across seven car tunes doing exactly this. Never
+boost a skirt: that undoes the crossover and spends the driver's excursion
+where the neighbour is already playing at full level. Crossovers themselves
+are still never written.
+
 
 **A found delay can now be written directly** (`afpx.write_delay_samples`,
 verified by `afpx.verify_delay_write`) instead of only ever being a
@@ -1077,17 +1169,59 @@ when the defect is phase (a summation null), never a magnitude bump.
   zero interaural group delay by construction, since both branches get the same
   filter. This is different from a *split* configuration, which deliberately uses
   **different** F/Q per side and does carry real interaural GD risk (above).
+- **A symmetric APF cannot fix an L+R cancellation.** The commonest reason for an
+  all-pass in a car is a lower-midrange/midbass null where the LEFT and RIGHT
+  drivers cancel at the off-centre seat (path-length difference). That null lives
+  in the L−R relative phase, and an identical filter on both sides leaves the L−R
+  relation exactly as it was. Only a one-sided (unilateral) APF changes it.
+  **Real case (2026-07-09):** a unilateral 420 Hz Q0.7 APF on one front mid had
+  cleared two L+R nulls; mirroring the same APF onto the other mid "for symmetry"
+  zeroed the L↔R rotation and brought both back — the System Sum fell 17.5 dB at
+  401 Hz and 22 dB at 173 Hz, the nulls position-stable at all three mic positions.
+  Removing the mirrored copy restored the fix. Forum practice converges on the
+  same remedy (a 2nd-order APF around 150–300 Hz on one side's midrange in many
+  cars); find the actual F/Q from the measured L and R solos with
+  `optimize_allpass`, check `interaural_group_delay_ms`, and verify with a mono
+  bass line and vocal.
+
+## Two windows: image from the direct sound, tone from the whole field
+
+The ear places a source on the FIRST arrival (the precedence effect) and
+judges tone on the whole field, reflections included. So the two kinds of
+decision want two different views of the same driver:
+
+- **Imaging and timing** — L/R arrival, junction delay and polarity above
+  ~500 Hz, centre placement — from a **direct-sound** response: a
+  frequency-dependent window of about 8 cycles from the driver's arrival
+  (`decay.py fdw`). At 2 kHz that is 4 ms, so the earliest reflections are
+  still inside; it is a short window, not an anechoic one.
+- **Tonal balance and EQ** — from the full window, and better still from a
+  spatial average (MMM or several positions), which no window improves on.
+
+Never compare a figure from one window with a figure from the other, and
+never average them. A disagreement between them is a hypothesis, not a
+verdict: a deep direct-sound dip under a shallow full-window one suggests a
+timing or polarity fault the cabin's later energy fills in; the reverse
+suggests interference particular to that mic position.
 
 ## Image position is frequency-dependent, and one delay cannot fix it
 
 The standard car-audio move is one delay per side, set from path length. That
 is a single number for a mechanism that is not single:
 
-- **Below ~1.5 kHz** the ear localizes by **interaural time difference**. Half a
-  wavelength still spans the head, so arrival-time difference is unambiguous and
-  dominant.
-- **Above ~1.5 kHz** the wavelength is shorter than the head, time cues become
-  ambiguous, and head shadowing makes **level difference** dominant.
+- What the seat receives from the two loudspeakers differs by an
+  **inter-channel time difference** (ICTD) and an **inter-channel level
+  difference** (ICLD), each of which can change from band to band — a
+  reflection, a crossover region or a driver's directivity moves one band
+  and not its neighbours.
+- A phantom image between two loudspeakers moves fully to one speaker at
+  roughly **1 ms** of ICTD or **15–17 dB** of ICLD (Lee & Rumsey 2013), and
+  the two cues **trade**: a time lead can be cancelled by a level cut. These
+  are inter-CHANNEL figures, not interaural ones — 650 µs (the largest
+  difference between two ears) moves a phantom image only about two thirds
+  of the way. And level is not a treble-only cue here: at low frequency a
+  level difference between the speakers is exactly what produces a time
+  difference at the ears (Blumlein).
 
 So an image can sit centred at 2 kHz and pull left at 250 Hz. That is audible,
 extremely common, and invisible to both magnitude-vs-target and L/R level
@@ -1097,7 +1231,8 @@ matching — the two things a conventional tune actually checks.
 not differentiated**: the unwrapped phase difference is regressed against
 angular frequency per band and the slope taken as the arrival-time difference,
 which is far more robust than a pointwise group delay. Each band reports a
-`pull` from −1 (hard right) to +1 (hard left), with the dominant cue named.
+`pull` from −1 (hard right) to +1 (hard left) — pull = ICLD/16 dB + ICTD/1 ms,
+clipped — with the cue that contributes more named.
 
 Read the **`verdict`** first:
 
@@ -1112,13 +1247,16 @@ Read the **`verdict`** first:
 
 Sign convention is positive = pulls left, throughout.
 
-Two honest limits. This is not a calibrated localization model — real
+Honest limits. This is not a calibrated localization model — real
 localization uses the listener's own head, pinnae and small head movements, none
 of which a microphone at the seat has; read it as an ordering, not degrees of
-arc. And an ITD whose phase-difference regression fits poorly is **discarded
-rather than blended**, because a phase difference that isn't behaving like a
-delay is not an arrival-time cue. When phase is missing entirely the time cue is
-withdrawn and the low-frequency result should not be trusted.
+arc. Time panning is weak for continuous tones with a high fundamental, where
+level panning stays robust. An ICTD whose phase-difference regression fits
+poorly is **discarded rather than blended**, because a phase difference that
+isn't behaving like a delay is not an arrival-time cue. When phase is missing
+entirely the time cue is withdrawn and any arrival difference between the sides
+is simply absent from the prediction. Use direct-sound exports (Two windows)
+for the time cue whenever you have them.
 
 ## Reflections: find the cause before reaching for a filter
 
@@ -1226,6 +1364,52 @@ boost that only helps matching and does nothing for the channel's own target
 accuracy should have to earn its place. Raise the weight (2–4+) once you've
 actually decided the image-stability payoff is worth it for that specific
 region; don't reach for it as a default.
+
+### Placing the phantom centre: level, or time and level
+
+At an off-centre seat the near side arrives earlier and louder, and the image
+collapses toward that door. Equal-arrival time alignment removes the time part;
+what is left is a level and directivity question. Two established ways to
+centre it, which trade against each other (`tunelib.centre_steering`, or
+`pipeline.py imaging ... --near-side right|left`):
+
+- **Level only** — leave the alignment at equal arrival and attenuate the near
+  side until the image centres. Typically 5–8 dB in a car. Costs near-side
+  headroom and can tilt that side's tone.
+- **Time and level** — also let the FAR side arrive slightly early (0.2–0.3 ms
+  is a reasonable start in a sedan), so part of the steering comes from time;
+  the near side then needs roughly half the cut (2–4 dB) for the same image.
+
+Neither is "correct" — present both with their numbers and let the user choose
+by ear with a mono vocal. Two cautions to state with the time option:
+inter-channel time changes about 0.29 ms per 10 cm of head movement while
+level barely moves, so a time-made centre is narrower in space; and past about
+±0.3 ms the image becomes less certain. `centre_steering` therefore recommends
+the largest lead not past 0.3 ms whose trim fits, and returns every option.
+These are stage decisions — never write a gain that equalizes the sides
+without a measured level delta behind it, and never as a side effect of EQ.
+
+### The image outranks the crossover above ~300 Hz
+
+When a junction's delay search and the L/R image disagree, decide by band.
+Above ~300 Hz the arrival relationship between a driver's left and right
+instance IS the image: keep each pair's L/R arrival where the chosen centre
+needs it (equal, or the chosen far-side lead) and fit the junctions around
+that, rather than letting a junction delay drag one side's driver off its
+twin. Below ~300 Hz arrival carries little localization: there the junction
+summation decides, and the L/R split only has to stay on the right lobe.
+Align from the TOP junction down: the tweeter junction needs hundredths of a
+millisecond, the sub junction tolerates about one, so anchoring on the top
+puts the error where the ear forgives it.
+
+### Polarity belongs to the driver
+
+A driver's left and right instances share one polarity. A proposal that
+inverts the left midrange but not the right one is not a tune, it is a wiring
+question — check the physical connection before writing anything. Settle a
+pair's polarity at the junction where it is clearest and carry it to the
+twin; at a low junction where the two polarities score within ~0.05, keep the
+current one.
 
 **A cheap, high-confidence signal for when a one-sided cut is the right move (not
 just legal): scan for frequencies where the whole-system deviation-from-target
@@ -1931,6 +2115,17 @@ target), not a matching one, and — per the diagnostic-level caveat above — t
 capture used to find the matching gap is not the right basis for a common-mode
 voicing decision either. Leave common rear voicing to normal-level listening
 unless a specific target philosophy is declared for the rear channels.
+
+**Rear-fill timing and level.** Rear fill should arrive BEHIND the front stage,
+not with it: on top of the delay that makes the nearer rear speakers co-arrive,
+roughly 10–20 ms later lets the rears add space while the precedence effect keeps
+the image on the dashboard (use ~0 ms only when second-row listeners matter
+more). Set its level by ear at normal listening level, not from a diagnostic
+capture: start 6–12 dB under the front, raise it until it becomes audible as a
+separate source, then back off 2–3 dB. Time a rear or centre against the ONE
+front driver that plays most of the 1–4 kHz voice band (usually the midrange),
+not against the summed front stage — a band-limited arrival of a sum is the
+arrival of whichever driver plays earliest in that band.
 
 ## Stopping is a valid, and often correct, outcome
 

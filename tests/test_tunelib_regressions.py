@@ -181,5 +181,43 @@ class DefaultTargetVoicingTests(unittest.TestCase):
         self.assertLessEqual(tilt["tilt_db_per_oct"], high)
 
 
+class AsymmetricObjectiveTests(unittest.TestCase):
+    def setUp(self):
+        import measure
+        self.freqs = measure.common_grid(20.0, 20000.0, 96)
+        self.dev = (tunelib.peaking_db(self.freqs, 300.0, 1.2, 5.0)
+                    + tunelib.peaking_db(self.freqs, 2500.0, 2.0, 4.0)
+                    + tunelib.peaking_db(self.freqs, 1000.0, 1.0, -4.0))
+
+    def test_pre_existing_depth_is_never_charged(self):
+        res = tunelib.asymmetric_eq_residual(np.array([-10.0]), np.array([0.0]))
+        self.assertTrue(np.allclose(res, 0.0))
+
+    def test_digging_below_target_is_charged(self):
+        res = tunelib.asymmetric_eq_residual(np.array([0.0]), np.array([-2.0]))
+        self.assertGreater(float(np.sum(res ** 2)), 0.0)
+
+    def test_peaks_cost_more_than_equal_dips_the_bank_dug(self):
+        peak = tunelib.asymmetric_eq_residual(np.array([2.0]), np.array([0.0]))
+        dug = tunelib.asymmetric_eq_residual(np.array([0.0]), np.array([-2.0]))
+        self.assertGreater(float(np.sum(peak ** 2)), float(np.sum(dug ** 2)) * 0.5)
+
+    def test_boost_mode_off_never_boosts(self):
+        bands, _ = tunelib.fit_peq(self.freqs, self.dev, (60.0, 12000.0), n_bands_max=6,
+                                   objective="asymmetric", boost_mode="off")
+        self.assertTrue(all(g <= 0.0 for _f, _q, g in bands))
+
+    def test_refill_never_lifts_the_curve(self):
+        bands, _ = tunelib.fit_peq(self.freqs, self.dev, (60.0, 12000.0), n_bands_max=6,
+                                   objective="asymmetric", boost_mode="refill")
+        self.assertLessEqual(float(np.max(tunelib.cascade_db(self.freqs, bands))), 0.1)
+
+    def test_default_objective_is_unchanged(self):
+        a, _ = tunelib.fit_peq(self.freqs, self.dev, (60.0, 12000.0), n_bands_max=4)
+        b, _ = tunelib.fit_peq(self.freqs, self.dev, (60.0, 12000.0), n_bands_max=4,
+                               objective="symmetric", boost_mode="allowed")
+        self.assertEqual(a, b)
+
+
 if __name__ == "__main__":
     unittest.main()

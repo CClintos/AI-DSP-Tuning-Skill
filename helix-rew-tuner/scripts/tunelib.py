@@ -501,6 +501,34 @@ def audibility_score(freqs, dev_db, band=(60.0, 16000.0), mask=None, conf=None,
     return float(np.sqrt(np.sum((err * w) ** 2) / den))
 
 
+def asymmetric_eq_residual(dev_before, eq_db, fill_allowed=None, above_weight=4.0,
+                           over_cut_free_db=1.0, over_cut_weight=5.0, dug_falloff_db=3.0):
+    """Per-point residual of Resonalyze's EQ objective (docs/tech/eq-auto-tuner.md
+    §The objective, tuned there on 144 car fits), as a vector whose squares sum
+    to the loss:
+      * above target: sqrt(above_weight) x the excess (peaks cost 4x);
+      * below target: ONLY the depth the bank's own cut dug -- never the
+        depth the point already had -- scaled down 1/(1+(D/3 dB)^2) where it
+        was already D dB under, plus sqrt(over_cut_weight) x digging past
+        `over_cut_free_db`;
+      * where `fill_allowed` (a deficit a boost may fill): the plain error.
+    Charging pre-existing depth is what makes a fitter over-cut or shred a
+    smooth lobe into narrow slivers; this never does."""
+    d0 = np.asarray(dev_before, dtype=float)
+    r = d0 + np.asarray(eq_db, dtype=float)
+    above = np.sqrt(above_weight) * np.maximum(r, 0.0)
+    depth_before = np.maximum(-d0, 0.0)
+    dug = np.maximum(np.maximum(-r, 0.0) - depth_before, 0.0)
+    dug_cost = dug / np.sqrt(1.0 + (depth_before / dug_falloff_db) ** 2)
+    over = np.sqrt(over_cut_weight) * np.maximum(dug - over_cut_free_db, 0.0)
+    if fill_allowed is not None:
+        fill = np.asarray(fill_allowed, dtype=bool) & (d0 < 0.0)
+        above = np.where(fill, r, above)
+        dug_cost = np.where(fill, 0.0, dug_cost)
+        over = np.where(fill, 0.0, over)
+    return np.concatenate([above, dug_cost, over])
+
+
 def _peq_filter_penalties(bands, boost_penalty, hf_q_penalty,
                           hf_q_knee, transition_hz):
     """Shared boost/high-Q taxes for the single- and multi-position fitters."""
@@ -530,7 +558,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             hf_q_knee=4.0, transition_hz=1000.0, selection_tax_weight=0.25,
             null_boost_penalty=0.8, partner_target_db=None, partner_weight=0.0,
             partner_band=(700.0, 5000.0), partner_conf=None, dip_weight=1.0,
-            fit_smoothed=False, seed_retries=0, verbose=False):
+            fit_smoothed=False, seed_retries=0, objective='symmetric',
+            boost_mode='allowed', verbose=False):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -595,6 +624,16 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         a default: the fitter over-cuts peaks because landing below target
         becomes cheap, and real-fault error got worse. "Peaks cost more than
         dips" is already expressed by the boost tax; leave this at 1.0.
+      - objective='asymmetric' uses Resonalyze's loss (asymmetric_eq_residual:
+        peaks 4x, charge only the depth our own cuts dig); boost_mode
+        'refill' keeps the bank's net response <= 0 dB, 'off' cuts only.
+        Held-out synthetic-car test (2026-10-01): asymmetric fixed 13-25 %
+        more of the REAL shared fault, removed more peak energy at unseen
+        seats and spent 60-80 % less boost -- but left more dips unfilled,
+        so the symmetric unseen-seat score fell 5-12 % and slightly more
+        unseen seats got worse. 'refill' harmed too many seats. Neither is
+        an outright win, so both are opt-in: reach for 'asymmetric' when
+        headroom or peak control is the priority, and say why.
       - seed_retries > 0 tries the next-largest residual after a rejected
         candidate instead of stopping. Corrects more on average but mostly
         via boosts, reduces real-fault correction, and harms more unseen
@@ -610,8 +649,20 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     if mask is not None:
         sel &= mask
     fsel = freqs[sel]
+    if objective not in ('symmetric', 'asymmetric'):
+        raise ValueError("objective must be 'symmetric' or 'asymmetric'")
+    if boost_mode not in ('allowed', 'refill', 'off'):
+        raise ValueError("boost_mode must be 'allowed', 'refill' or 'off'")
+    if boost_mode == 'off':
+        g_lim = (g_lim[0], 0.0)
     fit_dev = (masked_erb_smooth(freqs, dev_db, mask) if fit_smoothed
                else np.asarray(dev_db, dtype=float))
+    # A deficit a boost may FILL: boosts allowed, and the bin is trusted.
+    fill_sel = None
+    if objective == 'asymmetric' and boost_mode == 'allowed':
+        fill_sel = np.ones(int(np.count_nonzero(sel)), dtype=bool)
+        if conf is not None:
+            fill_sel &= np.asarray(conf, dtype=float)[sel] >= 0.5
     w = audibility_weight(fsel)
     if conf is not None:
         w = w * np.clip(conf[sel], 0.0, 1.0)     # continuous confidence down-weight
@@ -649,10 +700,17 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     def resid(params):
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
-        r = fit_dev[sel] + cascade_db(fsel, bands)
-        if dip_weight != 1.0:
-            r = np.where(r < 0.0, dip_weight * r, r)
-        parts = [r * w, penalties(bands)]
+        eq_sel = cascade_db(fsel, bands)
+        if objective == 'asymmetric':
+            res = asymmetric_eq_residual(fit_dev[sel], eq_sel, fill_allowed=fill_sel)
+            parts = [res * np.tile(w, 3), penalties(bands)]
+        else:
+            r = fit_dev[sel] + eq_sel
+            if dip_weight != 1.0:
+                r = np.where(r < 0.0, dip_weight * r, r)
+            parts = [r * w, penalties(bands)]
+        if boost_mode == 'refill':
+            parts.append(20.0 * np.maximum(eq_sel, 0.0))
         if psel is not None:
             own_p = dev_db[psel] + cascade_db(freqs[psel], bands)
             parts.append(partner_weight * pw * (own_p - ptarget))
@@ -661,9 +719,17 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     def score_of(params):
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
-        full = dev_db + cascade_db(freqs, bands)
-        return audibility_score(freqs, full, band=fit_band, mask=mask, conf=conf,
-                                dip_weight=dip_weight)
+        eq_full = cascade_db(freqs, bands)
+        if objective == 'asymmetric':
+            res = asymmetric_eq_residual(fit_dev[sel], eq_full[sel], fill_allowed=fill_sel)
+            ww = np.tile(w, 3)
+            cost = float(np.sqrt(np.sum((res * ww) ** 2) / max(np.sum(w ** 2), 1e-12)))
+        else:
+            cost = audibility_score(freqs, dev_db + eq_full, band=fit_band, mask=mask,
+                                    conf=conf, dip_weight=dip_weight)
+        if boost_mode == 'refill':
+            cost += 20.0 * float(np.max(np.maximum(eq_full[sel], 0.0), initial=0.0))
+        return cost
 
     def combined_score_of(params):
         """score_of plus the partner-match penalty, when active. This (not
@@ -697,9 +763,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
 
     base_score = audibility_score(freqs, dev_db, band=fit_band, mask=mask, conf=conf)
     base_partner = partner_mismatch([])
-    base_combined = (audibility_score(freqs, dev_db, band=fit_band, mask=mask, conf=conf,
-                                      dip_weight=dip_weight)
-                     + partner_weight * base_partner)
+    base_combined = score_of(np.array([])) + partner_weight * base_partner
     params = np.array([])
     lo_f, hi_f = np.log10(fit_band[0] * 1.02), np.log10(fit_band[1] * 0.98)
     cur_score = base_combined
@@ -2930,55 +2994,64 @@ def band_itd_ild(freqs, left_db, right_db, left_phase_deg=None, right_phase_deg=
     return out
 
 
-def image_pull(band_rows, itd_full_scale_us=650.0, ild_full_scale_db=12.0,
-               duplex_hz=1500.0, duplex_width_oct=1.0, min_fit_quality=0.5,
-               flag_pull=0.15):
-    """Blend per-band ITD and ILD into a predicted lateral image position.
+def image_pull(band_rows, ictd_full_scale_ms=1.0, icld_full_scale_db=16.0,
+               min_fit_quality=0.5, flag_pull=0.15):
+    """Predicted phantom-image position per band from INTER-CHANNEL cues.
 
-    Each cue is normalized to its own full-scale (about 650 us of interaural
-    delay, or about 12 dB of level difference, fully lateralizes an image),
-    then crossfaded across `duplex_hz` -- time below, level above -- following
-    duplex theory. The crossfade is smooth over `duplex_width_oct` because the
-    transition in hearing is gradual, not a switch.
+    band_itd_ild measures the left and right LOUDSPEAKERS at one seat, so its
+    numbers are inter-channel time and level differences (ICTD/ICLD), not
+    interaural ones. Two loudspeakers form a phantom image by summing
+    localization, which follows different numbers than a single source at
+    the ears: about 1 ms of ICTD or about 15-17 dB of ICLD moves the image
+    fully to one speaker (Lee & Rumsey 2013, "Level and time panning of
+    phantom images for musical sources", JAES 61(12); De Sena et al. 2020,
+    IEEE/ACM TASLP 28, arXiv:1907.11425), and the two cues trade -- a time
+    lead can be offset by a level cut. There is no duplex crossover here: at
+    low frequency an inter-channel LEVEL difference is exactly what creates a
+    time difference at the ears (Blumlein), so level is fully effective in
+    the bass, not a high-frequency-only cue.
 
-    An ITD whose regression quality is below `min_fit_quality` is discarded
-    rather than blended: a phase difference that isn't behaving like a delay
-    is not an arrival-time cue, and averaging it in would manufacture a
-    confident number out of noise.
+    pull = ICLD / icld_full_scale_db + ICTD / ictd_full_scale_ms, clipped to
+    [-1, 1]. An ICTD whose regression quality is below `min_fit_quality` is
+    discarded rather than blended -- a phase difference that isn't behaving
+    like a delay is not an arrival-time cue.
+
+    Limits worth stating in any report: time panning is weak for continuous
+    tones with a high fundamental (level panning is robust for all content),
+    and inter-channel TIME changes with head position far faster than LEVEL
+    does (about 0.29 ms per 10 cm sideways in a +/-30 deg layout), so a
+    time-made centre is narrower in space than a level-made one.
 
     Returns dict:
-      bands   -- per band: pull (-1 full left .. +1 full right), which cue
-                 dominates there, and the inputs it came from
+      bands   -- per band: pull (-1 full right .. +1 full left), which cue
+                 contributes more there, and the inputs it came from
       spread  -- max pull minus min pull across bands. THE headline number:
                  a stable image has a small spread regardless of where it
                  sits, while a large spread means the image is smeared across
-                 frequency and no single delay will fix it
+                 frequency and no single delay or trim will fix it
       verdict -- 'stable' | 'pulled' (consistently off-centre, a delay/level
-                 job) | 'smeared' (band-to-band disagreement, not fixable by
-                 one delay) | 'insufficient_data'
+                 job -- see centre_steering) | 'smeared' (band-to-band
+                 disagreement) | 'insufficient_data'
     """
     rows, pulls = [], []
     for r in band_rows:
         if r.get('ild_db') is None:
             continue
-        fc = (r['f_lo'] * r['f_hi']) ** 0.5
-        # duplex weighting: 1 = pure ITD, 0 = pure ILD
-        w_itd = 1.0 / (1.0 + 2.0 ** ((np.log2(fc / duplex_hz)) * (4.0 / duplex_width_oct)))
-        p_ild = float(np.clip(r['ild_db'] / ild_full_scale_db, -1.0, 1.0))
-        p_itd, usable = None, False
+        p_lvl = float(r['ild_db']) / icld_full_scale_db
+        p_time, usable = 0.0, False
         if r.get('itd_us') is not None and (r.get('itd_fit_quality') or 0.0) >= min_fit_quality:
-            p_itd = float(np.clip(r['itd_us'] / itd_full_scale_us, -1.0, 1.0))
+            p_time = float(r['itd_us']) / 1000.0 / ictd_full_scale_ms
             usable = True
+        pull = float(np.clip(p_lvl + p_time, -1.0, 1.0))
         if usable:
-            pull = w_itd * p_itd + (1.0 - w_itd) * p_ild
-            cue = 'time' if w_itd >= 0.5 else 'level'
+            cue = 'time' if abs(p_time) > abs(p_lvl) else 'level'
         else:
-            pull = p_ild
             cue = 'level (time cue unusable)' if r.get('itd_us') is not None else 'level only'
         rows.append({'f_lo': r['f_lo'], 'f_hi': r['f_hi'],
-                     'pull': round(float(pull), 3), 'dominant_cue': cue,
+                     'pull': round(pull, 3), 'dominant_cue': cue,
                      'ild_db': r['ild_db'], 'itd_us': r.get('itd_us'),
                      'itd_fit_quality': r.get('itd_fit_quality'),
+                     'time_cue_used': usable,
                      'side': 'left' if pull > 0.02 else 'right' if pull < -0.02 else 'centre'})
         pulls.append(pull)
 
@@ -2991,6 +3064,281 @@ def image_pull(band_rows, itd_full_scale_us=650.0, ild_full_scale_db=12.0,
                'pulled' if abs(mean_pull) >= flag_pull else 'stable')
     return {'bands': rows, 'spread': round(spread, 3),
             'mean_pull': round(mean_pull, 3), 'verdict': verdict}
+
+
+def centre_steering(band_rows, near_side, far_leads_ms=(0.0, 0.1, 0.2, 0.3, 0.4),
+                    target_pull=0.0, ictd_full_scale_ms=1.0, icld_full_scale_db=16.0,
+                    min_fit_quality=0.5, max_trim_db=8.0, fragile_ms=0.3):
+    """Options for placing the phantom centre at an off-centre seat.
+
+    Two established mechanisms, which trade against each other:
+      * level only (ICLD) -- attenuate the near side until the image centres.
+        Keeps L/R timing as aligned; costs near-side headroom and can tilt that
+        side's tonal balance. Typically 5-8 dB in a car.
+      * time + level (ICTD) -- also let the FAR side arrive slightly early
+        (delay the near side a little more than equal-arrival). Part of the
+        steering then comes from time, so the near side needs roughly half the
+        cut for the same image (Resonalyze's manual: 0.2-0.3 ms buys 2-4 dB
+        instead of 5-8 dB).
+    Both act on the inter-channel model of `image_pull`, so the arithmetic is
+    linear: a far lead of t ms adds t to every band's ICTD toward the far
+    side; a near-side trim of g dB adds g to every band's ICLD the same way.
+
+    near_side: 'right' for a right-hand-drive driver's seat, 'left' for LHD.
+    Only bands with a usable time cue (fit quality >= min_fit_quality) can be
+    steered by time; with none, only the level-only option is returned.
+
+    Returns options (one per far lead, with the near-side trim that brings the
+    mean pull to `target_pull`, the predicted per-band pulls and spread),
+    `recommended` (the largest lead not past `fragile_ms` whose trim fits
+    `max_trim_db`, else the smallest trim), and a robustness note. These are
+    starting points for listening, never a write: inter-channel time changes
+    about 0.29 ms per 10 cm of head movement while level barely moves, so a
+    time-heavy centre is narrower in space."""
+    if near_side not in ('left', 'right'):
+        raise ValueError("near_side must be 'left' or 'right'")
+    toward_far = 1.0 if near_side == 'right' else -1.0     # +pull = left
+    usable = [r for r in band_rows if r.get('ild_db') is not None]
+    if not usable:
+        raise ValueError('no band carries a level difference to steer')
+    timed = [r for r in usable if r.get('itd_us') is not None
+             and (r.get('itd_fit_quality') or 0.0) >= min_fit_quality]
+    leads = sorted(set(float(t) for t in far_leads_ms)) if timed else [0.0]
+
+    def pulls_after(lead_ms, trim_db):
+        out = []
+        for r in usable:
+            ild = float(r['ild_db']) + toward_far * trim_db
+            p = ild / icld_full_scale_db
+            if r in timed:
+                p += (float(r['itd_us']) / 1000.0 + toward_far * lead_ms) / ictd_full_scale_ms
+            out.append(float(np.clip(p, -1.0, 1.0)))
+        return out
+
+    options = []
+    for lead in leads:
+        # Linear model: solve the trim for the target mean, ignoring the clip,
+        # then report what the clipped model predicts.
+        base = []
+        for r in usable:
+            p = float(r['ild_db']) / icld_full_scale_db
+            if r in timed:
+                p += (float(r['itd_us']) / 1000.0 + toward_far * lead) / ictd_full_scale_ms
+            base.append(p)
+        trim = (target_pull - float(np.mean(base))) * icld_full_scale_db * toward_far
+        after = pulls_after(lead, trim)
+        options.append({
+            'far_lead_ms': round(lead, 3),
+            'near_side_trim_db': round(float(trim), 2),
+            'mean_pull_after': round(float(np.mean(after)), 3),
+            'spread_after': round(float(max(after) - min(after)), 3),
+            'bands_after': [{'f_lo': r['f_lo'], 'f_hi': r['f_hi'], 'pull': round(p, 3)}
+                            for r, p in zip(usable, after)],
+            'within_trim_limit': bool(0.0 <= trim <= max_trim_db),
+        })
+
+    fitting = [o for o in options if o['within_trim_limit'] and o['far_lead_ms'] <= fragile_ms]
+    if fitting:
+        recommended = max(fitting, key=lambda o: o['far_lead_ms'])
+    else:
+        recommended = min(options, key=lambda o: abs(o['near_side_trim_db']))
+    note = ('inter-channel time changes about 0.29 ms per 10 cm of head movement '
+            'while level barely moves, so a centre made with more time is '
+            'narrower in space; past ~%.1f ms the image becomes less certain. '
+            'Treat these as starting points and confirm by ear with a mono vocal.'
+            % fragile_ms)
+    if any(o['spread_after'] >= 0.3 for o in options):
+        note += (' The predicted spread stays large: the image is smeared across '
+                 'frequency, which no single lead or trim fixes.')
+    return {'near_side': near_side, 'options': options, 'recommended': recommended,
+            'time_cue_bands': len(timed), 'robustness_note': note}
+
+
+# --------------------------------------------------------------------------
+# HELIX / AUDIOTEC-FISCHER CHANNEL PHASE CONTROL -- modelled from Resonalyze
+# (github.com/DIMOSUS/Resonalyze, MIT, docs/tech/dsp-helix-phase-control.md),
+# whose author measured it on a DSP ULTRA S over ~60 electrical sweeps: the
+# PC-Tool "Phase" setting is ONE RBJ second-order all-pass with Q = 1 whose
+# phase lag at the channel's CONFIGURED crossover (high-pass corner; the
+# low-pass on a subwoofer channel) equals the dialled angle. 64 steps of
+# 5.625 deg (grid measured on a sub channel, assumed elsewhere); the corner is
+# capped at 3/16 of the processing rate (18 kHz at 96 kHz), so small angles on
+# a high crossover deliver more than asked. Whether a given model (e.g. P SIX
+# MK2) exposes the control, and where .afpx stores it, is NOT verified here --
+# never write it; recommend an angle for the user to dial.
+HELIX_PHASE_STEP_DEG = 360.0 / 64.0
+HELIX_PHASE_MAX_DEG = 360.0 - HELIX_PHASE_STEP_DEG
+HELIX_PHASE_MAX_CORNER_FRACTION = 3.0 / 16.0
+
+
+def _ap2_lag_deg(corner_hz, reference_hz, sample_rate_hz):
+    H = allpass_H(np.array([float(reference_hz)]), float(corner_hz), Q=1.0,
+                  order=2, fs=float(sample_rate_hz))[0]
+    lag = -np.degrees(np.angle(H))
+    return lag + 360.0 if lag < 0 else lag
+
+
+def helix_phase_rotation(angle_deg, reference_hz, sample_rate_hz, snap=True):
+    """The all-pass the channel Phase control builds for `angle_deg`.
+
+    reference_hz is the channel's configured crossover corner (as set, even
+    if that filter is bypassed or its slope is OFF). Returns angle_deg (snapped
+    to the 5.625 deg grid when `snap`), corner_hz (None when transparent),
+    q (1.0), capped, and delivered_deg (the lag actually produced at the
+    reference -- more than asked when the corner hit its ceiling)."""
+    angle = float(angle_deg)
+    if snap:
+        angle = float(np.clip(round(angle / HELIX_PHASE_STEP_DEG) * HELIX_PHASE_STEP_DEG,
+                              0.0, HELIX_PHASE_MAX_DEG))
+    if angle <= 0 or reference_hz <= 0:
+        return {'angle_deg': 0.0, 'corner_hz': None, 'q': 1.0, 'capped': False,
+                'delivered_deg': 0.0}
+    target = min(angle, HELIX_PHASE_MAX_DEG)
+    high = sample_rate_hz * HELIX_PHASE_MAX_CORNER_FRACTION
+    if _ap2_lag_deg(high, reference_hz, sample_rate_hz) >= target:
+        corner, capped = high, True
+    else:
+        low = reference_hz / 64.0
+        for _ in range(8):
+            if _ap2_lag_deg(low, reference_hz, sample_rate_hz) >= target:
+                break
+            low /= 8.0
+        for _ in range(100):
+            mid = np.sqrt(low * high)
+            if _ap2_lag_deg(mid, reference_hz, sample_rate_hz) >= target:
+                low = mid
+            else:
+                high = mid
+        corner, capped = float(np.sqrt(low * high)), False
+    return {'angle_deg': round(angle, 3), 'corner_hz': round(float(corner), 1),
+            'q': 1.0, 'capped': capped,
+            'delivered_deg': round(_ap2_lag_deg(corner, reference_hz, sample_rate_hz), 2)}
+
+
+def helix_phase_rotation_H(freqs, angle_deg, reference_hz, sample_rate_hz, snap=True):
+    """Complex response of the Phase control setting (unity where transparent)."""
+    spec = helix_phase_rotation(angle_deg, reference_hz, sample_rate_hz, snap=snap)
+    if spec['corner_hz'] is None:
+        return np.ones(len(freqs), dtype=complex)
+    return allpass_H(np.asarray(freqs, dtype=float), spec['corner_hz'], Q=1.0,
+                     order=2, fs=float(sample_rate_hz))
+
+
+# --------------------------------------------------------------------------
+# JUNCTION READ-OUTS -- the phase-alignment score and sum loss Resonalyze
+# reports per crossover (docs/tech/junction-phase-and-group-placement.md),
+# field-validated there on 20 junctions in 8 cars. Inputs are complex solo
+# responses on a shared time base, ideally through a direct-sound window
+# (decay.fdw_response): above ~1 kHz the full-window phase is decorrelated by
+# the cabin (a correctly tuned tweeter junction tops out near 0.69 through the
+# full window vs 0.93 through an 8-cycle window, in that archive).
+def junction_phase_score(freqs, lower, upper, crossover_hz, band_oct=1.0,
+                         weight_gate_db=30.0, sweep_periods=1.25, steps_per_period=128,
+                         flip_advantage=0.05, rival_separation_periods=0.4,
+                         min_alignable=0.5, min_consistency=0.5, phase_window_oct=1.0 / 6.0):
+    """How in phase two adjacent drivers are across their handover.
+
+    score(dt) = sum(w cos(dphi - 2 pi f dt)) / sum(w), w = |lower||upper|,
+    over +/- band_oct around the crossover, bins more than weight_gate_db
+    under the band's strongest excluded. 1 = in phase, -1 = inverted. One
+    sweep of an extra delay dt on the LOWER channel gives both polarities
+    (inverting negates every cross-phase). A flip is recommended only when it
+    beats the kept polarity by `flip_advantage`; `lobe_margin` is how far the
+    best same-polarity rival lobe (>= 0.4 period away) trails the winner --
+    near 0 means a whole-period hop cannot be ruled out. `phase_at_fc_deg` is
+    the local weighted circular mean (lower minus upper) over +/-1/12 oct,
+    with `consistency` 0..1; below 0.5 a notch sits at the handover and that
+    angle means nothing. Below `min_alignable` best score the band is too
+    incoherent for any delay to be trusted (recommendation withheld)."""
+    f = np.asarray(freqs, dtype=float)
+    lo_f, hi_f = crossover_hz / 2 ** band_oct, crossover_hz * 2 ** band_oct
+    sel = (f >= lo_f) & (f <= hi_f)
+    w = np.abs(lower) * np.abs(upper)
+    if np.any(sel):
+        wmax = float(np.max(w[sel]))
+        sel &= w >= wmax * 10 ** (-weight_gate_db / 20.0)
+    if np.count_nonzero(sel) < 8:
+        return None
+    fs_, ws = f[sel], w[sel]
+    dphi = np.angle(lower[sel] * np.conj(upper[sel]))
+
+    def score(dt):
+        return float(np.sum(ws * np.cos(dphi - 2 * np.pi * fs_ * dt)) / np.sum(ws))
+
+    period = 1.0 / crossover_hz
+    n = int(round(2 * sweep_periods * steps_per_period))
+    grid = np.linspace(-sweep_periods * period, sweep_periods * period, n + 1)
+    vals = np.array([score(t) for t in grid])
+
+    def refine(i, sign):
+        if 0 < i < len(grid) - 1:
+            y0, y1, y2 = sign * vals[i - 1], sign * vals[i], sign * vals[i + 1]
+            den = y0 - 2 * y1 + y2
+            off = 0.5 * (y0 - y2) / den if abs(den) > 1e-15 else 0.0
+            t = grid[i] + float(np.clip(off, -1, 1)) * (grid[1] - grid[0])
+        else:
+            t = grid[i]
+        return t, sign * score(t)
+
+    t_keep, s_keep = refine(int(np.argmax(vals)), 1.0)
+    t_flip, s_flip = refine(int(np.argmin(vals)), -1.0)
+    invert = s_flip > s_keep + flip_advantage
+    best_t, best_s = (t_flip, s_flip) if invert else (t_keep, s_keep)
+    sign = -1.0 if invert else 1.0
+    far = np.abs(grid - best_t) >= rival_separation_periods * period
+    interior = np.r_[False, (sign * vals[1:-1] >= sign * vals[:-2]) &
+                     (sign * vals[1:-1] >= sign * vals[2:]), False]
+    rivals = sign * vals[far & interior]
+    lobe_margin = float(best_s - np.max(rivals)) if rivals.size else float('nan')
+
+    win = (fs_ >= crossover_hz / 2 ** (phase_window_oct / 2)) &           (fs_ <= crossover_hz * 2 ** (phase_window_oct / 2))
+    if np.any(win):
+        vec = np.sum(ws[win] * np.exp(1j * dphi[win])) / np.sum(ws[win])
+        consistency = float(np.abs(vec))
+        phase_fc = float(np.degrees(np.angle(vec)))
+    else:
+        consistency, phase_fc = 0.0, None
+    alignable = best_s >= min_alignable
+    return {
+        'crossover_hz': float(crossover_hz),
+        'current_score': round(score(0.0), 3),
+        'best_score': round(best_s, 3),
+        'opposite_polarity_score': round(s_keep if invert else s_flip, 3),
+        'best_extra_delay_ms': round(best_t * 1000.0, 4) if alignable else None,
+        'recommend_invert': bool(invert and alignable),
+        'polarity_ambiguous': bool(abs(s_flip - s_keep) <= flip_advantage),
+        'lobe_margin': round(lobe_margin, 3),
+        'phase_at_fc_deg': None if (phase_fc is None or consistency < min_consistency)
+                           else round(phase_fc, 1),
+        'consistency': round(consistency, 3),
+        'alignable': bool(alignable),
+        'bins': int(np.count_nonzero(sel)),
+        'note': ('extra delay applies to the LOWER channel relative to its current '
+                 'setting (negative = advance it, i.e. delay the upper one instead)'),
+    }
+
+
+def junction_sum_loss(freqs, a, b, band, weighted=True):
+    """dB the phase-aware sum falls short of perfect coherent addition.
+
+    loss(f) = 20log10|a+b| - 20log10(|a|+|b|): 0 dB is ideal addition at this
+    position, negative is cancellation. Unlike interference_audit (measured
+    together vs power sum) it needs only the two complex solos. It moves with
+    the two drivers' LEVEL ratio as much as with their phase, so it never
+    settles a phase question alone -- read it beside junction_phase_score.
+    Returns average_db (weighted by |a||b| when `weighted`) and dip_db (worst)."""
+    f = np.asarray(freqs, dtype=float)
+    sel = (f >= band[0]) & (f <= band[1])
+    if not np.any(sel):
+        raise ValueError('band does not overlap the frequency axis')
+    num = np.abs(a[sel] + b[sel])
+    den = np.abs(a[sel]) + np.abs(b[sel])
+    loss = 20 * np.log10(np.maximum(num, 1e-12) / np.maximum(den, 1e-12))
+    w = (np.abs(a[sel]) * np.abs(b[sel])) if weighted else np.ones_like(loss)
+    avg = float(np.sum(w * loss) / np.sum(w)) if np.sum(w) > 0 else float(np.mean(loss))
+    i = int(np.argmin(loss))
+    return {'average_db': round(avg, 3), 'dip_db': round(float(loss[i]), 2),
+            'dip_hz': round(float(f[sel][i]), 1)}
 
 
 def source_bandwidth_limits(freqs, trace_db, ref_band=(300.0, 3000.0), drop_db=6.0):
@@ -3201,8 +3549,10 @@ if __name__ == '__main__':
     _hi_b = [b for b in _img['bands'] if b['f_lo'] >= 5000][0]
     assert abs(_lo_b['itd_us'] - 300.0) < 25.0, \
         'ITD not recovered: %.1f us, built 300' % _lo_b['itd_us']
-    assert _lo_b['pull'] > 0.15, 'low band should pull LEFT (time cue): %r' % _lo_b
-    assert _hi_b['pull'] < -0.15, 'high band should pull RIGHT (level cue): %r' % _hi_b
+    # Inter-channel trading model: 0.3 ms left lead = +0.30 everywhere; the
+    # right side's +6 dB above the shelf = -0.37, so the top nets slightly right.
+    assert _lo_b['pull'] > 0.15, 'low band should pull LEFT (time lead only): %r' % _lo_b
+    assert _hi_b['pull'] < -0.02, 'high band should net RIGHT (level beats lead): %r' % _hi_b
     assert _img['verdict'] == 'smeared', \
         'opposing cues across frequency is the definition of smeared: %r' % _img
     print('  spread %.2f, mean %+0.2f -> %s'

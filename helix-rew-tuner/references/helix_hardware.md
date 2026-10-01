@@ -73,6 +73,45 @@ confirmed rate rather than hardcoding 96 kHz. Keep proposals anchored in physica
 milliseconds first — that's the number that stays meaningful across models — and
 convert to samples last.
 
+## Channel Phase control (PC-Tool "Phase") — model it, never write it
+
+Audiotec-Fischer processors offer a per-channel **Phase** setting in PC-Tool.
+It is not an all-pass you place by frequency: you dial an ANGLE, and the
+processor builds ONE second-order all-pass with **Q = 1** whose phase lag at the
+channel's **configured crossover** (its high-pass corner; the low-pass on a
+subwoofer channel) equals that angle. Measured by Resonalyze's author on a
+DSP ULTRA S over ~60 electrical sweeps (github.com/DIMOSUS/Resonalyze,
+`docs/tech/dsp-helix-phase-control.md`, MIT): nine ratio curves fit one RBJ
+all-pass at 0.11–0.17° rms with Q = 1.0000, and the fitted corners match
+"phase = setting at the crossover" to 0.2 % (90° at a 5 kHz reference → 7977 Hz
+corner at 96 kHz; 180° → 5000 Hz; 270° → 3107 Hz).
+
+- **Grid**: 64 steps of 5.625°, 0–354.375° (measured on a subwoofer channel;
+  older tool generations reportedly step mid/high channels by 11.25°).
+- **Reference is the crossover as configured**, even when that filter is
+  bypassed or its slope is OFF. Moving the crossover silently turns the same
+  angle into a different filter.
+- **Corner ceiling** 3/16 of the processing rate (18 kHz at 96 kHz). On a
+  tweeter crossed at 5 kHz the first few steps all give the same filter —
+  about 29° minimum.
+
+`tunelib.helix_phase_rotation(angle, reference_hz, sample_rate_hz)` returns the
+corner, whether it was capped, and the angle actually delivered;
+`helix_phase_rotation_H(...)` gives the complex response to fold into a
+prediction (e.g. as a candidate in `junction_phase_score` or a one-sided L/R fix
+next to `optimize_allpass`). It costs no EQ slot, which makes it attractive for a
+one-sided L+R correction.
+
+**What is NOT known:** whether a given model (the P SIX DSP MK2 in particular)
+exposes the control in its PC-Tool version, and where `.afpx` stores it. The
+delay tag's unexplained `P` attribute is a candidate, nothing more. So the skill
+**recommends** an angle for the user to dial by hand and re-measure — it never
+writes one. To settle the storage, a controlled diff: save the tune, set ONE
+channel's Phase to 90° and nothing else, save again under a new name, and diff
+the two decoded files (`afpx.decode`) — exactly the method that proved `CINV` is
+polarity. If measurements were taken with a Phase setting active, it is already
+inside them.
+
 ## Driver excursion safety (optional — only with driver specs)
 
 If the user provides a driver's resonant frequency (Fs), check any high-pass corner
