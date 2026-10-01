@@ -80,6 +80,26 @@ all-pass filters as phase-domain and treats T=17 PEQ and T=3/4 shelves as
 EQ-domain. It refuses any plan containing both domains, even across different
 channels: apply the phase edit, remeasure, then create a fresh EQ plan.
 
+### Channel Phase control
+
+```json
+{
+  "id": "phase-tweeter-left",
+  "kind": "phase_rotation",
+  "channel": 0,
+  "degrees": 84.375
+}
+```
+
+`degrees` is the PC-Tool Phase setting: a multiple of 5.625 from 0 to 354.375
+(off-grid values are refused, not rounded). It is written to `P` on the
+channel's delay tag and nothing else; the processor turns it into one Q=1
+all-pass whose lag at the channel's crossover equals the angle
+(`tunelib.helix_phase_rotation`). It is phase-domain: it needs its own `true`
+confirmation and cannot share a plan with T=17 PEQ or T=3/4 shelves. Apply runs
+`afpx.verify_phase_write` and `roundtrip_lint(allow_phase=True)`, which excuses
+`P` and nothing else.
+
 ### Relative output trim
 
 ```json

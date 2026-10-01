@@ -1143,6 +1143,15 @@ when the defect is phase (a summation null), never a magnitude bump.
   measured summation, don't assume the lower one is automatically safer.
 - 1st-order (T=19, no Q) for gentle broad correction; 2nd-order (T=20) for more/
   more-local rotation.
+- **The channel Phase control is a third option that costs no EQ slot**: one
+  Q=1 2nd-order all-pass whose lag at that channel's crossover equals the
+  dialled angle (5.625° steps; `tunelib.helix_phase_rotation`, written as a
+  `phase_rotation` plan edit). Its centre is tied to the crossover and its Q is
+  fixed at 1, so it suits rotating a driver's phase AT its own handover (a
+  junction whose best score wants a rotation no delay gives) or a broad
+  one-sided L/R correction near that corner — not a narrow null elsewhere,
+  which still wants a free T=20 with its own F and Q. Score candidates with
+  `junction_phase_score` on the rotated response before proposing one.
 - The **invert** flag (`I="1"`) flips rotation direction: if the null gets *worse*
   at every F/Q, invert and re-sweep.
 - **The real cost of any APF is group delay, and the real imaging-risk metric is

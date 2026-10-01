@@ -65,7 +65,7 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   | `band_itd_ild`, `image_pull` | where the phantom image sits vs FREQUENCY (inter-channel model: ~1 ms or ~16 dB = full shift, cues trade); `smeared` means no single delay or trim fixes it | §Image position is frequency-dependent |
   | `centre_steering` | centre the image at an off-centre seat: level-only vs far-side time lead + smaller trim, with the robustness trade | §Placing the phantom centre |
   | `junction_phase_score`, `junction_sum_loss` | one crossover's phase alignment (both polarities, flip margin, lobe margin) and how far its sum falls short of coherent | §Reading a junction |
-  | `helix_phase_rotation`, `helix_phase_rotation_H` | model PC-Tool's channel Phase control (Q=1 AP2 at the channel's crossover) to RECOMMEND an angle — never written | helix_hardware.md |
+  | `helix_phase_rotation`, `helix_phase_rotation_H`, `phase_control_check` | PC-Tool's channel Phase control: the Q=1 AP2 an angle builds at the channel's crossover, and a check that this unit builds it (two solo sweeps) | helix_hardware.md |
   | `predicted_vs_measured` | predict → re-measure loop (step 7) | §Verification & honesty |
   | `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | §Two checks |
   | `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | §Sweep capture setup |
@@ -460,8 +460,9 @@ twice,).
   specific edit. Ordinary PEQ requires confirmation too. Review the printed
   verification manifest before handing off the file.
 - Supported plan edits are PEQ (`T=17`), justified shelves (`T=3/4`, end slots
-  only), all-passes (`T=19/20`), confirmed delays, and attenuation-only output
-  trims. Direct `afpx.py` write helpers are implementation/reference only.
+  only), all-passes (`T=19/20`), confirmed delays, the channel Phase control
+  (`phase_rotation`, 5.625° grid — a slot-free one-sided all-pass at that
+  channel's crossover), and attenuation-only output trims. Direct `afpx.py` write helpers are implementation/reference only.
 - **Beta `.pct6` and Alpine `.jssh` writes have no plan file, so nothing
   enforces the rules for you — apply them by hand.** The plan schema is
   AFPX-only; these formats write through their own

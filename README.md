@@ -129,7 +129,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.6.0`) so you can tell whether an already-installed copy is current — open
+`1.7.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -306,6 +306,7 @@ tests/
 ├── test_build_skill.py               build, metadata, anchor, and archive parity tests
 ├── test_codec_and_loader_integrity.py  tune-codec byte integrity and REW/target loader validation
 ├── test_imaging_phase_and_windows.py  phantom-image model, centre steering, Helix phase, junctions, direct sound
+├── test_phase_control_write.py       Helix Phase control: read, verified write, plan edit, unit check
 ├── test_pipeline_apply.py            deterministic tune plan/apply integration tests
 ├── test_preflight_and_benchmark.py   install and optimizer benchmark tests
 ├── test_propose.py                  deterministic EQ proposal and position averaging

@@ -155,7 +155,7 @@ def validate_plan(plan, source_path, source_bytes=None):
             raise ValueError('duplicate edit id: %s' % edit_id)
         edit_ids.add(edit_id)
         kind = raw_edit.get('kind')
-        if kind not in {'filter_slot', 'delay_samples', 'output_trim'}:
+        if kind not in {'filter_slot', 'delay_samples', 'output_trim', 'phase_rotation'}:
             raise ValueError('%s: unsupported edit kind %r; crossover and polarity '
                              'writes are not supported' % (edit_id, kind))
 
@@ -163,6 +163,7 @@ def validate_plan(plan, source_path, source_bytes=None):
             'filter_slot': {'id', 'kind', 'channel', 'slot', 'F', 'Q', 'G', 'type_code'},
             'delay_samples': {'id', 'kind', 'channel', 'samples'},
             'output_trim': {'id', 'kind', 'channel', 'trim_db'},
+            'phase_rotation': {'id', 'kind', 'channel', 'degrees'},
         }[kind]
         unknown = set(raw_edit) - allowed
         if unknown:
@@ -245,6 +246,26 @@ def validate_plan(plan, source_path, source_bytes=None):
             working_xml = candidate_xml
             normalized_edit['samples'] = samples
             phase_edit_ids.add(edit_id)
+        elif kind == 'phase_rotation':
+            if 'degrees' not in raw_edit:
+                raise ValueError('%s: degrees is required' % edit_id)
+            degrees = numeric_field(raw_edit, 'degrees')
+            key = (kind, channel)
+            if key in target_keys:
+                raise ValueError('%s: duplicate phase target ch%d' % (edit_id, channel))
+            target_keys.add(key)
+            tags = afpx.delay_tags(working_xml)
+            if not 0 <= channel < len(tags):
+                raise ValueError('%s: channel is out of range' % edit_id)
+            try:
+                current = float(afpx.attrs(tags[channel]).get('P'))
+            except (TypeError, ValueError):
+                raise ValueError('%s: channel has no readable P= phase attribute' % edit_id)
+            if abs(current - degrees) < 1e-9:
+                raise ValueError('%s is a no-op; requested phase already matches' % edit_id)
+            working_xml = afpx.write_phase_rotation(working_xml, channel, degrees)
+            normalized_edit['degrees'] = degrees
+            phase_edit_ids.add(edit_id)
         else:
             if 'trim_db' not in raw_edit:
                 raise ValueError('%s: trim_db is required' % edit_id)
@@ -320,6 +341,11 @@ def _apply_edits(source_xml, edits):
                 before, edit['channel'], edit['samples'])
             result = afpx.verify_delay_write(
                 before, working_xml, edit['channel'], edit['samples'])
+        elif edit['kind'] == 'phase_rotation':
+            working_xml = afpx.write_phase_rotation(
+                before, edit['channel'], edit['degrees'])
+            result = afpx.verify_phase_write(
+                before, working_xml, edit['channel'], edit['degrees'])
         elif edit['kind'] == 'output_trim':
             trims = {edit['channel']: edit['trim_db']}
             working_xml = afpx.write_output_trim(before, trims)
@@ -368,6 +394,8 @@ def apply_plan(plan_path):
         lint = afpx.roundtrip_lint(
             source_xml, emitted_xml, expect_changed=filter_count,
             allow_delay=any(edit['kind'] == 'delay_samples'
+                            for edit in normalized['edits']),
+            allow_phase=any(edit['kind'] == 'phase_rotation'
                             for edit in normalized['edits']))
         if not lint['pass']:
             raise ValueError('roundtrip_lint failed: %s' % '; '.join(lint['errors']))

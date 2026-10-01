@@ -73,7 +73,7 @@ confirmed rate rather than hardcoding 96 kHz. Keep proposals anchored in physica
 milliseconds first — that's the number that stays meaningful across models — and
 convert to samples last.
 
-## Channel Phase control (PC-Tool "Phase") — model it, never write it
+## Channel Phase control (PC-Tool "Phase")
 
 Audiotec-Fischer processors offer a per-channel **Phase** setting in PC-Tool.
 It is not an all-pass you place by frequency: you dial an ANGLE, and the
@@ -102,15 +102,21 @@ prediction (e.g. as a candidate in `junction_phase_score` or a one-sided L/R fix
 next to `optimize_allpass`). It costs no EQ slot, which makes it attractive for a
 one-sided L+R correction.
 
-**What is NOT known:** whether a given model (the P SIX DSP MK2 in particular)
-exposes the control in its PC-Tool version, and where `.afpx` stores it. The
-delay tag's unexplained `P` attribute is a candidate, nothing more. So the skill
-**recommends** an angle for the user to dial by hand and re-measure — it never
-writes one. To settle the storage, a controlled diff: save the tune, set ONE
-channel's Phase to 90° and nothing else, save again under a new name, and diff
-the two decoded files (`afpx.decode`) — exactly the method that proved `CINV` is
-polarity. If measurements were taken with a Phase setting active, it is already
-inside them.
+**Storage — VERIFIED 2026-10-01.** The P SIX DSP MK2 exposes the control in
+PC-Tool 4.80b ("Phase, Polarity & Time"), and `.afpx` stores it as `P` (degrees)
+on the channel's delay tag — one controlled diff, one changed attribute (see
+`afpx_format.md`). It is writable through a plan's `phase_rotation` edit, which
+is **phase-domain**: per-edit confirmation, never in the same plan as EQ, and a
+re-measure afterwards like any delay or all-pass.
+
+**The acoustic model is measured on a DSP ULTRA S, not yet on a P SIX.** Before
+leaning on predictions for another unit, verify it once:
+`tunelib.phase_control_check(freqs, before, after, angle, reference_hz, fs)` on
+two solo captures of ONE driver — Phase 0° and Phase N°, same mic position and
+timing reference — fits out any timing-reference jitter and reports whether the
+measured phase change matches the Q=1 all-pass at the reference (rms and the lag
+at the reference). If measurements were taken with a Phase setting active, it
+is already inside them; `afpx.channels()` shows every channel's angle.
 
 ## Driver excursion safety (optional — only with driver specs)
 

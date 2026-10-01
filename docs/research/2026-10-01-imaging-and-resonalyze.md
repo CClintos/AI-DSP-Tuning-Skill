@@ -37,7 +37,7 @@ the parts of it that came from outside.
 | No method for placing the phantom centre at an off-centre seat | `centre_steering`: level-only vs far-side time lead + smaller trim, with the robustness trade; `pipeline.py imaging --near-side` |
 | Imaging/junction timing judged on full-window phase | `decay.py fdw` direct-sound (8-cycle FDW) response; methodology "Two windows" |
 | No junction read-out beyond pairwise delay search | `junction_phase_score` (both polarities in one sweep, 0.05 flip margin, lobe margin, 0.5 alignable floor) and `junction_sum_loss`; `pipeline.py junction` |
-| Helix channel Phase control unknown to the skill | `helix_phase_rotation(_H)` model (Q=1 AP2 at the configured crossover, 5.625° grid, 3/16·fs corner cap); recommend-only; controlled-diff protocol for the `.afpx` storage |
+| Helix channel Phase control unknown to the skill | `helix_phase_rotation(_H)` model (Q=1 AP2 at the configured crossover, 5.625° grid, 3/16·fs corner cap); storage confirmed by the user's controlled diff (`P`, degrees) and writable via a confirmed `phase_rotation` plan edit |
 | Ladder read "phase first, EQ only after" — applied to a whole tune this undoes alignment | Tune order: driver-local EQ → re-measure → align → system tone |
 | Shared channels changed at one junction without checking the other | "A channel hands over twice" |
 | Symmetric APF called image-safe without saying it cannot fix an L+R null | All-pass cookbook rule with the 2026-07-09 case |
@@ -70,8 +70,13 @@ few more unseen seats. Kept opt-in, not a default.
   chain and evaluates every junction and both sides at once. The skill now has
   the per-junction pieces; a side-level simulator that carries one change
   through every junction it touches is the next structural step.
-- **Where `.afpx` stores the Phase control**, and whether the P SIX MK2 exposes
-  it — needs one controlled diff from the user's PC-Tool.
+- **Resolved the same day:** the P SIX MK2 exposes the Phase control (PC-Tool
+  4.80b) and `.afpx` stores it as `P` in degrees on the delay tag (controlled
+  diff: one attribute changed). The skill now reads it and writes it through a
+  confirmed `phase_rotation` plan edit; our writer reproduced PC-Tool's save
+  byte for byte. Still open: confirming on the P SIX that the angle builds the
+  same Q=1 all-pass the ULTRA S was measured to build (`phase_control_check`
+  with two solo sweeps of one driver).
 - **Hybrid sum** (spatial-average magnitude with point phase, summed as
   phasors) for predicting the averaged result of a junction change.
 - **Headphone audition** of a predicted tune (convolving music with each

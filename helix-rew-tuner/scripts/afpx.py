@@ -258,6 +258,17 @@ def channels(xml):
             # kept here only as raw context; they do NOT reliably encode polarity
             # (confirmed: PM/P stayed identical across a real polarity flip).
             s['polarity_delay_tag_raw'] = {'PM': delays[i].get('PM'), 'P': delays[i].get('P')}
+            # P is the channel Phase control in degrees -- VERIFIED 2026-10-01 by
+            # controlled diff on a P SIX DSP MK2 tune (PC-Tool 4.80b): setting
+            # one channel's Phase to 84.375 changed exactly P="0" -> P="84.375".
+            try:
+                s['phase_deg'] = float(delays[i]['P']) if 'P' in delays[i] else None
+            except ValueError:
+                s['phase_deg'] = None
+        # The Phase control is stated at the channel's configured crossover:
+        # its low-pass on a subwoofer channel, its high-pass otherwise.
+        s['phase_reference_hz'] = (s.get('lp_hz') if s.get('inferred_role') == 'sub'
+                                   else s.get('hp_hz'))
         s['index'] = i
         out.append(s)
     # pair guess: consecutive equal-role channels are likely L/R
@@ -317,6 +328,79 @@ def write_delay_samples(xml, channel_index, samples):
         raise ValueError('could not find a T= attribute in tag: %s' % old_tag)
     new_tag = re.sub(r'(?<![A-Za-z])T="[^"]*"', 'T="%d"' % samples, old_tag, count=1)
     return xml[:m.start()] + new_tag + xml[m.end():]
+
+
+PHASE_STEP_DEG = 360.0 / 64.0
+PHASE_MAX_DEG = 360.0 - PHASE_STEP_DEG
+
+
+def _fmt_phase(degrees):
+    return ('%.3f' % degrees).rstrip('0').rstrip('.')
+
+
+def write_phase_rotation(xml, channel_index, degrees):
+    """Write ONLY the P= attribute (channel Phase control, degrees) on
+    channel_index's delay tag. Storage VERIFIED by controlled diff on a real
+    P SIX MK2 tune (2026-10-01); every other byte stays identical.
+
+    The angle must sit on PC-Tool's grid (multiples of 5.625 deg, 0-354.375):
+    an off-grid value is refused rather than rounded, because the caller must
+    have seen and confirmed the exact number that lands. What the processor
+    BUILDS from the angle (one Q=1 all-pass at the channel's crossover) is
+    modelled in tunelib.helix_phase_rotation -- measured on a DSP ULTRA S;
+    tunelib.phase_control_check verifies it on another unit."""
+    degrees = float(degrees)
+    if not math.isfinite(degrees) or degrees < 0 or degrees > PHASE_MAX_DEG + 1e-9:
+        raise ValueError('phase must be 0-%.3f deg: %r' % (PHASE_MAX_DEG, degrees))
+    steps = degrees / PHASE_STEP_DEG
+    if abs(steps - round(steps)) > 1e-9:
+        raise ValueError('phase %r deg is off the 5.625 deg grid' % degrees)
+    matches = list(re.finditer(r'<T [^>]*/?>', xml))
+    if channel_index < 0 or channel_index >= len(matches):
+        raise ValueError('channel_index %d out of range (%d delay tags found)'
+                         % (channel_index, len(matches)))
+    m = matches[channel_index]
+    old_tag = m.group(0)
+    if not re.search(r'(?<![A-Za-z])P="[^"]*"', old_tag):
+        raise ValueError('no P= attribute in tag %s -- unknown layout, refusing' % old_tag)
+    new_tag = re.sub(r'(?<![A-Za-z])P="[^"]*"', 'P="%s"' % _fmt_phase(degrees),
+                     old_tag, count=1)
+    return xml[:m.start()] + new_tag + xml[m.end():]
+
+
+def verify_phase_write(old_xml, new_xml, channel_index, expected_degrees):
+    """Like verify_delay_write, for P: channel_index's P equals the expected
+    angle numerically, its other delay-tag attributes are byte-identical,
+    every other delay tag is unchanged, and every <OC> block is unchanged
+    apart from that one tag. Returns {'pass': bool, 'errors': [...]}."""
+    old_raw, new_raw = delay_tags(old_xml), delay_tags(new_xml)
+    errors = []
+    if len(old_raw) != len(new_raw):
+        return {'pass': False,
+                'errors': ['delay tag count changed (%d -> %d)' % (len(old_raw), len(new_raw))]}
+    for i, (o, n) in enumerate(zip(map(attrs, old_raw), map(attrs, new_raw))):
+        if i == channel_index:
+            try:
+                ok = abs(float(n.get('P')) - float(expected_degrees)) < 1e-6
+            except (TypeError, ValueError):
+                ok = False
+            if not ok:
+                errors.append('ch%d: P is %r, expected %r' % (i, n.get('P'), expected_degrees))
+            if {k: v for k, v in o.items() if k != 'P'} != {k: v for k, v in n.items() if k != 'P'}:
+                errors.append('ch%d: attributes other than P changed' % i)
+        elif o != n:
+            errors.append('ch%d: delay tag changed unexpectedly' % i)
+    old_blocks, new_blocks = channel_blocks(old_xml), channel_blocks(new_xml)
+    if len(old_blocks) != len(new_blocks):
+        errors.append('channel count changed unexpectedly')
+    else:
+        for i, (ob, nb) in enumerate(zip(old_blocks, new_blocks)):
+            if i == channel_index and i < len(old_raw):
+                ob = ob.replace(old_raw[i], '', 1)
+                nb = nb.replace(new_raw[i], '', 1)
+            if ob != nb:
+                errors.append('ch%d: <OC> block content changed unexpectedly' % i)
+    return {'pass': not errors, 'errors': errors}
 
 
 def verify_delay_write(old_xml, new_xml, channel_index, expected_samples):
@@ -694,13 +778,21 @@ def verify_output_trim_write(old_xml, new_xml, trims_db, tol_db=0.01):
     return {'pass': not errors, 'errors': errors}
 
 
-def roundtrip_lint(old_xml, new_xml, expect_changed=None, allow_delay=False):
+def roundtrip_lint(old_xml, new_xml, expect_changed=None, allow_delay=False,
+                   allow_phase=False):
     """Verify a write: crossovers are always preserved; delays are preserved
-    unless the verified write is an explicitly confirmed delay. Also checks a
+    unless the verified write is an explicitly confirmed delay; the Phase
+    control (P on the delay tag) only when `allow_phase` -- which never
+    excuses a change to T or any other delay-tag attribute. Also checks a
     valid header and only the intended slots changed. Returns a dict."""
     errors = []
-    if not allow_delay and semantic_delay_key(old_xml) != semantic_delay_key(new_xml):
-        errors.append('delay tags changed')
+    if not allow_delay:
+        def key(x):
+            return [tuple(sorted((k, v) for k, v in attrs(t).items()
+                                 if not (allow_phase and k == 'P')))
+                    for t in delay_tags(x)]
+        if key(old_xml) != key(new_xml):
+            errors.append('delay tags changed')
     if semantic_xover_key(old_xml) != semantic_xover_key(new_xml):
         errors.append('crossover filters changed')
     # count changed PEQ/shelf/APF slots (FN-insensitive).

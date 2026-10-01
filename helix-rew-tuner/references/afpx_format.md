@@ -254,10 +254,21 @@ flip. Whatever `PM`/`P` encode (a real-world case showed `PM="4"` displayed as
 *Normal* — plausibly some delay-entry display-unit mode, still not confirmed),
 it isn't polarity. `afpx.channels()` now reports `polarity` from `CINV` (trust
 this) and keeps the delay tag's `PM`/`P` only as raw, uninterpreted context under
-`polarity_delay_tag_raw`. One open hypothesis worth a controlled diff: `P` may be
-the channel **Phase** control (an angle the processor turns into a Q=1 all-pass at
-the channel's crossover — see `helix_hardware.md`). Until a diff confirms it,
-never write `P`.
+`polarity_delay_tag_raw`.
+
+**`P` is the channel Phase control, in degrees — VERIFIED 2026-10-01 by
+controlled diff** on a P SIX DSP MK2 tune (PC-Tool 4.80b): setting AMP Out A's
+Phase to 84.375° and saving under a new name changed exactly one thing in the
+whole decoded file, that channel's `<T T="209" P="0" PM="4"/>` →
+`P="84.375"`. Whole angles are written without decimals (`P="90"`, `P="0"`).
+`afpx.channels()` reports it as `phase_deg`, with `phase_reference_hz` (the
+channel's high-pass corner; its low-pass on a sub). Write it only through a
+plan's `phase_rotation` edit (`afpx.write_phase_rotation` /
+`verify_phase_write`; `roundtrip_lint(allow_phase=True)` excuses `P` and nothing
+else) — applied to the original file in memory, that writer reproduced PC-Tool's
+own save byte for byte. `PM` is still unexplained: on that tune it read 4 on the
+tweeters and subs and 1 on the mids and rears, and it did not move with the
+Phase change. Never write `PM`.
 
 ## Round-trip gotcha (important for verification)
 

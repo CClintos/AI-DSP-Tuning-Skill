@@ -3163,9 +3163,10 @@ def centre_steering(band_rows, near_side, far_leads_ms=(0.0, 0.1, 0.2, 0.3, 0.4)
 # low-pass on a subwoofer channel) equals the dialled angle. 64 steps of
 # 5.625 deg (grid measured on a sub channel, assumed elsewhere); the corner is
 # capped at 3/16 of the processing rate (18 kHz at 96 kHz), so small angles on
-# a high crossover deliver more than asked. Whether a given model (e.g. P SIX
-# MK2) exposes the control, and where .afpx stores it, is NOT verified here --
-# never write it; recommend an angle for the user to dial.
+# a high crossover deliver more than asked. STORAGE verified 2026-10-01 on a
+# P SIX DSP MK2 (PC-Tool 4.80b): `P` on the delay tag, in degrees -- written
+# only via a confirmed `phase_rotation` plan edit. That the P SIX builds the
+# same filter is still to be confirmed with phase_control_check.
 HELIX_PHASE_STEP_DEG = 360.0 / 64.0
 HELIX_PHASE_MAX_DEG = 360.0 - HELIX_PHASE_STEP_DEG
 HELIX_PHASE_MAX_CORNER_FRACTION = 3.0 / 16.0
@@ -3212,7 +3213,7 @@ def helix_phase_rotation(angle_deg, reference_hz, sample_rate_hz, snap=True):
         corner, capped = float(np.sqrt(low * high)), False
     return {'angle_deg': round(angle, 3), 'corner_hz': round(float(corner), 1),
             'q': 1.0, 'capped': capped,
-            'delivered_deg': round(_ap2_lag_deg(corner, reference_hz, sample_rate_hz), 2)}
+            'delivered_deg': round(float(_ap2_lag_deg(corner, reference_hz, sample_rate_hz)), 2)}
 
 
 def helix_phase_rotation_H(freqs, angle_deg, reference_hz, sample_rate_hz, snap=True):
@@ -3222,6 +3223,45 @@ def helix_phase_rotation_H(freqs, angle_deg, reference_hz, sample_rate_hz, snap=
         return np.ones(len(freqs), dtype=complex)
     return allpass_H(np.asarray(freqs, dtype=float), spec['corner_hz'], Q=1.0,
                      order=2, fs=float(sample_rate_hz))
+
+
+def phase_control_check(freqs, before, after, angle_deg, reference_hz, sample_rate_hz,
+                        band=None, tol_deg=3.0):
+    """Does THIS unit build the all-pass helix_phase_rotation predicts?
+
+    before/after: complex solo responses of ONE driver, same mic, same timing
+    reference, Phase control at 0 and at `angle_deg`. Their ratio isolates the
+    control's own phase. A pure delay between the two captures (timing-
+    reference jitter) is fitted and removed and reported, then the residual
+    against the model is the verdict: rms under `tol_deg` across the band
+    (default reference/4 .. 4x reference, below 18 kHz) and the measured lag at
+    the reference within tol_deg of the dialled angle -> 'consistent'."""
+    f = np.asarray(freqs, dtype=float)
+    lo, hi = band if band else (reference_hz / 4.0, min(reference_hz * 4.0, 18000.0))
+    sel = (f >= lo) & (f <= hi) & (np.abs(before) > 0) & (np.abs(after) > 0)
+    if np.count_nonzero(sel) < 8:
+        raise ValueError('band holds too few usable bins')
+    model = helix_phase_rotation_H(f, angle_deg, reference_hz, sample_rate_hz)
+    measured = np.unwrap(np.angle(after[sel] / before[sel]))
+    expected = np.unwrap(np.angle(model[sel]))
+    resid = measured - expected
+    resid -= 2 * np.pi * np.round(np.median(resid) / (2 * np.pi))
+    w = np.abs(before[sel])
+    A = np.vstack([2 * np.pi * f[sel], np.ones(np.count_nonzero(sel))]).T * w[:, None]
+    (slope, offset), *_ = np.linalg.lstsq(A, resid * w, rcond=None)
+    delay_ms = float(-slope * 1000.0)
+    left = resid - (slope * 2 * np.pi * f[sel])
+    left -= 2 * np.pi * np.round(np.average(left, weights=w) / (2 * np.pi))
+    rms = float(np.degrees(np.sqrt(np.average(left ** 2, weights=w))))
+    i = int(np.argmin(np.abs(f[sel] - reference_hz)))
+    lag_ref = float((-np.degrees(measured[i] + slope * 2 * np.pi * f[sel][i])) % 360.0)
+    spec = helix_phase_rotation(angle_deg, reference_hz, sample_rate_hz)
+    consistent = rms <= tol_deg and abs((lag_ref - spec['delivered_deg'] + 180) % 360 - 180) <= tol_deg
+    return {'rms_error_deg': round(rms, 2), 'removed_delay_ms': round(delay_ms, 4),
+            'measured_at_reference_deg': round(lag_ref, 2),
+            'model_at_reference_deg': spec['delivered_deg'],
+            'model_corner_hz': spec['corner_hz'], 'consistent': bool(consistent),
+            'band_hz': [round(lo, 1), round(hi, 1)]}
 
 
 # --------------------------------------------------------------------------
