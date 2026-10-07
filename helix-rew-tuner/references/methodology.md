@@ -929,6 +929,19 @@ straight into `fit_peq(freqs, dev_db, band, mask=sc['mask'], conf=sc['conf'])`
 so the optimizer never spends a band on a dip that only exists at one seat
 position.
 
+**With 3+ positions, `pipeline.py propose` does this for you and then checks
+itself.** The robust fitter (`fit_peq_robust`) works on the level-aligned
+positions with that mask, and charges every position for any NEW hole a band
+digs below target (`eq_dig_depth`) — masked bins included, because "don't chase
+this" is not "free to dig here". Without that charge a peak that wandered a
+quarter-octave between seats drew a −12.5 dB Q8 notch; with it, the same data
+gets a gentle broad trim, and on synthetic cars scored at eight unseen
+positions the gain rose 35–45 % while seats made worse fell about 70 %.
+`held_out_band_validation` then refits with each position withheld in turn: a
+band that does not come back (stability < 0.8) or does not help the withheld
+position is `DO NOT APPLY`, in between is `REVIEW`. A single position cannot be
+validated this way — say so rather than implying a check that did not run.
+
 **A Moving Mic Method (MMM) capture is the continuous, mechanically-averaged
 version of this same idea** — sweeping the mic around the head during
 capture instead of comparing discrete fixed positions afterward. See

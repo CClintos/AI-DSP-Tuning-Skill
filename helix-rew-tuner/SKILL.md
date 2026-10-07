@@ -7,7 +7,7 @@ description: >-
   crossover, imaging, bass, phase, level, target-curve, or measurement-quality
   problems.
 metadata:
-  version: "1.8.0"
+  version: "1.8.1"
 ---
 
 # Helix / REW measurement-driven auto-tuner
