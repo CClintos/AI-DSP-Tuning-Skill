@@ -73,7 +73,172 @@ def load_text_export(path):
     _check_freq_axis(f, path)
     if not np.isfinite(s).all():
         raise ValueError('non-finite SPL value in %s' % path)
+    # A column is all-or-nothing: a phase column with holes would be
+    # interpolated straight across them and read as real phase.
+    for name, col in (('phase', p), ('coherence', coh)):
+        if np.isfinite(col).any() and not np.isfinite(col).all():
+            raise ValueError('%s column is incomplete in %s (%d of %d rows missing) -- '
+                             're-export the whole measurement'
+                             % (name, path, int(np.count_nonzero(~np.isfinite(col))), len(col)))
     return f, s, (p if np.isfinite(p).any() else None), (coh if np.isfinite(coh).any() else None)
+
+
+_TIMING_RE = re.compile(r'timing\s*ref(?:erence)?\s*[:=]?\s*(.+)', re.I)
+_SMOOTHING_RE = re.compile(r'smooth(?:ing|ed)?\s*[:=]?\s*([^,;]+)', re.I)
+_NO_VALUE = ('none', 'no', 'off', 'n/a', '-', 'false')
+
+
+def read_export_header(path):
+    """What the export's comment header says about how it was captured.
+
+    The numeric rows say nothing about whether two captures share a time
+    base or how much they were smoothed, and both decide what the data may
+    be used for. Returns {'timing_reference': True | False | None,
+    'timing_reference_text', 'smoothing', 'unsmoothed': True | False | None,
+    'lines'}. None means the header does not say -- unknown, not absent.
+
+    Reads this skill's rew_api.py headers ("timing reference: Acoustic",
+    "timing reference: NONE -- no shared time base", "smoothing 1/48, ...")
+    and REW's own text-export headers ("Smoothing: 1/48 octave")."""
+    lines = []
+    with open(path, encoding='utf-8', errors='replace') as fh:
+        for raw in fh:
+            line = raw.strip()
+            if not line:
+                continue
+            if line[0] in '*#/' or line[0].isalpha():
+                lines.append(line.lstrip('*#/ ').strip())
+    out = {'timing_reference': None, 'timing_reference_text': None,
+           'smoothing': None, 'unsmoothed': None, 'lines': lines}
+    for line in lines:
+        m = _TIMING_RE.search(line)
+        if m and out['timing_reference'] is None:
+            text = m.group(1).strip()
+            out['timing_reference_text'] = text
+            first = re.split(r'[\s,;(]+', text.lower(), maxsplit=1)[0]
+            out['timing_reference'] = first not in _NO_VALUE
+            continue
+        m = _SMOOTHING_RE.search(line)
+        if m and out['smoothing'] is None and 'freq(hz)' not in line.lower():
+            text = m.group(1).strip()
+            out['smoothing'] = text
+            out['unsmoothed'] = text.lower().split()[0] in _NO_VALUE if text else None
+    return out
+
+
+def support_mask(freqs_src, freqs_dst, edge_tol=1e-6):
+    """True where freqs_dst lies inside the measured range of freqs_src.
+
+    resample_log (np.interp) holds the end values flat past either end, so a
+    200 Hz-2 kHz capture looks like data at 20 Hz and 20 kHz. Anything that
+    anchors, fits or scores must use this mask to stay on measured bins."""
+    freqs_src = np.asarray(freqs_src, dtype=float)
+    freqs_dst = np.asarray(freqs_dst, dtype=float)
+    lo, hi = freqs_src[0] * (1 - edge_tol), freqs_src[-1] * (1 + edge_tol)
+    return (freqs_dst >= lo) & (freqs_dst <= hi)
+
+
+def phase_step_check(freqs_src, phase_deg, max_median_step_deg=90.0, run=8):
+    """Can this phase trace be unwrapped unambiguously?
+
+    np.unwrap assumes the true change between neighbouring bins is under
+    180 degrees. A late arrival on a coarse grid breaks that silently (a 5 ms
+    delay advances 180 degrees every 100 Hz, so a 1/48-octave grid fails
+    above ~7 kHz). That failure is SUSTAINED: every step from some frequency
+    up is large. An isolated near-180 degree jump is different -- it is what
+    a deep cancellation null really does, and the boost gate needs to see it.
+    So a trace fails only where the median of `run` consecutive steps
+    exceeds max_median_step_deg. Returns {'ok', 'worst_step_deg',
+    'first_bad_hz'}."""
+    ph = np.unwrap(np.deg2rad(np.asarray(phase_deg, dtype=float)))
+    steps = np.abs(np.rad2deg(np.diff(ph)))
+    out = {'ok': True, 'worst_step_deg': round(float(steps.max()), 1) if steps.size else 0.0,
+           'first_bad_hz': None}
+    if steps.size < run:
+        return out
+    windows = np.lib.stride_tricks.sliding_window_view(steps, run)
+    bad = np.nonzero(np.median(windows, axis=1) > max_median_step_deg)[0]
+    if bad.size:
+        out['ok'] = False
+        out['first_bad_hz'] = round(float(freqs_src[bad[0] + 1]), 1)
+    return out
+
+
+def resample_phase(freqs_src, phase_deg, freqs_dst):
+    """Unwrap first, then interpolate in log-frequency; returns unwrapped
+    degrees. Interpolating wrapped phase puts the midpoint of +179 and -179
+    at 0 instead of 180 -- every phase path must come through here."""
+    unwrapped = np.rad2deg(np.unwrap(np.deg2rad(np.asarray(phase_deg, dtype=float))))
+    return resample_log(freqs_src, unwrapped, freqs_dst)
+
+
+def load_complex(path, freqs_dst, require_phase=True):
+    """One loader for every phase-bearing analysis.
+
+    Returns {'db', 'phase_deg' (unwrapped, or None), 'complex' (or None),
+    'support' (measured-range mask on freqs_dst), 'phase_support' (bins
+    whose phase is measured AND below any unwrap failure), 'phase_limit_hz'
+    (where unwrapping stops being reliable, or None), 'header'
+    (read_export_header), 'phase_check' (phase_step_check, or None),
+    'path'}. With require_phase, a missing phase column raises.
+
+    An unwrap failure only corrupts bins ABOVE it (unwrapping accumulates
+    upward), so a trace is not rejected outright: a 3.5 ms flight time on
+    REW's 96-PPO API grid goes ambiguous near 10 kHz, which says nothing
+    about a 3 kHz junction. Each analysis checks its own band against
+    phase_limit_hz instead."""
+    f, s, ph, _coh = load_text_export(path)
+    if ph is None and require_phase:
+        raise ValueError('%s has no phase column -- this analysis needs complex data' % path)
+    db = resample_log(f, s, freqs_dst)
+    out = {'path': path, 'db': db, 'phase_deg': None, 'complex': None,
+           'support': support_mask(f, freqs_dst), 'header': read_export_header(path),
+           'phase_check': None, 'phase_limit_hz': None,
+           'phase_support': np.zeros_like(freqs_dst, dtype=bool)}
+    if ph is not None:
+        chk = phase_step_check(f, ph)
+        out['phase_check'] = chk
+        out['phase_deg'] = resample_phase(f, ph, freqs_dst)
+        out['complex'] = 10 ** (db / 20.0) * np.exp(1j * np.deg2rad(out['phase_deg']))
+        out['phase_support'] = out['support'].copy()
+        if not chk['ok']:
+            out['phase_limit_hz'] = chk['first_bad_hz']
+            out['phase_support'] &= np.asarray(freqs_dst) < chk['first_bad_hz']
+    return out
+
+
+def shared_timing_problem(*loaded):
+    """Why these captures may NOT be compared in phase, or None if nothing
+    says they can't. A phase column is not proof of a shared time base:
+    REW only puts separate captures on one time axis when each used the
+    same timing reference. An explicit 'none' in any header refuses relative
+    phase work; a header that does not say is left to the operator."""
+    for item in loaded:
+        if item['header']['timing_reference'] is False:
+            return ('%s says it has no timing reference (%s) -- its phase is not on a '
+                    'shared time base, so delays, junction phase and imaging time cues '
+                    'cannot be read from it' % (item['path'], item['header']['timing_reference_text']))
+    return None
+
+
+def timing_unstated(*loaded):
+    """Paths whose header does not say whether a timing reference was used."""
+    return [item['path'] for item in loaded if item['header']['timing_reference'] is None]
+
+
+def unwrap_problem(*loaded, band=None):
+    """Why phase cannot be trusted across `band` (lo, hi) -- the first trace
+    whose unwrap limit falls inside it, as a message -- or None. Without a
+    band, any unwrap limit at all is reported."""
+    for item in loaded:
+        limit = item.get('phase_limit_hz')
+        if limit is not None and (band is None or limit < band[1]):
+            return ('%s: phase moves too far between neighbouring points from %.0f Hz to unwrap '
+                    'reliably%s (export at a finer resolution, or remove the bulk delay first)'
+                    % (item['path'], limit,
+                       '' if band is None else ', inside the %.0f-%.0f Hz band this needs'
+                       % (band[0], band[1])))
+    return None
 
 
 def _check_freq_axis(f, path):
@@ -90,7 +255,9 @@ def _check_freq_axis(f, path):
 
 
 def resample_log(freqs_src, y_src, freqs_dst):
-    """Interpolate onto a target grid in log-frequency (correct for audio)."""
+    """Interpolate onto a target grid in log-frequency (correct for audio).
+    Magnitude only: outside the measured range the end values are held
+    flat (see support_mask), and phase must go through resample_phase."""
     return np.interp(np.log10(freqs_dst), np.log10(freqs_src), y_src)
 
 

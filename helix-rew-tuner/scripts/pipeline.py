@@ -30,7 +30,9 @@
 #                                 if solo files carry phase and --pair-band is given)
 #   --gate-ms N                   only if you KNOW the capture was time-gated --
 #                                 REW's text export doesn't carry this, so it's
-#                                 never inferred
+#                                 never inferred. Bins below the gate's trust
+#                                 floor are dropped from analysis AND from
+#                                 propose's fit band (both commands take it)
 #   --afpx FILE                   read-only context (model, channel map) in the
 #                                 report -- never written to
 #   --dev-flag-db N (default 2.0) deviation-region flagging threshold
@@ -602,21 +604,56 @@ def _load_session(args, freqs):
     Tonal deviation comes from the level-aligned mean when two or more
     positions exist -- EQ what is common, not what one mic spot happened to
     see (methodology.md §Multi-position variance). The phase-bearing
-    --measurement, when given, stays the trace for phase-based checks."""
-    positions_db = []
-    for p in (args.positions or []):
+    --measurement, when given, stays the trace for phase-based checks.
+
+    Evidence rules enforced here rather than left to the instructions:
+      - only MEASURED bins count: `support` is the intersection of every
+        trace's measured range (and the gate's trust floor, with --gate-ms);
+        anchoring and fitting are confined to it;
+      - an identical trace given twice is ONE position, not two: duplicates
+        are dropped before they can inflate confidence."""
+    notes = []
+    support = np.ones_like(freqs, dtype=bool)
+    raw_positions, positions_db = {}, []
+    for i, p in enumerate(args.positions or []):
         f, s, _ph, _coh = measure.load_text_export(p)
+        raw_positions[p if p not in raw_positions else '%s (#%d)' % (p, i + 1)] = (f, s)
+    duplicates = tunelib.detect_duplicate_traces(raw_positions) if raw_positions else []
+    dropped = {label for grp in duplicates for label in grp[1:]}
+    for grp in duplicates:
+        notes.append('positions %s are the SAME capture -- counted once; a repeated file '
+                     'is not a second mic position' % ', '.join(grp))
+    for p, (f, s) in raw_positions.items():
+        if p in dropped:
+            continue
         positions_db.append(measure.resample_log(f, s, freqs))
+        support &= measure.support_mask(f, freqs)
 
     measurement_phase = meas_axis = None
+    measurement_header = None
     if args.measurement:
         f, s, ph, _coh = measure.load_text_export(args.measurement)
         primary_db = measure.resample_log(f, s, freqs)
         measurement_phase, meas_axis = ph, f
+        measurement_header = measure.read_export_header(args.measurement)
+        support &= measure.support_mask(f, freqs)
     elif positions_db:
         primary_db = positions_db[0]
     else:
         raise ValueError('need --measurement or --positions')
+
+    if not np.all(support) and np.any(support):
+        covered = freqs[support]
+        notes.append('analysis confined to the measured range %.0f-%.0f Hz -- the '
+                     'traces hold no data outside it' % (covered[0], covered[-1]))
+    gate_ms = getattr(args, 'gate_ms', None)
+    gate_floor = None
+    if gate_ms:
+        gate_floor = tunelib.gating_frequency_limit(gate_ms)
+        support &= freqs >= gate_floor
+    if not np.any(support):
+        raise ValueError('no frequency is covered by every trace (and the gate floor) -- '
+                         'nothing measured to analyse')
 
     target_path = ASSETS_DEFAULT_TARGET if args.target == 'default' else args.target
     target_db = measure.load_target(target_path, freqs)
@@ -636,27 +673,44 @@ def _load_session(args, freqs):
     # Two positions cannot separate a real dip from a seat-specific null, so
     # only three or more earn a mask/confidence.
     authority = sc if len(positions_db) >= 3 else None
-    conf = authority['conf'] if authority else None
-    anchor = tunelib.target_anchor_offset(freqs, basis_db, target_db, confidence=conf)
+    conf = authority['conf'] * support if authority else None
+    mask = authority['mask'] & support if authority else (None if np.all(support) else support)
+    anchor_conf = conf if conf is not None else support.astype(float)
+    anchor = tunelib.target_anchor_offset(freqs, basis_db, target_db, confidence=anchor_conf)
     return {
         'positions_db': positions_db, 'primary_db': primary_db,
         'measurement_phase': measurement_phase, 'meas_axis': meas_axis,
+        'measurement_header': measurement_header,
         'target_db': target_db, 'voice_knobs': voice_knobs,
         'basis_db': basis_db, 'deviation_source': source, 'aligned': aligned,
-        'mask': authority['mask'] if authority else None, 'conf': conf,
+        'mask': mask, 'conf': conf, 'support': support, 'gate_floor_hz': gate_floor,
+        'duplicates': duplicates, 'notes': notes,
         'anchor': anchor, 'dev_db': basis_db - (target_db + anchor),
     }
 
 
+def _smoothing_note(sess):
+    """A boost-gate verdict on a smoothed export needs saying so."""
+    hdr = sess.get('measurement_header') or {}
+    if hdr.get('unsmoothed') is False:
+        return ('--measurement header says it was smoothed (%s) -- the boost gate reads '
+                'phase anomalies best on an UNSMOOTHED export (REW File > Export, no '
+                'smoothing); the REW API cannot supply one' % hdr['smoothing'])
+    return None
+
+
 def _phase_fields(args, freqs, sess):
+    chk = measure.phase_step_check(sess['meas_axis'], sess['measurement_phase'])
     trust = tuple(args.trust_band) if args.trust_band else _trust_band(freqs, sess['primary_db'])
+    covered = freqs[sess['support']]
+    hi = float(covered[-1]) if chk['ok'] else min(float(covered[-1]), chk['first_bad_hz'])
+    trust = (max(trust[0], float(covered[0])), min(trust[1], hi))
+    if trust[1] <= trust[0]:
+        raise ValueError('no band left where the phase is measured and unwraps reliably')
     fields = tunelib.excess_phase_fields(
         freqs,
         sess['primary_db'],
-        measure.resample_log(
-            sess['meas_axis'],
-            np.rad2deg(np.unwrap(np.deg2rad(sess['measurement_phase']))),
-            freqs),
+        measure.resample_phase(sess['meas_axis'], sess['measurement_phase'], freqs),
         trust_band=trust)
     return trust, fields
 
@@ -667,9 +721,11 @@ def analyze(args):
     notes = []
 
     sess = _load_session(args, freqs)
+    notes.extend(sess['notes'])
     positions_db = sess['positions_db']
     measurement_phase, target_db = sess['measurement_phase'], sess['target_db']
     anchor, dev_db = sess['anchor'], sess['dev_db']
+    support = sess['support']
     if sess['voice_knobs']:
         report['voicing_applied'] = sess['voice_knobs']
 
@@ -680,6 +736,10 @@ def analyze(args):
         'target_file': ('assets/default_incar_target.txt' if args.target == 'default' else args.target),
         'anchor_offset_db': round(float(anchor), 2),
         'phase_available': measurement_phase is not None,
+        'measured_range_hz': [round(float(freqs[support][0]), 1),
+                              round(float(freqs[support][-1]), 1)],
+        'duplicate_positions': sess['duplicates'],
+        'measurement_smoothing': (sess['measurement_header'] or {}).get('smoothing'),
     }
     if measurement_phase is None:
         notes.append('no phase column in --measurement -- minimum-phase/delay '
@@ -687,7 +747,8 @@ def analyze(args):
 
     report['tilt'] = {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                       'target': tunelib.measure_tilt(freqs, target_db)}
-    report['deviation_regions'] = _find_regions(freqs, dev_db, args.dev_flag_db)
+    report['deviation_regions'] = _find_regions(freqs, np.where(support, dev_db, 0.0),
+                                                args.dev_flag_db)
 
     # Phase objection per dip a boost would target. Answers the one question
     # the deviation list cannot: is this dip a shape deficit EQ can fill, or a
@@ -728,6 +789,8 @@ def analyze(args):
                 notes.append('boost gate ran on a trace too smooth to support it '
                              '(MAD floored) -- re-export WITHOUT smoothing before '
                              'trusting any verdict below')
+            elif _smoothing_note(sess):
+                notes.append(_smoothing_note(sess))
 
     if len(positions_db) >= 3:
         sc = tunelib.spatial_consistency(freqs, positions_db)
@@ -742,27 +805,29 @@ def analyze(args):
                      'position-specific null)' % len(positions_db))
 
     if args.solo_a and args.solo_b and args.together:
-        fa, sa, pa, _ = measure.load_text_export(args.solo_a)
-        fb, sb, pb, _ = measure.load_text_export(args.solo_b)
-        ft, st, _pt, _ = measure.load_text_export(args.together)
-        solo_a_db = measure.resample_log(fa, sa, freqs)
-        solo_b_db = measure.resample_log(fb, sb, freqs)
-        together_db = measure.resample_log(ft, st, freqs)
+        solo_a = measure.load_complex(args.solo_a, freqs, require_phase=False)
+        solo_b = measure.load_complex(args.solo_b, freqs, require_phase=False)
+        together = measure.load_complex(args.together, freqs, require_phase=False)
+        pair_support = solo_a['support'] & solo_b['support'] & together['support']
         _psum, _csum, interf_db, flagged = tunelib.interference_audit(
-            freqs, solo_a_db, solo_b_db, together_db)
+            freqs, solo_a['db'], solo_b['db'], together['db'])
         report['interference'] = {
             'flagged_regions': _find_regions(
-                freqs, np.where(flagged, interf_db, 0.0), args.dev_flag_db)
+                freqs, np.where(flagged & pair_support, interf_db, 0.0), args.dev_flag_db)
         }
         if args.pair_band:
             lo, hi = args.pair_band
-            if pa is not None and pb is not None:
-                solo_a_c = (10 ** (solo_a_db / 20.0) *
-                           np.exp(1j * np.deg2rad(measure.resample_log(fa, pa, freqs))))
-                solo_b_c = (10 ** (solo_b_db / 20.0) *
-                           np.exp(1j * np.deg2rad(measure.resample_log(fb, pb, freqs))))
-                report['crossover_confidence'] = tunelib.crossover_confidence(
-                    freqs, solo_a_c, solo_b_c, together_db, (lo, hi))
+            if solo_a['complex'] is not None and solo_b['complex'] is not None:
+                refusal = (measure.shared_timing_problem(solo_a, solo_b)
+                           or measure.unwrap_problem(solo_a, solo_b, band=(lo, hi)))
+                if refusal:
+                    notes.append('crossover_confidence skipped: %s' % refusal)
+                else:
+                    report['crossover_confidence'] = tunelib.crossover_confidence(
+                        freqs, solo_a['complex'], solo_b['complex'], together['db'], (lo, hi))
+                    unstated = measure.timing_unstated(solo_a, solo_b)
+                    if unstated:
+                        notes.append(_unstated_note(unstated))
             else:
                 notes.append('--pair-band given but --solo-a/--solo-b have no phase '
                              'column -- crossover_confidence needs phase, ran '
@@ -774,7 +839,8 @@ def analyze(args):
     if args.gate_ms:
         report['gating'] = {'gate_ms': args.gate_ms,
                             'trust_floor_hz': round(tunelib.gating_frequency_limit(args.gate_ms), 1),
-                            'warning': tunelib.gating_warning(args.gate_ms)}
+                            'warning': tunelib.gating_warning(args.gate_ms),
+                            'applied': 'bins below the trust floor are excluded from this report'}
 
     if args.afpx:
         xml = afpx.decode(args.afpx)
@@ -797,7 +863,18 @@ def propose(args):
     freqs = measure.common_grid(20.0, 20000.0, 96)
     notes = []
     sess = _load_session(args, freqs)
+    notes.extend(sess['notes'])
     band = tuple(args.fit_band) if args.fit_band else PROPOSE_FIT_BAND
+    covered = freqs[sess['support']]
+    clipped = (max(band[0], float(covered[0])), min(band[1], float(covered[-1])))
+    if clipped != band:
+        if clipped[1] <= clipped[0]:
+            raise ValueError('fit band %g-%g Hz lies wholly outside the measured/trusted range '
+                             '%.0f-%.0f Hz' % (band[0], band[1], covered[0], covered[-1]))
+        notes.append('fit band narrowed from %g-%g Hz to %.0f-%.0f Hz: only measured%s bins '
+                     'may be corrected' % (band[0], band[1], clipped[0], clipped[1],
+                                           ', gate-trusted' if sess['gate_floor_hz'] else ''))
+        band = clipped
     mask, conf, dev_db = sess['mask'], sess['conf'], sess['dev_db']
 
     held_out = None
@@ -829,7 +906,7 @@ def propose(args):
     else:
         deviations = None
         bands, fit_report = tunelib.fit_peq(
-            freqs, dev_db, band, n_bands_max=args.max_bands, fit_smoothed=True)
+            freqs, dev_db, band, n_bands_max=args.max_bands, mask=mask, fit_smoothed=True)
         notes.append('single position: the fit cannot tell a real feature from '
                      'a seat-specific one, and held-out validation needs 3+ '
                      'positions -- capture them (or MMM) before trusting narrow bands')
@@ -844,6 +921,8 @@ def propose(args):
             if fields['mad_floored']:
                 notes.append('boost gate ran on a trace too smooth to support it -- '
                              're-export WITHOUT smoothing before trusting it')
+            elif _smoothing_note(sess):
+                notes.append(_smoothing_note(sess))
         except ValueError as exc:
             notes.append('boost gate skipped: %s' % exc)
     elif has_boost:
@@ -905,6 +984,9 @@ def propose(args):
                  'positions_used': len(sess['positions_db']),
                  'deviation_source': sess['deviation_source'],
                  'fit_band_hz': list(band),
+                 'gate_floor_hz': (round(sess['gate_floor_hz'], 1)
+                                   if sess['gate_floor_hz'] else None),
+                 'duplicate_positions': sess['duplicates'],
                  'anchor_offset_db': round(float(sess['anchor']), 2),
                  'voicing_applied': sess['voice_knobs'] or None},
         'tilt': {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
@@ -968,16 +1050,33 @@ def source_audit(args):
 def imaging(args):
     """Where does the image sit, as a function of frequency? (roadmap item 04)"""
     freqs = measure.common_grid(20.0, 20000.0, 96)
-    fl, sl, pl, _ = measure.load_text_export(args.solo_l)
-    fr, sr, pr, _ = measure.load_text_export(args.solo_r)
-    left_db = measure.resample_log(fl, sl, freqs)
-    right_db = measure.resample_log(fr, sr, freqs)
+    left = measure.load_complex(args.solo_l, freqs, require_phase=False)
+    right = measure.load_complex(args.solo_r, freqs, require_phase=False)
+    support = left['support'] & right['support']
+    if not np.any(support):
+        raise ValueError('the two solo exports share no measured frequency range')
+    # Bands outside the shared measured range must not be read; band_itd_ild
+    # skips any band left with too few finite bins.
+    left_db = np.where(support, left['db'], np.nan)
+    right_db = np.where(support, right['db'], np.nan)
 
     notes = []
     lp = rp = None
-    if pl is not None and pr is not None:
-        lp = measure.resample_log(fl, np.rad2deg(np.unwrap(np.deg2rad(pl))), freqs)
-        rp = measure.resample_log(fr, np.rad2deg(np.unwrap(np.deg2rad(pr))), freqs)
+    if left['phase_deg'] is not None and right['phase_deg'] is not None:
+        refusal = measure.shared_timing_problem(left, right)
+        if refusal:
+            notes.append('TIME cue dropped: %s. Only level differences were used.' % refusal)
+        else:
+            phase_ok = support & left['phase_support'] & right['phase_support']
+            lp = np.where(phase_ok, left['phase_deg'], np.nan)
+            rp = np.where(phase_ok, right['phase_deg'], np.nan)
+            if not np.all(phase_ok[support]):
+                notes.append('TIME cue limited to %.0f Hz and below: %s'
+                             % (freqs[phase_ok][-1] if np.any(phase_ok) else 0.0,
+                                measure.unwrap_problem(left, right)))
+            unstated = measure.timing_unstated(left, right)
+            if unstated:
+                notes.append(_unstated_note(unstated))
     else:
         notes.append('no phase column in one or both solo exports -- the TIME cue '
                      'is unavailable, so only level differences were used. Any '
@@ -995,7 +1094,7 @@ def imaging(args):
                      'delay or level trim addresses (see centre_steering)')
     report = {'meta': {'solo_l': args.solo_l, 'solo_r': args.solo_r,
                        'phase_available': lp is not None,
-                       'convention': 'positive = image pulls LEFT',
+                       'convention': 'positive = image pulls LEFT (left leads or is louder)',
                        'model': 'inter-channel: ~1 ms or ~16 dB = full shift, cues trade'},
               'verdict': pull['verdict'],
               'spread': pull['spread'], 'mean_pull': pull['mean_pull'],
@@ -1006,13 +1105,25 @@ def imaging(args):
     return report
 
 
-def _complex_export(path, freqs):
-    f, s, ph, _coh = measure.load_text_export(path)
-    if ph is None:
-        raise ValueError('%s has no phase column -- a junction needs complex data' % path)
-    mag = 10 ** (measure.resample_log(f, s, freqs) / 20.0)
-    phase = measure.resample_log(f, np.unwrap(np.deg2rad(ph)), freqs)
-    return mag * np.exp(1j * phase)
+def _unstated_note(paths):
+    return ('%s: the header does not say whether a timing reference was used -- the '
+            'time-based result is only valid if every capture shared one (REW timing '
+            'reference, or the rew_api.py export which records it)' % ', '.join(paths))
+
+
+def _complex_exports(paths, freqs):
+    """Load phase-bearing exports for relative-phase work, refusing captures
+    that cannot share a time base. Returns (loaded items, notes); each
+    caller then checks its own band with measure.unwrap_problem."""
+    loaded = [measure.load_complex(path, freqs) for path in paths]
+    refusal = measure.shared_timing_problem(*loaded)
+    if refusal:
+        raise ValueError(refusal)
+    notes = []
+    unstated = measure.timing_unstated(*loaded)
+    if unstated:
+        notes.append(_unstated_note(unstated))
+    return loaded, notes
 
 
 def probe(args):
@@ -1031,15 +1142,23 @@ def probe(args):
                          'never assumed (it decides how every filter is realized)')
     base_dir = os.path.dirname(os.path.abspath(args.spec))
     freqs = measure.common_grid(20.0, 20000.0, 96)
-    drivers = {}
+    names, paths = [], []
     for name, path in (spec.get('drivers') or {}).items():
-        path = path if os.path.isabs(path) else os.path.join(base_dir, path)
-        drivers[name] = _complex_export(path, freqs)
+        names.append(name)
+        paths.append(path if os.path.isabs(path) else os.path.join(base_dir, path))
+    loaded, notes = _complex_exports(paths, freqs) if paths else ([], [])
+    by_name = dict(zip(names, loaded))
+    drivers = {name: item['complex'] for name, item in by_name.items()}
     if len(drivers) < 2:
         raise ValueError('probe needs at least two drivers on one time base')
     junctions = []
     for j in spec.get('junctions') or []:
         junctions.append((j['lower'], j['upper'], float(j['crossover_hz'])))
+        involved = [by_name[n] for n in (j['lower'], j['upper']) if n in by_name]
+        fc = float(j['crossover_hz'])
+        refusal = measure.unwrap_problem(*involved, band=(fc / 2.0, fc * 2.0))
+        if refusal:
+            raise ValueError(refusal)
     results = tunelib.probe_variants(freqs, drivers, junctions, spec.get('variants') or [],
                                      fs=float(fs))
     return {'meta': {'spec': args.spec, 'dsp_sample_rate_hz': fs,
@@ -1047,6 +1166,7 @@ def probe(args):
                      'convention': 'delay_ms positive = later; changes are added on top of '
                                    'the tune the exports were measured through'},
             'variants': results,
+            'notes': notes,
             'predicted_not_measured': True,
             'note': ('a probe ranks candidates; the chosen one still goes through a plan '
                      '(per-edit confirmation) and a re-measure')}
@@ -1056,11 +1176,13 @@ def junction(args):
     """Phase score + sum loss for one crossover pair (methodology.md
     §The crossover action-ladder). Read-only; writes nothing."""
     freqs = measure.common_grid(20.0, 20000.0, 96)
-    lower = _complex_export(args.lower, freqs)
-    upper = _complex_export(args.upper, freqs)
+    loaded, notes = _complex_exports([args.lower, args.upper], freqs)
     fc = float(args.crossover)
     band = (fc / 2.0, fc * 2.0)
-    notes = []
+    refusal = measure.unwrap_problem(*loaded, band=band)
+    if refusal:
+        raise ValueError(refusal)
+    lower, upper = loaded[0]['complex'], loaded[1]['complex']
     phase = tunelib.junction_phase_score(freqs, lower, upper, fc)
     if phase is None:
         notes.append('fewer than 8 usable bins around the crossover -- no read-out')
@@ -1145,7 +1267,9 @@ def _selftest():
     with tempfile.TemporaryDirectory() as d:
         def save(name, *cols):
             path = os.path.join(d, name)
-            np.savetxt(path, np.column_stack(cols), fmt='%.4f')
+            # every capture states its timing reference, as rew_api.py writes it
+            np.savetxt(path, np.column_stack(cols), fmt='%.4f',
+                       header='timing reference: Acoustic', comments='* ')
             return path
 
         spl = 78.0 + tunelib.peaking_db(freqs, 300.0, 2.0, -6.0)   # real, fillable dip
@@ -1269,7 +1393,7 @@ def _selftest():
         l_db = 80.0 * np.ones_like(freqs)
         r_db = 80.0 + tunelib.high_shelf_db(freqs, 2000.0, 0.7, 6.0)
         l_ph = np.zeros_like(freqs)
-        r_ph = np.rad2deg(2 * np.pi * freqs * lead_s)
+        r_ph = (-360.0 * freqs * lead_s + 180.0) % 360.0 - 180.0   # right late, wrapped
         im = imaging(argparse.Namespace(
             solo_l=save('img_l.txt', freqs, l_db, l_ph),
             solo_r=save('img_r.txt', freqs, r_db, r_ph), out=None))
@@ -1337,6 +1461,8 @@ def main():
                     help='band to correct (default %g-%g Hz)' % PROPOSE_FIT_BAND)
     pr.add_argument('--max-bands', type=int, default=5)
     pr.add_argument('--trust-band', nargs=2, type=float, metavar=('LO_HZ', 'HI_HZ'))
+    pr.add_argument('--gate-ms', type=float,
+                    help='the capture was time-gated: never fit below its trust floor')
     pr.add_argument('--out')
 
     sa = sub.add_parser('source-audit',

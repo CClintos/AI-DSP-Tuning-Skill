@@ -1263,7 +1263,11 @@ not differentiated**: the unwrapped phase difference is regressed against
 angular frequency per band and the slope taken as the arrival-time difference,
 which is far more robust than a pointwise group delay. Each band reports a
 `pull` from −1 (hard right) to +1 (hard left) — pull = ICLD/16 dB + ICTD/1 ms,
-clipped — with the cue that contributes more named.
+clipped — with the cue that contributes more named. Sign: `itd_us` is positive
+when the LEFT side arrives first, using REW's phase convention (a channel
+arriving τ late has phase −360·f·τ). Releases before 1.9.0 had this sign
+reversed, so an imaging or centre-steering result from an older version that
+involved a non-zero measured time difference should be re-run, not reused.
 
 Read the **`verdict`** first:
 
@@ -1533,12 +1537,17 @@ match exactly, even with nothing wrong — a different playback level, a mic
 that landed slightly differently, more road/engine noise that day. A naive
 diff can't tell "the correction failed" apart from "I played it 2dB quieter
 this time," and would produce false verdicts either direction. So it doesn't
-diff raw curves — it estimates a broadband level offset from the *untouched*
-frequencies only (so the alignment step can't quietly absorb the very change
-being tested), compares octave-smoothed regions around each band's center
-(so ordinary mic-position comb ripple doesn't read as failure), and drops to
-`'inconclusive'` wherever confidence in that region is low rather than
-forcing a verdict either way. Treat a `'reverted_recommended'` result the
+diff raw curves — it estimates a broadband level offset only where the
+predicted change is ~0 dB (so the alignment step can't quietly absorb the very
+change being tested, skirts included), compares octave-smoothed regions around
+each changed band's center (so ordinary mic-position comb ripple doesn't read
+as failure), and drops to `'inconclusive'` wherever confidence in that region
+is low or the change is smaller than the measurement can resolve, rather than
+forcing a verdict either way. `'confirmed'` means the re-measure is closer to
+the predicted change than to no change at all — before 1.9.0 a fixed 2 dB
+tolerance let an untouched re-measure "confirm" any cut smaller than 2 dB.
+Pass `old_bands` when filters were edited or removed, so the prediction is the
+new bank relative to the old one rather than another cascade on top. Treat a `'reverted_recommended'` result the
 same as a `interference_audit`/`reaches_target_after_boost` finding pre-write
 — it means the predicted change didn't actually show up, which is usually
 the same "phase/interference is eating this" signature, just caught after

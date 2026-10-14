@@ -103,11 +103,13 @@ class ProposeTests(unittest.TestCase):
 
     def test_analyze_uses_position_average_for_deviation(self):
         shared = tunelib.cascade_db(FREQS, [(300.0, 1.5, 5.0)])
+        rng = np.random.default_rng(11)
         paths = []
         for i in range(3):
             extra = tunelib.peaking_db(FREQS, 1000.0, 6.0, -12.0) if i == 0 else 0.0
+            noise = rng.normal(0.0, 0.05, len(FREQS))      # independent captures
             path = self.root / ("p%d.txt" % i)
-            _write_export(path, 80 + _target() + shared + extra)
+            _write_export(path, 80 + _target() + shared + extra + noise)
             paths.append(str(path))
 
         report = self.run_cli("analyze", "--positions", *paths, "--target", "default")

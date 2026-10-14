@@ -37,10 +37,10 @@ def peaking_db(freqs, f0, Q, gain_db, fs=FS):
     H = (b0 + b1 * z1 + b2 * z2) / (a0 + a1 * z1 + a2 * z2)
     return 20 * np.log10(np.abs(H))
 
-def cascade_db(freqs, bands):
+def cascade_db(freqs, bands, fs=FS):
     out = np.zeros_like(freqs, dtype=float)
     for F, Q, G in bands:
-        out += peaking_db(freqs, F, Q, G)
+        out += peaking_db(freqs, F, Q, G, fs=fs)
     return out
 
 # --------------------------------------------------------------------------
@@ -2825,73 +2825,103 @@ def spatial_consistency(freqs, position_traces, consistent_db=1.5,
 # guards, each reusing a discipline already built for the same underlying
 # problem elsewhere in this file, rather than inventing a fourth:
 #   1. LEVEL ALIGNMENT: a pure volume-knob difference between runs is a
-#      broadband, frequency-flat offset, not signal -- estimated ONLY from
-#      untouched regions (so it can't absorb the very change under test) via
-#      the same wide-anchor weighted-median trick target_anchor_offset uses.
+#      broadband, frequency-flat offset, not signal -- estimated ONLY where
+#      the PREDICTED transfer function is ~0 dB (so it can't absorb the very
+#      change under test, including a broad filter's skirts) via the same
+#      wide-anchor weighted-median trick target_anchor_offset uses.
 #   2. SMOOTHING: compares octave-smoothed regional averages, not raw bins --
 #      mic position drift shows up as narrow comb ripple, the same kind of
 #      noise spatial_consistency already treats as not-signal.
 #   3. CONFIDENCE GATING: low conf (e.g. from spatial_consistency or
 #      prediction_confidence on the NEW measurement) in a band's region
 #      reads as 'inconclusive', not a false confirm or false revert.
+#   4. TWO HYPOTHESES: 'confirmed' needs the re-measure to sit closer to the
+#      predicted change than to NO change, and the change must be larger than
+#      the measurement can resolve. A fixed tolerance alone confirmed an
+#      untouched re-measure of any cut smaller than that tolerance.
+VERIFY_VERDICTS = ('confirmed', 'diverged', 'reverted_recommended', 'inconclusive')
+
+
 def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
                           conf=None, region_oct=0.3, consistent_db=2.0,
-                          min_predicted_db=0.5):
+                          min_predicted_db=0.5, old_bands=None, noise_db=0.3,
+                          anchor_max_db=0.1, fs=FS):
     """freqs, before_db: the ORIGINAL pre-write measurement (what the
     correction was actually proposed against). remeasured_after_db: the new
     measurement taken after loading the write. bands: the (F, Q, G) list
     that was ACTUALLY written -- not a separately-tracked prediction, so this
-    can't drift out of sync with what's really in the file; predicted_after
-    is computed as before_db + cascade_db(freqs, bands). conf: optional 0..1
-    per-freq confidence on the NEW measurement (spatial_consistency's 'conf'
-    if you have multi-position re-measures, prediction_confidence otherwise).
+    can't drift out of sync with what's really in the file.
 
-    region_oct: +/- octaves around each band's F judged as "this band's
-    region" -- deliberately NOT derived from Q; the question is whether the
-    local shape near F tracked prediction, not a precise filter-theory
-    bandwidth. consistent_db: tolerance below which actual is considered to
-    have tracked predicted -- widen it if your re-measure discipline is
-    looser (single position, different day, hand-held mic) than a tight
-    tolerance would assume; this is a crude directional check, not a
-    precision instrument. min_predicted_db: bands whose own predicted local
-    change is smaller than this can't meaningfully fail the check (nothing
-    to track) and always grade 'confirmed'.
+    old_bands: the (F, Q, G) list that was ALREADY in the tune when
+    before_db was measured. Its effect is already inside that measurement,
+    so the prediction is before_db + cascade(bands) - cascade(old_bands):
+    an edited filter predicts the difference, a removed one predicts its
+    inverse, an unchanged bank predicts nothing. Omitted, every band in
+    `bands` is treated as newly added (the original additive case). Only
+    filters that changed are reported.
 
-    Returns {'level_offset_db': ..., 'bands': [...]} -- level_offset_db is
-    the broadband correction actually applied before comparing (report it;
-    a large value usually just means "quieter/louder playback that day," not
-    a tuning result). Each band entry carries predicted_change_db,
-    actual_change_db, error_db, confidence, and verdict in {'confirmed',
-    'diverged', 'reverted_recommended', 'inconclusive'}. 'reverted_recommended'
-    is the actionable one -- actual moved the wrong way or barely moved at
-    all despite a real predicted change, the same signature
-    reaches_target_after_boost already treats as "phase is eating this, not
-    an EQ problem" -- reconsider or remove that band rather than trusting
-    the original one-shot prediction forever."""
+    conf: optional 0..1 per-freq confidence on the NEW measurement
+    (spatial_consistency's 'conf' if you have multi-position re-measures,
+    prediction_confidence otherwise).
+
+    region_oct: +/- octaves around each changed filter's F judged as "this
+    band's region". consistent_db: largest predicted-vs-actual error still
+    called a match -- widen it if your re-measure discipline is looser.
+    noise_db: how far two captures of an UNCHANGED system differ in a
+    smoothed region (repeatability.py measures it; 0.3 dB suits a fixed mic
+    on a stand). A change smaller than max(min_predicted_db, 2 * noise_db)
+    cannot be told apart from no change and grades 'inconclusive' -- never
+    'confirmed'. anchor_max_db: |predicted change| below which a frequency
+    counts as untouched for level alignment.
+
+    Returns {'level_offset_db', 'level_anchored', 'trace_changed',
+    'resolution_db', 'bands': [...], 'notes'}. level_offset_db is the
+    broadband correction applied before comparing (a large value usually
+    just means a different playback volume). Each band entry carries
+    change ('added' or 'removed'), predicted_change_db, actual_change_db,
+    error_db, error_if_unchanged_db, confidence, and verdict in
+    VERIFY_VERDICTS. 'reverted_recommended' is the actionable one -- actual
+    moved the wrong way or barely moved at all despite a real predicted
+    change, the same signature reaches_target_after_boost already treats as
+    "phase is eating this, not an EQ problem" -- reconsider or remove that
+    band. If trace_changed is False the whole re-measure matches the before
+    trace: check the write was actually loaded before blaming the filters."""
     freqs = np.asarray(freqs, dtype=float)
     before_db = np.asarray(before_db, dtype=float)
     remeasured_after_db = np.asarray(remeasured_after_db, dtype=float)
-    predicted_after_db = before_db + cascade_db(freqs, bands)
+    new_set = [tuple(float(x) for x in b) for b in bands]
+    old_set = [tuple(float(x) for x in b) for b in (old_bands or [])]
+    transfer_db = cascade_db(freqs, new_set, fs=fs) - cascade_db(freqs, old_set, fs=fs)
+    predicted_after_db = before_db + transfer_db
+    notes = []
 
-    touched = np.zeros_like(freqs, dtype=bool)
-    for F, Q, G in bands:
-        touched |= (freqs >= F / 2 ** region_oct) & (freqs <= F * 2 ** region_oct)
-    untouched = ~touched
-
-    if np.count_nonzero(untouched) >= 12:
+    untouched = np.abs(transfer_db) <= anchor_max_db
+    level_anchored = bool(np.count_nonzero(untouched) >= 12)
+    if level_anchored:
         level_offset_db = target_anchor_offset(
             freqs[untouched], remeasured_after_db[untouched],
             predicted_after_db[untouched],
             confidence=(conf[untouched] if conf is not None else None))
     else:
-        level_offset_db = 0.0    # too much of the spectrum touched to anchor safely
+        level_offset_db = 0.0
+        notes.append('the change touches nearly the whole spectrum, so no region is '
+                     'untouched to align playback level on -- level NOT aligned; '
+                     'compare at a carefully matched playback level')
     aligned_after_db = remeasured_after_db - level_offset_db
 
-    pred_delta = erb_smooth(freqs, predicted_after_db - before_db)
+    pred_delta = erb_smooth(freqs, transfer_db)
     act_delta = erb_smooth(freqs, aligned_after_db - before_db)
+    resolution = max(float(min_predicted_db), 2.0 * float(noise_db))
+    trace_changed = bool(np.max(np.abs(act_delta)) > resolution)
+    if not trace_changed and np.max(np.abs(pred_delta)) > resolution:
+        notes.append('the re-measure matches the before trace everywhere -- confirm the '
+                     'new tune was actually loaded (and the right preset selected) '
+                     'before judging any filter')
 
+    changed = ([b for b in new_set if b not in old_set] +
+               [b for b in old_set if b not in new_set])
     reports = []
-    for F, Q, G in bands:
+    for F, Q, G in changed:
         region = (freqs >= F / 2 ** region_oct) & (freqs <= F * 2 ** region_oct)
         if not np.any(region):
             continue
@@ -2901,9 +2931,9 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
         error = actual_change - predicted_change
         region_conf = float(np.mean(conf[region])) if conf is not None else 1.0
 
-        if region_conf < 0.3:
+        if region_conf < 0.3 or abs(predicted_change) < resolution:
             verdict = 'inconclusive'
-        elif abs(predicted_change) < min_predicted_db or abs(error) <= consistent_db:
+        elif abs(error) <= consistent_db and abs(error) < abs(actual_change):
             verdict = 'confirmed'
         elif (np.sign(actual_change) != np.sign(predicted_change)
               or abs(actual_change) < 0.3 * abs(predicted_change)):
@@ -2912,13 +2942,17 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
             verdict = 'diverged'
 
         reports.append({'F': F, 'Q': Q, 'G': G,
+                        'change': 'added' if (F, Q, G) in new_set else 'removed',
                         'predicted_change_db': round(predicted_change, 2),
                         'actual_change_db': round(actual_change, 2),
                         'error_db': round(error, 2),
+                        'error_if_unchanged_db': round(abs(actual_change), 2),
                         'confidence': round(region_conf, 2),
                         'verdict': verdict})
 
-    return {'level_offset_db': round(float(level_offset_db), 2), 'bands': reports}
+    return {'level_offset_db': round(float(level_offset_db), 2),
+            'level_anchored': level_anchored, 'trace_changed': trace_changed,
+            'resolution_db': round(resolution, 2), 'bands': reports, 'notes': notes}
 
 # --------------------------------------------------------------------------
 # "INERT BAND" CHECK -- before trusting a proposed (or externally-supplied) EQ
@@ -3123,23 +3157,37 @@ def band_itd_ild(freqs, left_db, right_db, left_phase_deg=None, right_phase_deg=
     exactly where the phase is least trustworthy.
 
     Sign convention throughout: POSITIVE means the LEFT side leads (arrives
-    earlier) or is louder -- i.e. positive pulls the image left.
+    earlier) or is louder -- i.e. positive pulls the image left. Phase is
+    REW's: a delay of tau seconds is phase -360*f*tau degrees, the same
+    exp(-j*w*tau) every other timing path in this file uses.
 
     Returns a list of per-band dicts: f_lo, f_hi, ild_db, itd_us (None without
-    phase), and itd_fit_quality (0..1, the R^2 of the phase-difference
-    regression -- a low value means the phase difference is not behaving like
-    a delay in that band, so the ITD number should not be trusted)."""
+    phase), and itd_fit_quality (0..1 -- a low value means the phase
+    difference is not behaving like a delay in that band, so the ITD number
+    should not be trusted). Quality is the better of the regression R^2 and a
+    residual score (1 at a perfect fit, 0.5 at ~17 degrees RMS residual):
+    R^2 alone reads EQUAL arrival as unusable, because a flat phase
+    difference has no variance for a slope to explain."""
     freqs = np.asarray(freqs, dtype=float)
     ldb = np.asarray(left_db, dtype=float)
     rdb = np.asarray(right_db, dtype=float)
+    # NaN marks bins with no usable data (outside the measured range, or
+    # phase past its unwrap limit); they are skipped, never read.
+    live = np.isfinite(ldb) & np.isfinite(rdb)
     dphi = None
+    phase_live = np.zeros_like(live)
     if left_phase_deg is not None and right_phase_deg is not None:
-        dphi = np.unwrap(np.deg2rad(np.asarray(left_phase_deg, dtype=float))) - \
-            np.unwrap(np.deg2rad(np.asarray(right_phase_deg, dtype=float)))
+        lph = np.asarray(left_phase_deg, dtype=float)
+        rph = np.asarray(right_phase_deg, dtype=float)
+        phase_live = live & np.isfinite(lph) & np.isfinite(rph)
+        dphi = np.full_like(freqs, np.nan)
+        dphi[phase_live] = (np.unwrap(np.deg2rad(lph[phase_live])) -
+                            np.unwrap(np.deg2rad(rph[phase_live])))
 
     out = []
     for lo, hi in bands:
-        sel = (freqs >= lo) & (freqs <= hi)
+        in_band = (freqs >= lo) & (freqs <= hi)
+        sel = in_band & live
         n = int(np.count_nonzero(sel))
         row = {'f_lo': float(lo), 'f_hi': float(hi), 'bins': n,
                'ild_db': None, 'itd_us': None, 'itd_fit_quality': None}
@@ -3147,17 +3195,21 @@ def band_itd_ild(freqs, left_db, right_db, left_phase_deg=None, right_phase_deg=
             out.append(row)
             continue
         row['ild_db'] = round(float(np.median(ldb[sel]) - np.median(rdb[sel])), 2)
-        if dphi is not None:
-            w = 2 * np.pi * freqs[sel]
-            y = dphi[sel]
-            # slope of phase difference vs omega = -delay difference (seconds)
+        psel = in_band & phase_live
+        if dphi is not None and np.count_nonzero(psel) >= min_bins:
+            w = 2 * np.pi * freqs[psel]
+            y = dphi[psel]
+            # phi_L - phi_R = -w*(tau_L - tau_R), so the slope IS tau_R - tau_L:
+            # positive when the right side arrives later, i.e. the left leads.
             A = np.vstack([w, np.ones_like(w)]).T
             slope, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
             resid = y - (slope * w + intercept)
             ss_tot = float(np.sum((y - np.mean(y)) ** 2))
             r2 = 1.0 - float(np.sum(resid ** 2)) / ss_tot if ss_tot > 1e-12 else 0.0
-            row['itd_us'] = round(float(-slope) * 1e6, 1)
-            row['itd_fit_quality'] = round(max(0.0, min(1.0, r2)), 2)
+            rms = float(np.sqrt(np.mean(resid ** 2)))
+            resid_score = float(np.exp(-np.log(2.0) * (rms / np.deg2rad(17.0)) ** 2))
+            row['itd_us'] = round(float(slope) * 1e6, 1)
+            row['itd_fit_quality'] = round(max(0.0, min(1.0, max(r2, resid_score))), 2)
         out.append(row)
     return out
 
@@ -4029,7 +4081,7 @@ if __name__ == '__main__':
     _l_db = 80.0 * np.ones_like(freqs)
     _r_db = 80.0 + high_shelf_db(freqs, 2000.0, 0.7, 6.0)
     _l_ph = np.zeros_like(freqs)
-    _r_ph = np.rad2deg(2 * np.pi * freqs * _lead_s)      # right lags by 300 us
+    _r_ph = -360.0 * freqs * _lead_s                      # right lags by 300 us
     _rows = band_itd_ild(freqs, _l_db, _r_db, _l_ph, _r_ph)
     _img = image_pull(_rows)
     for _b in _img['bands']:

@@ -60,7 +60,10 @@ moved) — they do not change *when* it's appropriate to write. See
 **Polarity is `CINV` on `<OC>` — confirmed by controlled diff, not `PM`/`P` on
 the delay tag.** (This section previously said the mapping was unverified;
 that was resolved and this note was stale — see `afpx_format.md` for the full
-account.) `PM`/`P` don't reliably mean anything and should never be written.
+account.) `PM`/`P` are not the polarity control. `P` is the channel Phase
+control, writable only through the verified Phase-control path in
+`afpx_format.md` (which refuses a write unless `PM="4"`); never write either
+field as a polarity substitute.
 
 **Sample rate is model-specific — never assume it.** The P SIX DSP MK2 runs at
 96 kHz internally, so `delay_ms = samples / 96`. A different Helix model may run at

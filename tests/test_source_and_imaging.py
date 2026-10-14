@@ -93,9 +93,12 @@ class ImagingTests(unittest.TestCase):
     def _rows(self, left_db, right_db, left_ph=None, right_ph=None):
         return tunelib.band_itd_ild(self.freqs, left_db, right_db, left_ph, right_ph)
 
+    def _late(self, seconds):
+        """Phase of a channel arriving `seconds` late, wrapped as REW exports it."""
+        return (-360.0 * self.freqs * seconds + 180.0) % 360.0 - 180.0
+
     def test_recovers_a_known_itd(self):
-        lead = 300e-6
-        right_ph = np.rad2deg(2 * np.pi * self.freqs * lead)
+        right_ph = self._late(300e-6)               # right arrives late: left leads
         rows = self._rows(self.flat, self.flat, self.zero_ph, right_ph)
         low = [r for r in rows if r["f_hi"] <= 400][0]
         self.assertAlmostEqual(low["itd_us"], 300.0, delta=25.0)
@@ -104,7 +107,7 @@ class ImagingTests(unittest.TestCase):
     def test_opposing_cues_across_the_duplex_region_read_as_smeared(self):
         """The failure a single delay value cannot represent."""
         right_db = self.flat + tunelib.high_shelf_db(self.freqs, 2000.0, 0.7, 6.0)
-        right_ph = np.rad2deg(2 * np.pi * self.freqs * 300e-6)
+        right_ph = self._late(300e-6)
         pull = tunelib.image_pull(
             self._rows(self.flat, right_db, self.zero_ph, right_ph))
         self.assertEqual(pull["verdict"], "smeared")

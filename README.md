@@ -37,7 +37,10 @@ fully measurement-driven.
 
 **Corrects with the right tool.** Uses the full Helix filter set — parametric EQ,
 low/high shelves, and all-pass (phase) filters — plus delay and polarity, in the order
-a good manual tuner works: timing first, EQ last. A cross-correlation delay estimate
+a good manual tuner works: driver-local EQ the solos justify, re-measure, then
+timing (delay, polarity, all-pass) on the corrected drivers, then broad system tone —
+EQ moves phase, so timing is rechecked if a later unequal EQ change touches it. A
+cross-correlation delay estimate
 double-checks the usual phase-based search (and flags disagreement as a "don't trust
 this" signal instead of picking one). Left/right corrections stay matched by default;
 where they need to genuinely differ, it can flag exactly where and how much the two
@@ -129,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.8.1`) so you can tell whether an already-installed copy is current — open
+`1.9.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -544,13 +547,16 @@ one aggregate, precisely so a good average can't paper over one bad region.
 
 Everything above only produces a *prediction*. `predicted_vs_measured` is
 what happens when the user comes back with a fresh, loaded-tune measurement:
-it auto-aligns a broadband level offset using only the *untouched*
-frequencies (so a re-measure taken at a quieter volume that day doesn't read
-as "the EQ failed"), compares octave-smoothed regions rather than raw bins
-(so ordinary mic-position ripple doesn't either), and grades each written
-band `confirmed`, `diverged`, `reverted_recommended`, or `inconclusive` —
-downgrading to `inconclusive` rather than forcing a verdict when confidence
-is genuinely low. `reverted_recommended` is treated as an instruction to
+it auto-aligns a broadband level offset using only frequencies the edit
+leaves untouched (so a re-measure taken at a quieter volume that day doesn't
+read as "the EQ failed"), compares octave-smoothed regions rather than raw bins
+(so ordinary mic-position ripple doesn't either), and grades each changed
+band `confirmed`, `diverged`, `reverted_recommended`, or `inconclusive`.
+`confirmed` needs the re-measure to sit closer to the predicted change than to
+no change, so an unchanged re-measure can never confirm an edit; a change
+smaller than the measurement can resolve, or a region with low confidence,
+stays `inconclusive`. Edited and removed filters are predicted relative to the
+bank that was already measured, never as another cascade on top. `reverted_recommended` is treated as an instruction to
 reconsider that band, not a suggestion.
 
 ### The restraint budget

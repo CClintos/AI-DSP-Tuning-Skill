@@ -338,6 +338,25 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
 - If solos + a measured "together" trace exist, run `prediction_confidence`: the
   solo model must reproduce the measured sum, or the complex data is misaligned and
   phase decisions must be blocked (re-measure).
+- **Evidence rules `pipeline.py` now enforces** (don't work around them by hand):
+  - *Timing reference.* A phase column is not proof of a shared time base. An
+    export whose header says `timing reference: NONE` cannot drive a delay,
+    junction or imaging time cue: `junction`/`probe` refuse it, `imaging` drops
+    the time cue, `analyze` skips `crossover_confidence`. A header that does not
+    say gets a note — confirm the captures shared one before quoting a delay.
+    `rew_api.py export` records it, which is one more reason to prefer it.
+  - *Measured range only.* Nothing outside a trace's measured range is data;
+    anchoring, deviation regions and `propose`'s fit band are confined to the
+    range every trace covers (`meta.measured_range_hz`).
+  - *Gated captures.* Pass `--gate-ms` to `propose` as well as `analyze`; bins
+    below the gate's trust floor are excluded from both.
+  - *One file, one position.* Identical traces given as separate `--positions`
+    are counted once (`meta.duplicate_positions`); repeats at one spot are not
+    extra positions.
+  - *Phase resolution.* Phase is unwrapped before interpolation, and where a
+    trace steps too far between points to unwrap reliably (a long flight time on
+    a coarse grid), phase above that frequency is not used — a junction whose
+    band reaches past it is refused rather than read.
 
 ### 2b. Audit the source — before correcting anything downstream
 
@@ -532,16 +551,26 @@ re-measure should target.
 ### 7. When a re-measure comes back — close the loop, don't just eyeball it
 
 If the user returns with a fresh measurement after loading the write, run
-`tunelib.predicted_vs_measured(freqs, before_db, remeasured_after_db, bands)`
-instead of just glancing at the new plot. A raw before/after diff would get
-swamped by exactly the things that differ between two real measurement runs
-(playback level, mic position, capture noise) — this function is built to not
-be fooled by those: it auto-aligns a broadband level offset using only the
-*untouched* frequencies (so a quieter re-measure doesn't read as "the EQ
-failed"), compares octave-smoothed regions (so ordinary mic-position comb
-ripple doesn't either), and downgrades to `'inconclusive'` wherever confidence
-is low rather than forcing a verdict. Each written band comes back graded
-`confirmed` / `diverged` / `reverted_recommended` / `inconclusive`. Treat
+`tunelib.predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
+old_bands=<filters already in the tune when before_db was measured>,
+noise_db=<measured repeatability>)` instead of just glancing at the new plot.
+A raw before/after diff would get swamped by exactly the things that differ
+between two real measurement runs (playback level, mic position, capture
+noise) — this function is built to not be fooled by those: it auto-aligns a
+broadband level offset using only frequencies the edit leaves at ~0 dB (so a
+quieter re-measure doesn't read as "the EQ failed", and a broad filter's
+skirts can't leak into the alignment), compares octave-smoothed regions (so
+ordinary mic-position comb ripple doesn't either), and downgrades to
+`'inconclusive'` wherever confidence is low rather than forcing a verdict.
+Pass `old_bands` whenever filters were edited or removed: the before trace
+already contains them, so the prediction is new minus old, never another
+cascade on top. `'confirmed'` requires the re-measure to sit closer to the
+predicted change than to no change at all; a change smaller than the
+measurement can resolve is `'inconclusive'`, never `'confirmed'`. If
+`trace_changed` is false the whole re-measure matches the before trace —
+check the new tune was actually loaded before judging any band. Each changed
+band comes back graded `confirmed` / `diverged` / `reverted_recommended` /
+`inconclusive`. Treat
 `reverted_recommended` as an instruction to reconsider or pull that band, not
 a suggestion — it means the predicted change didn't show up, the same
 "phase is eating this" signature `reaches_target_after_boost` already flags
