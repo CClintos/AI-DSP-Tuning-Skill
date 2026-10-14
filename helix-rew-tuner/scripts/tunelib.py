@@ -3729,18 +3729,21 @@ def shelf_H(freqs, kind, f0, Q, gain_db, fs=FS):
 
 
 CHAIN_CHANGE_KEYS = ('delay_ms', 'invert', 'gain_db', 'phase_deg', 'phase_reference_hz',
-                     'allpass', 'peq', 'shelves')
+                     'allpass', 'peq', 'shelves', 'crossover')
 
 
 def chain_response(freqs, fs=FS, delay_ms=0.0, invert=False, gain_db=0.0,
-                   phase_deg=None, phase_reference_hz=None, allpass=(), peq=(), shelves=()):
+                   phase_deg=None, phase_reference_hz=None, allpass=(), peq=(), shelves=(),
+                   crossover=()):
     """Complex response of the CHANGES a candidate makes to one channel.
 
     Measurements already include the tune that was loaded; this is what a
     candidate adds on top: delay (ms, positive = later), polarity, gain, the
     channel Phase control (angle + that channel's crossover reference),
-    all-passes [(F, Q, order)], PEQ bells [(F, Q, G)] and shelves
-    [(kind, F, Q, G)], realized at the DSP's rate `fs`."""
+    all-passes [(F, Q, order)], PEQ bells [(F, Q, G)], shelves
+    [(kind, F, Q, G)] and ADVISORY crossover changes [{'kind', 'from', 'to'}]
+    (crossover_change_H -- modelled, never written), realized at the DSP's
+    rate `fs`."""
     f = np.asarray(freqs, dtype=float)
     H = np.ones(len(f), dtype=complex)
     if gain_db:
@@ -3760,12 +3763,15 @@ def chain_response(freqs, fs=FS, delay_ms=0.0, invert=False, gain_db=0.0,
         H *= peaking_H(f, float(F), float(Q), float(G), fs)
     for kind, F, Q, G in shelves:
         H *= shelf_H(f, kind, float(F), float(Q), float(G), fs)
+    for change in crossover:
+        H *= crossover_change_H(f, change, fs=fs)[0]
     return H
 
 
 def probe_variants(freqs, drivers, junctions, variants, fs=FS,
                    sum_bands=((40, 160), (160, 630), (630, 2500), (2500, 10000), (10000, 16000)),
-                   better_score=0.01, worse_score=-0.01, worse_loss_db=-0.25):
+                   better_score=0.01, worse_score=-0.01, worse_loss_db=-0.25,
+                   pairs=(), lr_band=(300.0, 5000.0), lr_worse_db=0.5):
     """Evaluate candidate changes deterministically, before anything is written.
 
     drivers: {name: complex response} measured on ONE time base (one side's
@@ -3779,12 +3785,28 @@ def probe_variants(freqs, drivers, junctions, variants, fs=FS,
     response moves per band (ERB-smoothed, dB vs baseline), the largest boost
     its chains add, and a plain verdict. Prediction, not measurement: the
     winner still goes through a plan and a re-measure. (Resonalyze's "probe"
-    idea: the agent asks, deterministic code answers.)"""
+    idea: the agent asks, deterministic code answers.)
+
+    pairs: [(left_driver, right_driver)] whose L/R balance must not get
+    worse: the RMS of their ERB-smoothed level difference over lr_band is
+    reported, and a rise of more than lr_worse_db marks the variant worse
+    even when every junction improved -- a better handover that moves the
+    vocal image is not a better tune. Each variant also gets a
+    recommendation: 'candidate' (better somewhere touched, worse nowhere),
+    'tradeoff' (better and worse), 'reject' (only worse), or 'no gain'.
+    Crossover changes in a variant are ADVISORY: crossover_lift_db reports
+    how far a change lifts output below the measured corner, where the
+    export holds little but stopband."""
     f = np.asarray(freqs, dtype=float)
     names = set(drivers)
     for lo, up, _fc in junctions:
         if lo not in names or up not in names:
             raise ValueError('junction %s-%s names an unknown driver' % (lo, up))
+    pairs = [tuple(p) for p in pairs]
+    for left, right in pairs:
+        if left not in names or right not in names:
+            raise ValueError('pair %s/%s names an unknown driver' % (left, right))
+    lr_sel = (f >= lr_band[0]) & (f <= lr_band[1])
     for v in variants:
         for drv, change in v.get('changes', {}).items():
             if drv not in names:
@@ -3809,13 +3831,18 @@ def probe_variants(freqs, drivers, junctions, variants, fs=FS,
         total = sum(proc.values())
         boost = max((float(np.max(20 * np.log10(np.abs(chains[n]) + 1e-12)))
                      for n in changes), default=0.0)
-        return rows, 20 * np.log10(np.abs(total) + 1e-12), boost
+        lr = []
+        for left, right in pairs:
+            d = erb_smooth(f, 20 * np.log10(np.abs(proc[left]) + 1e-12)
+                           - 20 * np.log10(np.abs(proc[right]) + 1e-12))
+            lr.append(float(np.sqrt(np.mean(d[lr_sel] ** 2))) if np.any(lr_sel) else None)
+        return rows, 20 * np.log10(np.abs(total) + 1e-12), boost, lr
 
-    base_rows, base_sum, _ = evaluate({})
+    base_rows, base_sum, _, base_lr = evaluate({})
     out = []
     for v in [{'name': 'baseline', 'changes': {}}] + list(variants):
         changes = v.get('changes', {})
-        rows, sum_db, boost = evaluate(changes)
+        rows, sum_db, boost, lr = evaluate(changes)
         touched = set(changes)
         better, worse = [], []
         for row, base in zip(rows, base_rows):
@@ -3840,6 +3867,19 @@ def probe_variants(freqs, drivers, junctions, variants, fs=FS,
                               'mean_change_db': round(float(np.mean(delta[sel])), 2),
                               'max_abs_change_db': round(float(np.max(np.abs(delta[sel]))), 2)})
         touched_ids = [r['id'] for r in rows if r['touched']]
+        lr_rows, lr_worse = [], []
+        for (left, right), now, base in zip(pairs, lr, base_lr):
+            delta_lr = None if now is None or base is None else round(now - base, 2)
+            lr_rows.append({'pair': '%s/%s' % (left, right),
+                            'rms_difference_db': None if now is None else round(now, 2),
+                            'delta_db': delta_lr})
+            if delta_lr is not None and delta_lr > lr_worse_db:
+                lr_worse.append('%s/%s' % (left, right))
+        xo_lift = None
+        for change in changes.values():
+            for xo in change.get('crossover', ()):
+                lift = crossover_change_H(f, xo, fs=fs)[1]
+                xo_lift = lift if xo_lift is None else max(xo_lift, lift)
         if not changes:
             verdict = 'reference'
         elif not touched_ids:
@@ -3854,10 +3894,27 @@ def probe_variants(freqs, drivers, junctions, variants, fs=FS,
             verdict = 'mixed: better at %s, worse at %s' % (', '.join(better), ', '.join(worse))
         else:
             verdict = 'no material change at the touched junctions'
-        out.append({'name': v.get('name', 'variant'), 'changes': changes,
-                    'touched_junctions': touched_ids, 'junctions': rows,
-                    'sum_change_by_band': bands,
-                    'max_chain_boost_db': round(boost, 2), 'verdict': verdict})
+        if lr_worse:
+            verdict += '; L/R balance worse at %s' % ', '.join(lr_worse)
+        if not changes:
+            recommendation = 'reference'
+        elif better and not (worse or lr_worse):
+            recommendation = 'candidate'
+        elif better:
+            recommendation = 'tradeoff'
+        elif worse or lr_worse:
+            recommendation = 'reject'
+        else:
+            recommendation = 'no gain'
+        row = {'name': v.get('name', 'variant'), 'changes': changes,
+               'touched_junctions': touched_ids, 'junctions': rows,
+               'sum_change_by_band': bands, 'lr_balance': lr_rows,
+               'max_chain_boost_db': round(boost, 2), 'verdict': verdict,
+               'recommendation': recommendation}
+        if xo_lift is not None:
+            row['crossover_advisory'] = True
+            row['crossover_lift_db'] = round(xo_lift, 1)
+        out.append(row)
     return out
 
 
@@ -3882,6 +3939,339 @@ def junction_sum_loss(freqs, a, b, band, weighted=True):
     i = int(np.argmin(loss))
     return {'average_db': round(avg, 3), 'dip_db': round(float(loss[i]), 2),
             'dip_hz': round(float(f[sel][i]), 1)}
+
+
+# --------------------------------------------------------------------------
+# CROSSOVER WHAT-IF (advisory only). Crossovers are never written by this
+# skill, but where the acoustic handover could be improved by a different
+# corner or slope, the user deserves to hear that -- with a prediction. The
+# exports were measured THROUGH the current crossover, so a candidate is
+# modelled exactly like any other change: multiply by H_new / H_old.
+# Below the old corner the measurement is mostly stopband and noise; lifting
+# it by more than a few dB invents data, so the ratio is capped and the
+# uncapped lift is reported.
+CROSSOVER_FAMILIES = ('LR', 'BW')
+
+
+def crossover_H(freqs, kind, family, slope_db_oct, hz, fs=FS):
+    """Complex response of one Helix-style crossover section, realized at fs.
+
+    kind 'hp' | 'lp'; family 'LR' (Linkwitz-Riley: a squared Butterworth, 12,
+    24, 36 or 48 dB/oct) or 'BW' (Butterworth, any multiple of 6 dB/oct).
+    Bessel and Self-define are refused: how the Helix normalizes them is not
+    verified, and a guessed corner would mislead exactly where it matters."""
+    from scipy import signal
+    if kind not in ('hp', 'lp'):
+        raise ValueError("crossover kind must be 'hp' or 'lp'")
+    family = str(family).upper()
+    slope = int(round(float(slope_db_oct)))
+    if slope <= 0 or slope % 6:
+        raise ValueError('slope_db_oct must be a positive multiple of 6, got %r' % slope_db_oct)
+    hz = float(hz)
+    if not 0.0 < hz < fs / 2.0:
+        raise ValueError('crossover frequency %g Hz outside 0..fs/2' % hz)
+    order = slope // 6
+    btype = 'highpass' if kind == 'hp' else 'lowpass'
+    f = np.asarray(freqs, dtype=float)
+    if family == 'BW':
+        sos = signal.butter(order, hz, btype=btype, fs=fs, output='sos')
+        _w, H = signal.sosfreqz(sos, worN=f, fs=fs)
+    elif family == 'LR':
+        if order % 2:
+            raise ValueError('Linkwitz-Riley slopes are 12, 24, 36 or 48 dB/oct')
+        sos = signal.butter(order // 2, hz, btype=btype, fs=fs, output='sos')
+        _w, h = signal.sosfreqz(sos, worN=f, fs=fs)
+        H = h * h
+    else:
+        raise ValueError('crossover family %r is not modelled (choose from %s; Bessel and '
+                         'Self-define are unverified on the Helix)'
+                         % (family, ', '.join(CROSSOVER_FAMILIES)))
+    return np.asarray(H, dtype=complex)
+
+
+def crossover_change_H(freqs, change, fs=FS, max_lift_db=12.0):
+    """H_new / H_old for one crossover change, with the lift capped.
+
+    change: {'kind': 'hp'|'lp', 'from': {'family', 'slope_db_oct', 'hz'},
+    'to': {...}}. Returns (H, uncapped_max_lift_db)."""
+    for key in ('kind', 'from', 'to'):
+        if key not in change:
+            raise ValueError('crossover change needs %r' % key)
+    old = crossover_H(freqs, change['kind'], fs=fs, **_xo_args(change['from']))
+    new = crossover_H(freqs, change['kind'], fs=fs, **_xo_args(change['to']))
+    ratio = new / np.where(np.abs(old) < 1e-12, 1e-12, old)
+    lift = 20 * np.log10(np.abs(ratio) + 1e-300)
+    cap = 10 ** (max_lift_db / 20.0)
+    mag = np.abs(ratio)
+    ratio = np.where(mag > cap, ratio / np.maximum(mag, 1e-300) * cap, ratio)
+    return ratio, float(np.max(lift))
+
+
+def _xo_args(spec):
+    unknown = set(spec) - {'family', 'slope_db_oct', 'hz'}
+    if unknown or not {'family', 'slope_db_oct', 'hz'} <= set(spec):
+        raise ValueError("a crossover section is {'family', 'slope_db_oct', 'hz'}, got %r" % spec)
+    return {'family': spec['family'], 'slope_db_oct': spec['slope_db_oct'], 'hz': spec['hz']}
+
+
+# --------------------------------------------------------------------------
+# LEVEL-MATCHED COMPARISON. A louder version of the same tune is reliably
+# preferred in a quick A/B, so an EQ change that is mostly cuts tends to lose
+# a listening test it should win. Before two versions are compared by ear,
+# their broadband loudness at the seat must be matched.
+def loudness_change_db(freqs, before_db, after_db, band=(40.0, 16000.0)):
+    """Broadband loudness of after relative to before, in dB (positive =
+    after is louder), at the measured seat.
+
+    Power average over `band` with the audibility weighting, on a log grid
+    (equal weight per octave, i.e. pink-noise programme). A comparison
+    matching estimate -- confirm by ear at the user's normal volume, never a
+    loudness model to report as a measurement."""
+    f = np.asarray(freqs, dtype=float)
+    sel = (f >= band[0]) & (f <= band[1])
+    b = np.asarray(before_db, dtype=float)[sel]
+    a = np.asarray(after_db, dtype=float)[sel]
+    ok = np.isfinite(a) & np.isfinite(b)
+    if not np.any(ok):
+        raise ValueError('no finite data in the loudness band')
+    w = audibility_weight(f[sel][ok])
+    ref = np.max(b[ok])
+    p0 = np.sum(w * 10 ** ((b[ok] - ref) / 10.0))
+    p1 = np.sum(w * 10 ** ((a[ok] - ref) / 10.0))
+    return float(10 * np.log10(p1 / p0))
+
+
+# --------------------------------------------------------------------------
+# BASS BALANCE. The sub-to-front level is one of the most audible decisions
+# in a car and it is a LEVEL decision, not an EQ one: correcting a whole
+# region's offset with bells wastes filters and phase. Report it per band
+# against the anchored target so the level question is asked explicitly.
+BASS_BANDS = ((25.0, 50.0), (50.0, 80.0), (80.0, 160.0), (160.0, 300.0))
+
+
+def bass_balance(freqs, dev_db, support=None, bands=BASS_BANDS, level_flag_db=2.0):
+    """Median anchored deviation per bass band, and whether the low end as a
+    whole sits off target (a sub/midbass LEVEL question).
+
+    Returns {'bands': [{'band_hz', 'deviation_db' or None}], 'sub_region_db'
+    (25-80 Hz), 'midbass_region_db' (80-300 Hz), 'verdict'}. verdict is
+    'balanced', 'bass_heavy', 'bass_light' or 'unmeasured'."""
+    f = np.asarray(freqs, dtype=float)
+    sm = erb_smooth(f, np.asarray(dev_db, dtype=float))
+    live = np.ones_like(f, dtype=bool) if support is None else np.asarray(support, dtype=bool)
+
+    def region(lo, hi):
+        sel = (f >= lo) & (f <= hi) & live
+        return round(float(np.median(sm[sel])), 2) if np.count_nonzero(sel) >= 4 else None
+
+    rows = [{'band_hz': [lo, hi], 'deviation_db': region(lo, hi)} for lo, hi in bands]
+    sub, mid = region(25.0, 80.0), region(80.0, 300.0)
+    if sub is None:
+        verdict = 'unmeasured'
+    elif sub >= level_flag_db:
+        verdict = 'bass_heavy'
+    elif sub <= -level_flag_db:
+        verdict = 'bass_light'
+    else:
+        verdict = 'balanced'
+    return {'bands': rows, 'sub_region_db': sub, 'midbass_region_db': mid,
+            'verdict': verdict}
+
+
+# --------------------------------------------------------------------------
+# REFINE AN EXISTING BANK. propose fits NEW bands to whatever the measured
+# system does -- which already includes every filter in the tune. Run on an
+# already-tuned car it can only stack more filters on top. This starts from
+# the bank the measurement was taken through and asks, per filter: keep it,
+# relax it, re-fit it in place, remove it -- or add one where something real
+# is left. Every prediction is dev + cascade(new bank) - cascade(old bank):
+# the measured filters are never applied a second time.
+def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
+                max_edits=4, free_slots=0, g_lim=(-15.0, 3.0), q_lim=(0.5, 8.0),
+                f_move_oct=1.0 / 3.0, min_gain_db=0.03, min_gain_pct=2.0,
+                remove_tolerance_db=0.02, worst_tolerance_db=0.05, min_add_gain=1.0,
+                removal_credit_db=0.05,
+                boost_check=None):
+    """Greedy, deterministic refinement of an existing PEQ bank.
+
+    deviations: list of per-position deviation-from-target arrays measured
+    THROUGH old_bank (one entry for a single position). old_bank: [(F, Q, G)]
+    of the filters currently active on the channel(s). band: the range the
+    bank may be judged over (inside the driver's passband). free_slots: how
+    many new filters the channel(s) can take.
+
+    Each round evaluates, for every not-yet-edited filter whose F lies in
+    band, removing it, halving its gain, and re-fitting it in place (F within
+    +/- f_move_oct, Q in q_lim, G in g_lim), plus adding one band where free
+    slots allow. The best move is accepted when it lowers the mean
+    audibility score by at least max(min_gain_db, min_gain_pct %) without
+    the worst position getting more than worst_tolerance_db worse -- except a
+    removal, which only has to cost no more than remove_tolerance_db: fewer
+    filters is a better tune when they are not earning their place.
+    boost_check(F, Q, G) -> 'ALLOW' | 'WARN' | 'BLOCK' vets any move that
+    adds or raises a boost (pass None when phase is unavailable; boosts are
+    then reported as unchecked).
+
+    Every candidate is re-anchored in level before scoring (overall level is
+    a separate decision from the shape the bank corrects).
+
+    Returns {'baseline': {...}, 'final': {...}, 'edits': [...], 'bank': [...],
+    'unchanged': bool}. Edit rows: action ('remove', 'relax', 'refit', 'add'),
+    index (into old_bank, None for add), old, new, score_change_db, and
+    boost_gate. An empty edit list is a valid, often correct, result."""
+    from scipy.optimize import minimize
+
+    f = np.asarray(freqs, dtype=float)
+    devs = [np.asarray(d, dtype=float) for d in deviations]
+    old = [tuple(float(x) for x in b) for b in old_bank]
+    old_db = cascade_db(f, old, fs=fs)
+
+    anchor_conf = conf if conf is not None else (
+        None if mask is None else np.asarray(mask, dtype=float))
+
+    def scores(bank):
+        # Overall level is not the bank's job: each candidate is re-anchored
+        # the way the session anchors the measurement, so removing a cut that
+        # sat in the anchor band is not mistaken for a broadband error that
+        # some other filter should now chase.
+        T = cascade_db(f, [b for b in bank if b is not None], fs=fs) - old_db
+        out = []
+        for d in devs:
+            dd = d + T
+            dd = dd - target_anchor_offset(f, dd, np.zeros_like(f), confidence=anchor_conf)
+            out.append(audibility_score(f, dd, band=band, mask=mask, conf=conf))
+        return out
+
+    def summary(s):
+        return {'mean_score_db': round(float(np.mean(s)), 3),
+                'worst_score_db': round(float(np.max(s)), 3),
+                'position_scores_db': [round(float(v), 3) for v in s]}
+
+    def snap(F, Q, G):
+        return (round(float(F), 1), round(float(np.clip(Q, *q_lim)), 2),
+                round(float(np.clip(G, *g_lim)) * 4.0) / 4.0)
+
+    bank = list(old)               # None marks a removed filter
+    current = scores(bank)
+    baseline = summary(current)
+    edits, edited = [], set()
+    in_band = [i for i, (F, _Q, _G) in enumerate(old) if band[0] <= F <= band[1]]
+    adds_left = int(free_slots)
+
+    def refit(i):
+        F0, Q0, G0 = bank[i]
+
+        def obj(x):
+            trial = list(bank)
+            trial[i] = (float(np.exp(x[0])), float(x[1]), float(x[2]))
+            return float(np.mean(scores(trial)))
+
+        lo_f, hi_f = F0 / 2 ** f_move_oct, F0 * 2 ** f_move_oct
+        res = minimize(obj, x0=[np.log(F0), float(np.clip(Q0, *q_lim)), float(np.clip(G0, *g_lim))],
+                       method='Powell',
+                       bounds=[(np.log(max(lo_f, band[0])), np.log(min(hi_f, band[1]))),
+                               q_lim, g_lim],
+                       options={'xtol': 1e-3, 'ftol': 1e-4, 'maxiter': 4000})
+        return snap(np.exp(res.x[0]), res.x[1], res.x[2])
+
+    for _round in range(int(max_edits)):
+        mean_now, worst_now = float(np.mean(current)), float(np.max(current))
+        need = max(min_gain_db, mean_now * min_gain_pct / 100.0)
+        moves = []
+        for i in in_band:
+            if i in edited or bank[i] is None:
+                continue
+            F, Q, G = bank[i]
+            candidates = [('remove', None), ('relax', snap(F, Q, G / 2.0))]
+            candidates.append(('refit', refit(i)))
+            for action, new in candidates:
+                if action != 'remove' and (new == bank[i] or abs(new[2]) < 0.25):
+                    continue
+                trial = list(bank)
+                trial[i] = new
+                moves.append((action, i, new, trial))
+        if adds_left > 0:
+            T = cascade_db(f, [b for b in bank if b is not None], fs=fs) - old_db
+            mean_dev = np.mean(devs, axis=0) + T
+            added, _rep = fit_peq(f, mean_dev, band, n_bands_max=1, mask=mask, conf=conf,
+                                  g_lim=g_lim, q_lim=q_lim, min_gain=min_add_gain,
+                                  fit_smoothed=True)
+            for F, Q, G in added:
+                new = snap(F, Q, G)
+                moves.append(('add', None, new, list(bank) + [new]))
+
+        best = None
+        for action, i, new, trial in moves:
+            s = scores(trial)
+            d_mean = float(np.mean(s)) - mean_now
+            d_worst = float(np.max(s)) - worst_now
+            if action == 'remove':
+                ok = d_mean <= remove_tolerance_db and d_worst <= remove_tolerance_db
+            else:
+                ok = d_mean <= -need and d_worst <= worst_tolerance_db
+            if not ok:
+                continue
+            raises_boost = new is not None and new[2] > 0 and (
+                i is None or new[2] > max(0.0, bank[i][2]))
+            gate = None
+            if raises_boost:
+                gate = boost_check(*new) if boost_check else 'UNCHECKED'
+                if gate == 'BLOCK':
+                    continue
+            # Largest improvement wins; a removal gets a small simplicity
+            # credit so it wins near-ties, never over a clearly better edit
+            # (removing an over-cut and adding it back elsewhere is churn).
+            key = d_mean - (removal_credit_db if action == 'remove' else 0.0)
+            if best is None or key < best[0]:
+                best = (key, action, i, new, trial, s, d_mean, gate)
+        if best is None:
+            break
+        _key, action, i, new, trial, s, d_mean, gate = best
+        edits.append({'action': action, 'index': i,
+                      'old': None if i is None else list(bank[i]),
+                      'new': None if new is None else list(new),
+                      'score_change_db': round(d_mean, 3), 'boost_gate': gate})
+        bank, current = trial, s
+        if i is None:
+            adds_left -= 1
+            edited.add(len(bank) - 1)
+        else:
+            edited.add(i)
+
+    final_bank = [b for b in bank if b is not None]
+    return {'baseline': baseline, 'final': summary(current), 'edits': edits,
+            'bank': [list(b) for b in final_bank], 'old_bank': [list(b) for b in old],
+            'unchanged': not edits}
+
+
+# --------------------------------------------------------------------------
+# PROBE ACROSS POSITIONS. A handover change that helps at one mic spot and
+# hurts a few centimetres away is not an improvement anyone hears. Run
+# probe_variants once per position and only call a variant a candidate when
+# no position rejects it.
+def aggregate_probe_positions(per_position):
+    """per_position: list (one per mic position) of probe_variants outputs
+    for the SAME variants. Returns one row per variant with each position's
+    recommendation and a robust_recommendation: 'candidate' only when no
+    position says 'reject' or 'tradeoff' and at least half say
+    'candidate'."""
+    names = [v['name'] for v in per_position[0]]
+    out = []
+    for k, name in enumerate(names):
+        recs = [pos[k]['recommendation'] for pos in per_position]
+        if name == 'baseline':
+            robust = 'reference'
+        elif any(r == 'reject' for r in recs):
+            robust = 'reject'
+        elif any(r == 'tradeoff' for r in recs):
+            robust = 'tradeoff'
+        elif sum(r == 'candidate' for r in recs) * 2 >= len(recs):
+            robust = 'candidate'
+        else:
+            robust = 'no gain'
+        out.append({'name': name, 'position_recommendations': recs,
+                    'robust_recommendation': robust})
+    return out
 
 
 def source_bandwidth_limits(freqs, trace_db, ref_band=(300.0, 3000.0), drop_db=6.0):

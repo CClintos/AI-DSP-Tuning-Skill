@@ -57,6 +57,10 @@ before correcting, and prefer doing less.**
 - [Seat validation outranks nearfield aesthetics](#nearfield-aesthetics-do-not-override-a-seat-validated-filter)
 - [Retraction discipline](#retraction-discipline-a-disproven-claim-invalidates-what-was-built-on-it)
 - [Rear-fill / ambience measurement discipline](#rear-fill-ambience-channels-need-their-own-measurement-discipline)
+- [Refine the tune you have](#refine-the-tune-you-have-before-adding-to-it)
+- [Matched-loudness blind A/B](#judge-by-ear-only-at-matched-loudness-blind)
+- [Crossover what-ifs](#crossover-what-ifs-modelled-never-written)
+- [Bass is a level decision first](#bass-is-a-level-decision-before-it-is-an-eq-decision)
 - [Stopping is a valid outcome](#stopping-is-a-valid-and-often-correct-outcome)
 
 ## Audit the source before correcting the system
@@ -2172,6 +2176,107 @@ separate source, then back off 2–3 dB. Time a rear or centre against the ONE
 front driver that plays most of the 1–4 kHz voice band (usually the midrange),
 not against the summed front stage — a band-limited arrival of a sum is the
 arrival of whichever driver plays earliest in that band.
+
+## Refine the tune you have before adding to it
+
+After the first session, every measurement is taken THROUGH a tune that
+already has filters in it. `propose` fits new bands to whatever the system now
+does, so run on a tuned car it can only stack more filters on top: it cannot
+see that an old cut is now digging a hole, and each extra band near a
+crossover moves phase that was aligned earlier.
+
+`pipeline.py refine --afpx tune.afpx --channels N [N...] --dsp-rate 96000
+--positions ... --target ...` starts from the bank the measurement was taken
+through. For every PEQ inside the channel's passband (kept 1/3 octave inside
+its crossovers) it tries removing it, halving it, and re-fitting it in place;
+where free slots and a real residual both exist it may add one band. Every
+prediction is the measurement + cascade(new bank) - cascade(old bank), so a
+measured filter is never applied twice, and each candidate is re-anchored in
+level so removing a cut in the anchor band is not mistaken for a broadband
+error. A move is kept only when it improves the mean score across positions
+without the worst position getting worse; removal wins near-ties, because a
+filter that is not earning its place is a cost. An empty edit list means the
+current bank already earns its place — that is the result, say so.
+
+Several channels are refined together only when they carry the SAME bank (a
+left/right pair measured together); unequal banks need their own solo
+measurements. Its `plan_edits` address existing slots (`G: 0` for a removal),
+`comparison` gives the loudness change for the listening test, and
+`verify_with` is what `predicted_vs_measured` needs after the re-measure.
+
+## Judge by ear only at matched loudness, blind
+
+A louder version of the same tune wins a quick comparison even when it is
+worse, and most good corrections are cuts — so an unmatched A/B tends to reject
+exactly the changes that helped. Knowing which version is playing biases the
+choice the same way. Both are cheap to remove:
+
+1. Take the predicted loudness change from `refine` (`comparison`) or
+   `propose` (`prediction.loudness_change_db`) — positive means the candidate
+   is louder.
+2. `pipeline.py ab-make --a current.afpx --b candidate.afpx --loudness-db X
+   --out-dir ab1` writes `X.afpx` and `Y.afpx` in random order and trims the
+   louder one on every channel through the normal verified apply path
+   (comparison copies only; the originals are untouched). It refuses until the
+   user has seen the trim and you pass `--confirm-trim`.
+3. The user loads X, Y, Y, X (and repeats) at their normal volume on two or
+   three short familiar clips, noting a preference per pair — ideally with
+   someone else loading the files.
+4. `pipeline.py ab-result --key ab1/.ab_key.json --choices ...` reveals which
+   was which, gives the chance probability, and appends to `ab1/ab_log.json`.
+
+Six or more decided choices are needed before a preference means anything. A
+candidate that measures better but is not preferred blind is not kept on the
+strength of the measurement; one that is preferred blind but measures worse
+at the other positions is a voicing question, not a correction.
+
+## Crossover what-ifs: modelled, never written
+
+This skill never writes a crossover, but a poorly placed corner or slope is one
+of the most audible faults in an active system, and saying nothing about it
+leaves the biggest lever unused. The exports were measured through the
+current crossover, so a candidate is modelled like any other change:
+multiply by H_new / H_old. `probe` takes it as a change on a driver:
+
+```json
+{"crossover": [{"kind": "hp",
+                "from": {"family": "LR", "slope_db_oct": 24, "hz": 3500},
+                "to":   {"family": "LR", "slope_db_oct": 24, "hz": 2800}}]}
+```
+
+`from` must be what PC-Tool shows for that channel — read it from the UI, not
+inferred from the file (only one characteristic index is confirmed). Linkwitz-
+Riley and Butterworth are modelled; Bessel and Self-define are refused because
+their Helix normalization is unverified. Below the old corner the export is
+mostly stopband, so the lift is capped at 12 dB and reported as
+`crossover_lift_db`: above ~6 dB the prediction is a direction, not a number.
+Judge a crossover candidate at BOTH of each driver's junctions, with `pairs`
+for left/right balance and `positions` for 2-3 head positions — a better
+handover on one side only moves the image (`tradeoff`), and one that helps at
+one spot only is not an improvement. Lowering a high-pass raises that
+driver's excursion; check it (`hpf_excursion_risk`) before the user tries it at
+volume. A candidate the user likes is set by hand in PC-Tool, then re-measured
+and compared blind like any other change.
+
+## Bass is a level decision before it is an EQ decision
+
+The sub-to-front balance is one of the most audible properties of a car tune,
+and when the whole 25-80 Hz region sits above or below the anchored target it
+is a LEVEL question: bells fitted to a region-wide offset spend filters and
+phase on what one gain change does better. `analyze` and `propose` report
+`bass_balance` (median anchored deviation per bass band and a verdict) and say
+so in the notes. Output trims only cut, so a light low end is raised with the
+sub amplifier's gain (or by lowering every other channel equally) — after
+confirming at the sub/midbass junction that the deficit is not a cancellation.
+`propose`'s default fit band starts at 60 Hz; a deviation below it is now
+named in the notes instead of passing silently — fit the sub region on the sub
+measurement with `--fit-band` if it is shape, not level.
+
+When a sub/midbass change is probed, give the probe both front junctions it
+touches (sub–left woofer and sub–right woofer), the woofer–tweeter junctions
+the woofers also own, `pairs` for left/right, and `positions`: a change that
+improves the bass handover but moves the vocal image or helps at one head
+position only is not the improvement it looks like.
 
 ## Stopping is a valid, and often correct, outcome
 

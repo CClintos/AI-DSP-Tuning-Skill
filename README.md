@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.9.0`) so you can tell whether an already-installed copy is current — open
+`1.10.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -558,6 +558,23 @@ smaller than the measurement can resolve, or a region with low confidence,
 stays `inconclusive`. Edited and removed filters are predicted relative to the
 bank that was already measured, never as another cascade on top. `reverted_recommended` is treated as an instruction to
 reconsider that band, not a suggestion.
+
+### Improving a tune that already exists
+
+After the first session the measurement already includes your filters, so
+`pipeline.py refine` works on that bank directly — keep, relax, re-fit or
+remove each filter, and only add one where something real is left — rather than
+stacking new filters on top. Predictions are new minus old, so nothing is
+counted twice. Changes are then judged by ear the fair way: `ab-make` writes
+two blind copies (X and Y) with the louder one trimmed to match, and
+`ab-result` reveals which you preferred and whether that beats chance.
+
+Crossovers are still never written, but `probe` can now model a crossover
+change (Linkwitz-Riley or Butterworth, from the current setting to a
+candidate) at every junction, left/right pair and mic position it touches, so
+it can recommend one for you to set in PC-Tool. `analyze` and `propose` also
+report the low end's overall level against the target, because a bass region
+that is wholly too hot or too light is a sub-level decision, not a job for EQ.
 
 ### The restraint budget
 

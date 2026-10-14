@@ -18,6 +18,9 @@
 # python pipeline.py plan --source <input.afpx> --output <new.afpx> --out <plan.json>
 # python pipeline.py apply --plan <plan.json>
 # python pipeline.py propose --measurement <export.txt> | --positions A B C ... --target <file|default>
+# python pipeline.py refine --afpx <tune.afpx> --channels N [N...] --dsp-rate HZ --measurement|--positions ... --target ...
+# python pipeline.py ab-make --a <A.afpx> --b <B.afpx> --loudness-db X --out-dir <dir> [--confirm-trim]
+# python pipeline.py ab-result --key <dir>/.ab_key.json --choices X Y Y X ...
 # python pipeline.py session check --tune <file>  |  session save --tune <file> --answers <json>
 #   --measurement FILE           REW text export (system sum or primary trace)
 #   --positions FILE [FILE...]   2+ position sweeps -> spatial_consistency
@@ -42,6 +45,8 @@ import hashlib
 import json
 import math
 import os
+import random
+import shutil
 import sys
 import tempfile
 
@@ -689,6 +694,22 @@ def _load_session(args, freqs):
     }
 
 
+def _bass_note(balance):
+    """The low end as a whole off target is a level decision, said plainly."""
+    v, db = balance['verdict'], balance['sub_region_db']
+    if v == 'bass_heavy':
+        return ('25-80 Hz sits %+.1f dB above the anchored target as a whole: that is a sub/'
+                'midbass LEVEL question before it is an EQ one -- lower the sub channel '
+                '(output trim) or the sub amplifier gain, then re-measure before fitting '
+                'bells to what is left' % db)
+    if v == 'bass_light':
+        return ('25-80 Hz sits %+.1f dB below the anchored target as a whole: a LEVEL '
+                'question first. Trims here only cut, so raise the sub amplifier gain (or '
+                'lower every other channel equally) rather than boosting with bells -- and '
+                'confirm the deficit is not a sub/midbass cancellation (junction) first' % db)
+    return None
+
+
 def _smoothing_note(sess):
     """A boost-gate verdict on a smoothed export needs saying so."""
     hdr = sess.get('measurement_header') or {}
@@ -747,6 +768,10 @@ def analyze(args):
 
     report['tilt'] = {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                       'target': tunelib.measure_tilt(freqs, target_db)}
+    report['bass_balance'] = tunelib.bass_balance(freqs, dev_db, support)
+    note = _bass_note(report['bass_balance'])
+    if note:
+        notes.append(note)
     report['deviation_regions'] = _find_regions(freqs, np.where(support, dev_db, 0.0),
                                                 args.dev_flag_db)
 
@@ -978,6 +1003,21 @@ def propose(args):
     if not final:
         notes.append('no band earned its place: nothing here is both fixable and '
                      'worth a filter -- stopping is a valid outcome')
+    support = sess['support']
+    below = _find_regions(freqs, np.where(support & (freqs < band[0]), dev_db, 0.0), 2.0)
+    if below:
+        notes.append('deviation below the fit band (%s) was NOT considered -- for the sub '
+                     'region run propose again with --fit-band on the sub measurement, or treat '
+                     'it as a level question (bass_balance)'
+                     % ', '.join('%.0f-%.0f Hz %+.1f dB' % (r['f_lo'], r['f_hi'], r['peak_db'])
+                                 for r in below))
+    balance = tunelib.bass_balance(freqs, dev_db, support)
+    note = _bass_note(balance)
+    if note:
+        notes.append(note)
+    if final:
+        prediction['loudness_change_db'] = round(tunelib.loudness_change_db(
+            freqs[support], sess['basis_db'][support], (sess['basis_db'] + eq)[support]), 2)
 
     return {
         'meta': {'measurement_file': args.measurement,
@@ -992,6 +1032,7 @@ def propose(args):
         'tilt': {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                  'target': tunelib.measure_tilt(freqs, sess['target_db'])},
         'proposal': {'bands': kept, 'rejected': rejected},
+        'bass_balance': balance,
         'held_out_validation': None if held_out is None else {
             'verdict': held_out['verdict'], 'folds': held_out['folds'],
             'median_held_out_gain_db': held_out['median_held_out_gain_db'],
@@ -1133,43 +1174,337 @@ def probe(args):
         spec = json.load(fh)
     if not isinstance(spec, dict):
         raise ValueError('probe spec must be a JSON object')
-    unknown = set(spec) - {'dsp_sample_rate_hz', 'drivers', 'junctions', 'variants', 'notes'}
+    unknown = set(spec) - {'dsp_sample_rate_hz', 'drivers', 'positions', 'junctions',
+                           'pairs', 'variants', 'notes'}
     if unknown:
         raise ValueError('probe spec has unknown field(s): %s' % sorted(unknown))
+    if ('drivers' in spec) == ('positions' in spec):
+        raise ValueError('probe spec needs exactly one of "drivers" (one mic position) or '
+                         '"positions" (a list of driver maps, one per mic position)')
     fs = spec.get('dsp_sample_rate_hz')
     if not isinstance(fs, (int, float)) or fs <= 0:
         raise ValueError('dsp_sample_rate_hz is required -- the CONFIRMED internal rate, '
                          'never assumed (it decides how every filter is realized)')
     base_dir = os.path.dirname(os.path.abspath(args.spec))
     freqs = measure.common_grid(20.0, 20000.0, 96)
-    names, paths = [], []
-    for name, path in (spec.get('drivers') or {}).items():
-        names.append(name)
-        paths.append(path if os.path.isabs(path) else os.path.join(base_dir, path))
-    loaded, notes = _complex_exports(paths, freqs) if paths else ([], [])
-    by_name = dict(zip(names, loaded))
-    drivers = {name: item['complex'] for name, item in by_name.items()}
-    if len(drivers) < 2:
-        raise ValueError('probe needs at least two drivers on one time base')
-    junctions = []
-    for j in spec.get('junctions') or []:
-        junctions.append((j['lower'], j['upper'], float(j['crossover_hz'])))
-        involved = [by_name[n] for n in (j['lower'], j['upper']) if n in by_name]
-        fc = float(j['crossover_hz'])
-        refusal = measure.unwrap_problem(*involved, band=(fc / 2.0, fc * 2.0))
-        if refusal:
-            raise ValueError(refusal)
-    results = tunelib.probe_variants(freqs, drivers, junctions, spec.get('variants') or [],
-                                     fs=float(fs))
-    return {'meta': {'spec': args.spec, 'dsp_sample_rate_hz': fs,
-                     'drivers': sorted(drivers), 'junctions': [j[0] + '-' + j[1] for j in junctions],
-                     'convention': 'delay_ms positive = later; changes are added on top of '
-                                   'the tune the exports were measured through'},
-            'variants': results,
-            'notes': notes,
-            'predicted_not_measured': True,
-            'note': ('a probe ranks candidates; the chosen one still goes through a plan '
-                     '(per-edit confirmation) and a re-measure')}
+    position_maps = spec['positions'] if 'positions' in spec else [spec['drivers']]
+    if not isinstance(position_maps, list) or not position_maps:
+        raise ValueError('"positions" must be a non-empty list of driver maps')
+    junctions = [(j['lower'], j['upper'], float(j['crossover_hz']))
+                 for j in spec.get('junctions') or []]
+    pairs = [tuple(pair) for pair in spec.get('pairs') or []]
+    if any(len(pair) != 2 for pair in pairs):
+        raise ValueError('"pairs" entries are [left_driver, right_driver]')
+    variants = spec.get('variants') or []
+    notes, per_position, driver_names = [], [], None
+    for k, pmap in enumerate(position_maps):
+        names, paths = [], []
+        for name, path in (pmap or {}).items():
+            names.append(name)
+            paths.append(path if os.path.isabs(path) else os.path.join(base_dir, path))
+        loaded, pnotes = _complex_exports(paths, freqs) if paths else ([], [])
+        notes.extend(n for n in pnotes if n not in notes)
+        by_name = dict(zip(names, loaded))
+        drivers = {name: item['complex'] for name, item in by_name.items()}
+        if len(drivers) < 2:
+            raise ValueError('probe needs at least two drivers on one time base')
+        if driver_names is None:
+            driver_names = sorted(drivers)
+        elif sorted(drivers) != driver_names:
+            raise ValueError('position %d names different drivers than position 0' % k)
+        for lo, up, fc in junctions:
+            involved = [by_name[n] for n in (lo, up) if n in by_name]
+            refusal = measure.unwrap_problem(*involved, band=(fc / 2.0, fc * 2.0))
+            if refusal:
+                raise ValueError(refusal)
+        per_position.append(tunelib.probe_variants(freqs, drivers, junctions, variants,
+                                                   fs=float(fs), pairs=pairs))
+    if any('crossover' in change for v in variants for change in v.get('changes', {}).values()):
+        notes.append('crossover changes are ADVISORY: this skill never writes crossovers. A '
+                     'candidate you like is set by hand in PC-Tool, then re-measured; '
+                     'crossover_lift_db above ~6 dB means the prediction leans on stopband '
+                     'data below the measured corner -- treat it as a direction, not a number. '
+                     'Lowering a high-pass raises that driver\'s excursion: check it before '
+                     'trying it at volume (hpf_excursion_risk)')
+    report = {'meta': {'spec': args.spec, 'dsp_sample_rate_hz': fs,
+                       'drivers': driver_names, 'positions': len(per_position),
+                       'junctions': [j[0] + '-' + j[1] for j in junctions],
+                       'pairs': ['%s/%s' % pair for pair in pairs],
+                       'convention': 'delay_ms positive = later; changes are added on top of '
+                                     'the tune the exports were measured through'},
+              'variants': per_position[0],
+              'notes': notes,
+              'predicted_not_measured': True,
+              'note': ('a probe ranks candidates; the chosen one still goes through a plan '
+                       '(per-edit confirmation) and a re-measure')}
+    if len(per_position) > 1:
+        report['positions'] = per_position
+        report['robust'] = tunelib.aggregate_probe_positions(per_position)
+    elif len(per_position) == 1 and variants:
+        notes.append('one mic position only: a handover change can help here and hurt a few '
+                     'centimetres away -- give "positions" (2-3 head positions) before '
+                     'treating a candidate as an improvement')
+    return report
+
+
+REFINE_END_SLOTS = ('25', '32', '20000')
+
+
+def _peq_bank(summary):
+    """[(slot_index, F, Q, G)] of the channel's active, un-bypassed PEQ bells."""
+    return [(sl['slot_index'], sl['F'], sl['Q'], sl['G']) for sl in summary['slots']
+            if sl['type_code'] == '17' and not sl['bypassed'] and sl['G']]
+
+
+def refine(args):
+    """Refine the PEQ bank the measurement was taken through (writes nothing).
+
+    The current tune is the starting point: every filter is kept, relaxed,
+    re-fitted in place or removed, and a filter is added only where free
+    slots and a real residual both exist. Predictions are dev +
+    cascade(new) - cascade(old), so a measured filter is never counted twice.
+    Several channels can be refined together only when they carry the SAME
+    bank -- a shared measurement cannot justify unequal edits."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    notes = []
+    if not args.dsp_rate or args.dsp_rate <= 0:
+        raise ValueError('--dsp-rate is required: the CONFIRMED internal rate, never assumed')
+    fs = float(args.dsp_rate)
+    sess = _load_session(args, freqs)
+    notes.extend(sess['notes'])
+    xml = afpx.decode(args.afpx)
+    chans = afpx.channels(xml)
+    for c in args.channels:
+        if not 0 <= c < len(chans):
+            raise ValueError('channel %d does not exist (0..%d)' % (c, len(chans) - 1))
+    banks = {c: _peq_bank(chans[c]) for c in args.channels}
+    ref = sorted((F, Q, G) for _s, F, Q, G in banks[args.channels[0]])
+    for c in args.channels[1:]:
+        if sorted((F, Q, G) for _s, F, Q, G in banks[c]) != ref:
+            raise ValueError('channels %d and %d carry different PEQ banks -- one shared '
+                             'measurement cannot justify unequal edits; refine each channel '
+                             'from its own solo measurement' % (args.channels[0], c))
+    order = {c: sorted(banks[c], key=lambda b: (b[1], b[2], b[3])) for c in args.channels}
+    old_bank = [(F, Q, G) for _s, F, Q, G in order[args.channels[0]]]
+    free = {c: [sl['slot_index'] for sl in chans[c]['slots']
+                if sl['free'] and sl['dF'] not in REFINE_END_SLOTS] for c in args.channels}
+    retained = sorted({'%s %.0f Hz' % (sl['type'], sl['F'] or 0) for c in args.channels
+                       for sl in chans[c]['slots'] if sl['active']
+                       and sl['type_code'] not in ('17',) and sl['type_code'] not in afpx.CROSSOVER_TYPES})
+    if retained:
+        notes.append('non-PEQ filters are kept as they are and not re-evaluated: %s'
+                     % ', '.join(retained))
+
+    band = tuple(args.fit_band) if args.fit_band else PROPOSE_FIT_BAND
+    covered = freqs[sess['support']]
+    hp = max((chans[c]['hp_hz'] or 0.0) for c in args.channels)
+    lp = min((chans[c]['lp_hz'] or 1e9) for c in args.channels)
+    band = (max(band[0], float(covered[0]), hp * 2 ** (1 / 3.0)),
+            min(band[1], float(covered[-1]), lp / 2 ** (1 / 3.0)))
+    if band[1] <= band[0]:
+        raise ValueError('no frequency range is inside both the measurement and the channel '
+                         'passband (kept 1/3 octave inside the crossovers)')
+
+    if sess['aligned'] is not None:
+        devs = list(sess['aligned'] - (sess['target_db'] + sess['anchor']))
+    else:
+        devs = [sess['dev_db']]
+        notes.append('single position: refining against one mic spot -- capture 3+ positions '
+                     'before trusting a re-fit or an added band')
+
+    boost_check = None
+    if sess['measurement_phase'] is not None:
+        try:
+            _trust, fields = _phase_fields(args, freqs, sess)
+
+            def boost_check(F, Q, G):
+                rows, _summary = tunelib.gate_boost_bands(fields, [(F, Q, G)])
+                return rows[0]['verdict']
+        except ValueError as exc:
+            notes.append('boost gate unavailable: %s' % exc)
+
+    result = tunelib.refine_bank(
+        freqs, devs, old_bank, band, mask=sess['mask'], conf=sess['conf'], fs=fs,
+        max_edits=args.max_edits, free_slots=min(len(v) for v in free.values()),
+        boost_check=boost_check)
+
+    edits, plan_edits = [], []
+    next_free = {c: list(free[c]) for c in args.channels}
+    for k, e in enumerate(result['edits']):
+        slots = {}
+        for c in args.channels:
+            slot = next_free[c].pop(0) if e['index'] is None else order[c][e['index']][0]
+            slots[c] = slot
+            edit = {'id': 'refine-%d-ch%d-s%d' % (k + 1, c, slot), 'kind': 'filter_slot',
+                    'channel': c, 'slot': slot}
+            if e['action'] == 'remove':
+                edit['G'] = 0.0
+            else:
+                F, Q, G = e['new']
+                edit.update({'F': F, 'Q': Q, 'G': G})
+                if e['action'] == 'add':
+                    edit['type_code'] = '17'
+            plan_edits.append(edit)
+        row = dict(e)
+        row['slots'] = {str(c): s for c, s in slots.items()}
+        if e['boost_gate'] == 'UNCHECKED':
+            row['caution'] = 'boost not phase-checked: no phase in --measurement'
+        edits.append(row)
+
+    support = sess['support']
+    old_db = tunelib.cascade_db(freqs, old_bank, fs=fs)
+    transfer = tunelib.cascade_db(freqs, [tuple(b) for b in result['bank']], fs=fs) - old_db
+    comparison = None
+    if edits:
+        loud = tunelib.loudness_change_db(freqs[support], sess['basis_db'][support],
+                                          (sess['basis_db'] + transfer)[support])
+        comparison = {'loudness_change_db': round(loud, 2),
+                      'louder_version': 'refined' if loud > 0 else 'current',
+                      'match_trim_db': round(-abs(loud), 2),
+                      'how': ('compare by ear only at matched loudness: pipeline.py ab-make '
+                              '--loudness-db %.2f applies this trim to the louder copy' % loud)}
+    else:
+        notes.append('the current bank already earns its place -- no edit beats it at the '
+                     'measured positions. Leaving it alone is the result')
+    return {
+        'meta': {'afpx': args.afpx, 'channels': args.channels, 'dsp_sample_rate_hz': fs,
+                 'judged_band_hz': [round(band[0], 1), round(band[1], 1)],
+                 'positions_used': len(sess['positions_db']) or 1,
+                 'deviation_source': sess['deviation_source']},
+        'current_bank': [{'F': F, 'Q': Q, 'G': G,
+                          'slots': {str(c): order[c][i][0] for c in args.channels}}
+                         for i, (F, Q, G) in enumerate(old_bank)],
+        'baseline': result['baseline'], 'refined': result['final'],
+        'edits': edits, 'plan_edits': plan_edits,
+        'comparison': comparison,
+        'verify_with': {'bands': result['bank'], 'old_bands': result['old_bank'],
+                        'note': 'pass both to predicted_vs_measured after re-measuring'},
+        'notes': notes,
+        'predicted_not_measured': True,
+        'next_step': ('present each edit (what, slot, why, predicted change), copy only the '
+                      'confirmed ones into a plan with confirmations, apply, then compare the '
+                      'two tunes level-matched by ear (ab-make) and re-measure'),
+    }
+
+
+AB_LABELS = ('X', 'Y')
+
+
+def ab_make(args):
+    """Two blind, loudness-matched copies of tunes A and B for a listening test.
+
+    The louder one is trimmed by |loudness_db| on every channel through the
+    normal verified plan/apply path (output_trim, attenuation only); the
+    other is copied byte-for-byte. Which file is which is written only to the
+    key file, so the listener can load X and Y without knowing."""
+    a, b = os.path.abspath(args.a), os.path.abspath(args.b)
+    for path in (a, b):
+        if not os.path.isfile(path):
+            raise ValueError('not a file: %s' % path)
+    loud = float(args.loudness_db)
+    if abs(loud) > 6.0:
+        raise ValueError('|loudness_db| %.2f exceeds the 6 dB trim floor -- the two versions '
+                         'differ too much in level to match by trimming' % abs(loud))
+    trim = -abs(loud) if abs(loud) >= 0.1 else 0.0
+    louder = b if loud > 0 else a
+    if trim and not args.confirm_trim:
+        raise ValueError('matching needs a %.2f dB output trim on every channel of the louder '
+                         'copy (comparison copy only; the originals are untouched). Show the '
+                         'user that number and re-run with --confirm-trim once they agree' % trim)
+    out_dir = os.path.abspath(args.out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    key_path = os.path.join(out_dir, '.ab_key.json')
+    targets = {lab: os.path.join(out_dir, '%s.afpx' % lab) for lab in AB_LABELS}
+    for path in list(targets.values()) + [key_path]:
+        if os.path.exists(path):
+            raise ValueError('%s already exists -- use a fresh --out-dir' % path)
+    rng = random.Random(args.seed) if args.seed is not None else random.SystemRandom()
+    sources = [a, b]
+    rng.shuffle(sources)
+    key = {'version': 1, 'loudness_db': loud, 'trim_db': trim, 'labels': {}}
+    for lab, src in zip(AB_LABELS, sources):
+        dst = targets[lab]
+        applied = 0.0
+        if src == louder and trim:
+            xml = afpx.decode(src)
+            chans = sorted(afpx.read_output_levels(xml))
+            if not chans:
+                raise ValueError('%s has no channel output levels to trim' % src)
+            with tempfile.TemporaryDirectory() as tmp:
+                plan = create_plan(src, dst)
+                plan['edits'] = [{'id': 'ab-match-ch%d' % c, 'kind': 'output_trim',
+                                  'channel': c, 'trim_db': trim} for c in chans]
+                plan['confirmations'] = {e['id']: True for e in plan['edits']}
+                plan_path = os.path.join(tmp, 'ab_plan.json')
+                with open(plan_path, 'w', encoding='utf-8') as fh:
+                    json.dump(plan, fh)
+                apply_plan(plan_path)
+            applied = trim
+        else:
+            with open(src, 'rb') as fh_in, open(dst, 'xb') as fh_out:
+                shutil.copyfileobj(fh_in, fh_out)
+        key['labels'][lab] = {'source': src, 'is': 'A' if src == a else 'B',
+                              'trim_db': applied, 'sha256': _sha256_file(dst)}
+    with open(key_path, 'x', encoding='utf-8') as fh:
+        json.dump(key, fh, indent=2)
+    return {
+        'files': targets,
+        'key': key_path,
+        'level_matched_by_db': trim,
+        'protocol': [
+            'Do not open %s until the test is done.' % os.path.basename(key_path),
+            'Same seat, same normal listening volume, same 2-3 short clips you know well '
+            '(a centred vocal, something with bass and kick, something bright).',
+            'Load X and Y in the order X, Y, Y, X (then repeat), about 20 seconds each; if '
+            'someone else can load them for you, even better.',
+            'For each pair write which you prefer (X, Y, or same), then run pipeline.py '
+            'ab-result --key %s --choices ...' % key_path,
+            'At least 6 choices: fewer cannot tell a real preference from chance.',
+        ],
+    }
+
+
+def _binomial_tail(k, n):
+    """P(at least k of n) for a fair coin."""
+    return sum(math.comb(n, i) for i in range(k, n + 1)) / 2.0 ** n if n else 1.0
+
+
+def ab_result(args):
+    """Score a blind A/B, reveal which label was which, and log it."""
+    with open(args.key, encoding='utf-8') as fh:
+        key = json.load(fh)
+    choices = [c.strip().upper() for c in args.choices]
+    bad = [c for c in choices if c not in AB_LABELS + ('SAME',)]
+    if bad:
+        raise ValueError('choices must be X, Y or same; got %s' % bad)
+    counts = {lab: choices.count(lab) for lab in AB_LABELS}
+    n = counts['X'] + counts['Y']
+    top = max(AB_LABELS, key=lambda lab: counts[lab])
+    p = _binomial_tail(counts[top], n) if n else 1.0
+    winner = key['labels'][top]['is'] if n and counts['X'] != counts['Y'] else None
+    if winner and p < 0.1:
+        verdict = '%s preferred (%d of %d, chance would do this %.0f%% of the time)' % (
+            winner, counts[top], n, 100 * p)
+    else:
+        verdict = 'no reliable preference (%d of %d)' % (counts[top], n)
+    entry = {'choices': choices, 'counts': counts, 'p_chance': round(p, 3),
+             'verdict': verdict, 'preferred': winner if p < 0.1 else None,
+             'reveal': {lab: key['labels'][lab]['is'] for lab in AB_LABELS},
+             'sources': {key['labels'][lab]['is']: key['labels'][lab]['source']
+                         for lab in AB_LABELS},
+             'loudness_matched_db': key.get('trim_db'), 'note': args.note}
+    log_path = os.path.join(os.path.dirname(os.path.abspath(args.key)), 'ab_log.json')
+    log = []
+    if os.path.exists(log_path):
+        with open(log_path, encoding='utf-8') as fh:
+            log = json.load(fh)
+    log.append(entry)
+    with open(log_path, 'w', encoding='utf-8') as fh:
+        json.dump(log, fh, indent=2)
+    entry['log'] = log_path
+    if n < 6:
+        entry['caution'] = 'fewer than 6 decided choices -- treat any preference as provisional'
+    return entry
 
 
 def junction(args):
@@ -1465,6 +1800,42 @@ def main():
                     help='the capture was time-gated: never fit below its trust floor')
     pr.add_argument('--out')
 
+    rf = sub.add_parser('refine',
+                        help='keep / relax / re-fit / remove / add on the existing PEQ bank '
+                             '(writes nothing)')
+    rf.add_argument('--afpx', required=True, help='the tune the measurement was taken through')
+    rf.add_argument('--channels', nargs='+', type=int, required=True,
+                    help='channel index(es) the measurement covers; several only if they '
+                         'carry the same PEQ bank')
+    rf.add_argument('--dsp-rate', type=float, required=True,
+                    help='the CONFIRMED DSP sample rate in Hz (P SIX DSP MK2: 96000)')
+    rf.add_argument('--measurement')
+    rf.add_argument('--positions', nargs='+')
+    rf.add_argument('--target', required=True, help='target curve file, or "default"')
+    rf.add_argument('--voice', nargs='+')
+    rf.add_argument('--fit-band', nargs=2, type=float, metavar=('LO_HZ', 'HI_HZ'))
+    rf.add_argument('--trust-band', nargs=2, type=float, metavar=('LO_HZ', 'HI_HZ'))
+    rf.add_argument('--gate-ms', type=float)
+    rf.add_argument('--max-edits', type=int, default=4)
+    rf.add_argument('--out')
+
+    abm = sub.add_parser('ab-make', help='blind, loudness-matched copies of two tunes')
+    abm.add_argument('--a', required=True, help='current tune')
+    abm.add_argument('--b', required=True, help='candidate tune')
+    abm.add_argument('--loudness-db', required=True, type=float,
+                     help='B relative to A (refine/propose report it); positive = B louder')
+    abm.add_argument('--out-dir', required=True)
+    abm.add_argument('--confirm-trim', action='store_true',
+                     help='the user agreed to the matching trim on the comparison copy')
+    abm.add_argument('--seed', type=int, help='fixed shuffle, for tests only')
+    abm.add_argument('--out')
+
+    abr = sub.add_parser('ab-result', help='score a blind A/B and reveal which was which')
+    abr.add_argument('--key', required=True)
+    abr.add_argument('--choices', nargs='+', required=True, help='X, Y or same per pair')
+    abr.add_argument('--note')
+    abr.add_argument('--out')
+
     sa = sub.add_parser('source-audit',
                         help='is the signal entering the DSP level-independent?')
     sa.add_argument('--at', nargs='+', required=True, metavar='PATH=DB',
@@ -1528,9 +1899,12 @@ def main():
             print(text)
     elif args.cmd == 'apply':
         print(json.dumps(apply_plan(args.plan), indent=2))
-    elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe'):
+    elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
+                      'refine', 'ab-make', 'ab-result'):
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
-                  'imaging': imaging, 'junction': junction, 'probe': probe}[args.cmd](args)
+                  'imaging': imaging, 'junction': junction, 'probe': probe,
+                  'refine': refine, 'ab-make': ab_make,
+                  'ab-result': ab_result}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
             with open(args.out, 'w', encoding='utf-8') as fh:

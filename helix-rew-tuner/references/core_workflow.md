@@ -122,7 +122,14 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   `pipeline.py probe --spec probe.json` evaluates candidate changes (delay,
   polarity, Phase angle, all-pass, PEQ) at every junction they touch and
   returns a verdict per candidate — ask it instead of estimating a change's
-  effect (§A channel hands over twice,). With 3+ positions, `propose` validates
+  effect (§A channel hands over twice,). Give it `pairs` (left/right drivers)
+  and `positions` (2-3 head positions) and it only calls a change a
+  `candidate` when no junction, no L/R balance and no position gets worse; it
+  also models crossover what-ifs, advisory only (§Crossover what-ifs,).
+  `pipeline.py refine` re-works the PEQ bank a tuned car was measured through
+  instead of stacking new bands (§Refine the tune you have,), and `pipeline.py
+  ab-make` / `ab-result` run a blind, loudness-matched listening comparison
+  (§Judge by ear only at matched loudness,). With 3+ positions, `propose` validates
   itself leave-one-position-out: each band carries APPLY / REVIEW / DO NOT
   APPLY, and DO NOT APPLY bands land in `rejected`. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
   and review `references/tune_plan_schema.md`, then populate the plan's
@@ -377,7 +384,9 @@ For each region, decide the *type* of problem before proposing a fix
 - **Measurement invalid / low confidence** → request a re-measure.
 
 Use the `interference_audit` (power-sum vs measured) to tell a real magnitude dip
-from destructive summation. Use `tune_scorecard` for every before/after comparison
+from destructive summation. Read `bass_balance` in the analyze report first: a
+whole 25-80 Hz region off target is a sub/midbass LEVEL decision, not a set of
+bells (§Bass is a level decision,). Use `tune_scorecard` for every before/after comparison
 so the math is identical each time.
 
 If the user reports an imaging problem — vocals off-centre, a stage that won't
@@ -430,6 +439,11 @@ the alignment (§Tune order,). Any phase-domain change to a channel with two
 neighbours must be checked at BOTH of its junctions (§A channel hands over
 twice,).
 
+- **If the measurement was taken through a tune that already has PEQ in it
+  (every session after the first), start from `python scripts/pipeline.py
+  refine` instead** — it keeps, relaxes, re-fits or removes the existing
+  filters and only adds where a residual is real, predicting new minus old
+  (§Refine the tune you have,). Use `propose` for a channel with no PEQ yet.
 - **Start from `python scripts/pipeline.py propose`** with the same inputs you
   gave `analyze` (`--measurement` and/or `--positions`, `--target`, `--voice`,
   optionally `--fit-band LO HI` per channel and `--max-bands N`). It runs the
@@ -500,7 +514,9 @@ twice,).
   intended to change. Report that verification to the user, as the AFPX
   manifest would.
 - **Never write or change crossovers, even if the user asks.** Preserve them
-  unconditionally. Preserve delays unless the user explicitly confirms the
+  unconditionally. You may RECOMMEND one, modelled with `probe` at every
+  junction, L/R pair and position it touches, for the user to set by hand in
+  PC-Tool (§Crossover what-ifs,). Preserve delays unless the user explicitly confirms the
   specific delay write under the conditions below. Apply enforces source-bound
   whole-file crossover preservation and exclusive output creation, then decodes
   and verifies the emitted file.
@@ -534,7 +550,13 @@ State plainly that predictions are from magnitude data; phase edits (APF, delay)
 and the final result must be confirmed by re-measuring with the new tune loaded.
 Give the user a short, specific re-measure + listening checklist naming exactly
 which claims from step 4's confidence table are still unproven — that's what the
-re-measure should target.
+re-measure should target. For the listening half, offer a blind,
+loudness-matched comparison of the old and new tune (`pipeline.py ab-make`
+with the reported loudness change, then `ab-result`) — an unmatched A/B
+favours whichever is louder, and most corrections are cuts (§Judge by ear only
+at matched loudness,). Keep a change the measurement supports and the blind
+listening does not reject; report a blind preference against the measurement
+as a voicing question.
 
 ### 7. When a re-measure comes back — close the loop, don't just eyeball it
 
