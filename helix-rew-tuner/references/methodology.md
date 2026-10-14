@@ -224,8 +224,8 @@ fix. A few things to get right before trusting a measurement:
   deep bass are directly in tension. If a gated measurement's bass region
   looks reported below that floor, don't use it — pair the warning
   (`tunelib.gating_warning(gate_ms)` gives the ready-to-say sentence) with the
-  actual remedy: an ungated capture, or `complex_vector_average` across
-  several mic positions (see below) for that range instead.
+  actual remedy: an ungated capture, or a registered `complex_vector_average`
+  across several mic positions (see below) for that range instead.
 
 ## Beyond magnitude — the decay (time-domain) and distortion axes
 
@@ -893,10 +893,15 @@ magnitude trace looks.
 only takes a few seconds — don't move the mic mid-sweep. Instead take several
 (3–7) discrete sweeps at slightly different fixed positions spanning head-width,
 then average the **complex** spectra with `tunelib.complex_vector_average`, not a
-magnitude-only average. Vector averaging cancels position-specific comb-filtering
-(which differs per position) while preserving the real driver phase (which is
-common to all of them); a magnitude-only average would just bake the comb-
-filtering artifacts into the averaged level instead of cancelling them.
+magnitude-only average — **registered**: pass `freqs` (it estimates each
+position's arrival against the first) or `delays_s` (e.g. REW's IR start times
+on one timing reference). Moving the mic changes the flight time, so the
+positions' phases only line up after that delay is removed; an unregistered
+mean of one flat driver measured 5 cm apart invents a −9.5 dB dip at 1.67 kHz
+and −17 dB at 2.5 kHz. Once registered, vector averaging cancels
+position-specific comb-filtering while keeping what the positions share, and
+the returned `coherence` shows where they still disagree. For tonal/EQ
+decisions average magnitudes instead (`spatial_consistency`, MMM).
 
 **Why this is trustworthy: it's the same discipline pro alignment tools require,
 computed a different way because our data source is different.** Rational

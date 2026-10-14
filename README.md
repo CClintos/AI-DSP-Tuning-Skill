@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.10.0`) so you can tell whether an already-installed copy is current — open
+`1.10.1`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -318,6 +318,7 @@ tests/
 ├── test_probe.py                    what-if probe engine
 ├── test_propose.py                  deterministic EQ proposal and position averaging
 ├── test_rew_api.py                  read-only REW HTTP API bridge (stubbed)
+├── test_registered_average_and_excursion.py  registered multi-position averaging; Fs-only excursion never clears
 ├── test_session_file.py              intake session sidecar check/save
 ├── test_source_and_imaging.py        source-audit and frequency-dependent imaging tests
 └── test_tunelib_regressions.py       acoustic-analysis and optimizer regressions

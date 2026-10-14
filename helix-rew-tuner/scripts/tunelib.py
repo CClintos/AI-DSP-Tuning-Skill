@@ -2626,11 +2626,16 @@ def hpf_excursion_risk(hpf_hz, slope_db_oct, driver_fs_hz, safe_ratio=1.1):
         risk = ratio < safe_ratio
     else:
         risk = ratio < 1.0
+    # Fs-only data may raise a caution but can never clear a driver: real
+    # excursion depends on Xmax, enclosure, drive voltage and listening level.
     return {'hpf_hz': hpf_hz, 'driver_fs_hz': driver_fs_hz, 'slope_db_oct': slope_db_oct,
-            'ratio': round(ratio, 2), 'excursion_risk': bool(risk),
+            'ratio': round(ratio, 2), 'excursion_risk': True if risk else None,
+            'cleared': False,
             'note': ('HPF is close to/below Fs at a steep slope -- confirm the driver can '
                      'handle unrestrained excursion near resonance before using this crossover'
-                     if risk else 'HPF sits comfortably above Fs for this slope')}
+                     if risk else
+                     'no Fs-based caution -- NOT a safety clearance; that needs Xmax, '
+                     'enclosure, drive level and a check at listening volume')}
 
 
 
@@ -2729,14 +2734,72 @@ def phase_linearity_residual(freqs, phase_deg, band):
 # specific comb-filtering (which differs per position) while preserving the
 # real driver phase (which is common to all of them) -- a magnitude-only
 # average would keep the comb-filtering artifacts baked into the average level.
-def complex_vector_average(complex_traces):
-    """complex_traces: list of complex ndarrays on the SAME frequency grid (one
-    per mic position). Returns the vector-averaged complex response -- take
-    20*log10(abs(.)) for magnitude, angle(.) for phase."""
+def complex_vector_average(complex_traces, freqs=None, delays_s=None, register_band=None,
+                           allow_unregistered=False, return_details=False):
+    """Vector-average complex responses taken at several mic positions.
+
+    Moving the mic changes the arrival time, so the positions' phases do NOT
+    line up on their own: three captures of one flat driver 5 cm apart
+    (0.15 ms of path each) average to -9.5 dB at 1.67 kHz and -17 dB at
+    2.5 kHz -- notches the averaging itself invents, right where tweeter
+    timing decisions are made. Each trace is therefore REGISTERED to the first
+    trace's arrival before averaging:
+      * delays_s: each trace's arrival relative to the first (seconds), when
+        known (e.g. REW's IR start times on one timing reference); or
+      * freqs: estimate each lag against the first trace (estimate_delay_xcorr
+        over `register_band`, default 200 Hz-8 kHz within the axis, then a
+        weighted phase-slope refinement).
+    The result carries the FIRST trace's arrival, so it stays on that
+    position's time base. What survives is what the positions share once
+    their flight times are removed; position-specific comb filtering still
+    averages down. return_details adds the per-trace delays and a per-bin
+    `coherence` (|mean| / mean|.|, 1 = the positions agree in phase).
+
+    allow_unregistered=True restores the raw mean, for traces that genuinely
+    share one arrival (same mic, repeated captures). For TONAL decisions,
+    average magnitudes (spatial_consistency, MMM) -- not this."""
     if len(complex_traces) < 2:
         raise ValueError('need >=2 position traces to average')
-    stack = np.stack(complex_traces, axis=0)
-    return np.mean(stack, axis=0)
+    stack = np.stack([np.asarray(t, dtype=complex) for t in complex_traces], axis=0)
+    if delays_s is None and freqs is None:
+        if not allow_unregistered:
+            raise ValueError('register the positions first: pass freqs (to estimate each '
+                             'arrival) or delays_s -- an unregistered mean invents notches '
+                             '(allow_unregistered=True only for repeated same-position captures)')
+        delays = np.zeros(len(stack))
+    elif delays_s is not None:
+        delays = np.asarray(delays_s, dtype=float)
+        if delays.shape != (len(stack),):
+            raise ValueError('delays_s needs one value per trace')
+        delays = delays - delays[0]
+    else:
+        f = np.asarray(freqs, dtype=float)
+        lo, hi = register_band or (max(200.0, f[0]), min(8000.0, f[-1]))
+        sel = (f >= lo) & (f <= hi)
+        delays = np.zeros(len(stack))
+        for k in range(1, len(stack)):
+            xc = estimate_delay_xcorr(f, stack[0], stack[k], (lo, hi))
+            d = -xc['delay_ms'] / 1000.0     # how much later trace k arrives
+            for _ in range(2):               # refine on the residual phase slope
+                cross = stack[0][sel] * np.conj(stack[k][sel] * np.exp(2j * np.pi * f[sel] * d))
+                w = np.abs(cross)
+                ph = np.unwrap(np.angle(cross))
+                A = np.vstack([2 * np.pi * f[sel], np.ones(np.count_nonzero(sel))]).T
+                sw = np.sqrt(w / max(np.max(w), 1e-30))
+                slope = np.linalg.lstsq(A * sw[:, None], ph * sw, rcond=None)[0][0]
+                d += slope
+            delays[k] = d
+    f_axis = None if freqs is None else np.asarray(freqs, dtype=float)
+    if np.any(delays):
+        if f_axis is None:
+            raise ValueError('delays_s needs freqs to apply them')
+        stack = stack * np.exp(2j * np.pi * f_axis[None, :] * delays[:, None])
+    avg = np.mean(stack, axis=0)
+    if not return_details:
+        return avg
+    coherence = np.abs(avg) / np.maximum(np.mean(np.abs(stack), axis=0), 1e-30)
+    return avg, {'delays_ms': [round(float(d * 1000.0), 4) for d in delays],
+                 'coherence': coherence}
 
 # --------------------------------------------------------------------------
 # SPATIAL CONSISTENCY MASK -- the core Smaart discipline this skill was
@@ -4724,8 +4787,9 @@ if __name__ == '__main__':
     gentle_risky = hpf_excursion_risk(20.0, 12.0, driver_fs_hz=25.0)
     print('TEST18 excursion check: 80Hz/24dB on Fs=32Hz -> risk=%s | 35Hz/24dB on Fs=32Hz -> risk=%s'
           % (safe['excursion_risk'], risky['excursion_risk']))
-    assert not safe['excursion_risk'] and risky['excursion_risk']
-    assert not gentle_ok['excursion_risk'] and gentle_risky['excursion_risk']
+    assert safe['excursion_risk'] is None and risky['excursion_risk']
+    assert gentle_ok['excursion_risk'] is None and gentle_risky['excursion_risk']
+    assert not safe['cleared']
 
 
     # ---- TEST19: solo-level calibration ---------------------------------------
@@ -4755,7 +4819,7 @@ if __name__ == '__main__':
     comb1 = base * (1 + 0.3 * np.exp(1j * freqs / 200.0))   # position-specific comb
     comb2 = base * (1 + 0.3 * np.exp(1j * (freqs / 200.0 + 2.1)))
     comb3 = base * (1 + 0.3 * np.exp(1j * (freqs / 200.0 + 4.2)))
-    avg = complex_vector_average([comb1, comb2, comb3])
+    avg = complex_vector_average([comb1, comb2, comb3], allow_unregistered=True)
     print('TEST21 vector avg: mean |avg-base| = %.3f (expect << 0.3, combing cancels)'
           % np.mean(np.abs(avg - base)))
     assert np.mean(np.abs(avg - base)) < 0.15
