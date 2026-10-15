@@ -456,7 +456,8 @@ def create_plan(source_path, output_path):
 # to the tune as <tune>.tuner_session.json, bound to the tune's SHA-256 so a
 # PC-Tool edit between sessions is detected instead of trusted.
 SESSION_FIELDS = ('dsp_model', 'sample_rate_hz', 'channel_map', 'listening_seat',
-                  'drive_side', 'rear_channel_routing', 'target_curve_path', 'voicing')
+                  'drive_side', 'rear_channel_routing', 'target_curve_path', 'voicing',
+                  'guards')
 # Answers read or inferred from the tune file's own bytes; stale once it changes.
 SESSION_FILE_DERIVED = ('dsp_model', 'sample_rate_hz', 'channel_map')
 
@@ -511,6 +512,8 @@ def session_save(tune_path, answers):
     if unknown:
         raise ValueError('unknown session field(s): %s (allowed: %s)'
                          % (unknown, ', '.join(SESSION_FIELDS)))
+    if answers.get('guards') is not None:
+        _validate_guards(answers['guards'])
     record = {k: answers.get(k) for k in SESSION_FIELDS}
     record['afpx_sha256'] = _sha256_file(tune_path)
     path = session_path(tune_path)
@@ -524,6 +527,92 @@ def session_save(tune_path, answers):
         if os.path.exists(tmp):
             os.unlink(tmp)
     return path
+
+
+# Vehicle guards: physical facts about THIS car that no single measurement
+# shows, learned once and enforced on every later proposal. Stored in the
+# session sidecar because they belong to the car, not to one tune file -- they
+# stay valid when the tune changes. Example from a real car: boosting 380-540
+# Hz on the mids fills a seated-listener body-reflection null that only an
+# MMM shows (a fixed mic reads it as a fixable dip), and the left tweeter has
+# two physical notches that EQ cannot raise.
+GUARD_TOLERANCE_DB = 0.25        # a boost's skirt may touch a zone by this much
+
+
+def _validate_guards(guards):
+    if not isinstance(guards, dict):
+        raise ValueError('guards must be a JSON object: {"no_boost": [...], "max_boost_q": N}')
+    unknown = sorted(set(guards) - {'no_boost', 'max_boost_q'})
+    if unknown:
+        raise ValueError('unknown guard key(s): %s (allowed: no_boost, max_boost_q)' % unknown)
+    q = guards.get('max_boost_q')
+    if q is not None and not (isinstance(q, (int, float)) and q > 0):
+        raise ValueError('max_boost_q must be a positive number')
+    zones = guards.get('no_boost') or []
+    if not isinstance(zones, list):
+        raise ValueError('no_boost must be a list of zones')
+    for z in zones:
+        if not isinstance(z, dict) or set(z) - {'lo_hz', 'hi_hz', 'channels', 'reason'}:
+            raise ValueError('a no_boost zone is {lo_hz, hi_hz, channels, reason}: %r' % (z,))
+        lo, hi = z.get('lo_hz'), z.get('hi_hz')
+        if not (isinstance(lo, (int, float)) and isinstance(hi, (int, float)) and 0 < lo < hi):
+            raise ValueError('no_boost zone needs 0 < lo_hz < hi_hz: %r' % (z,))
+        ch = z.get('channels')
+        if ch is not None and not (isinstance(ch, list) and ch
+                                   and all(isinstance(c, int) and c >= 0 for c in ch)):
+            raise ValueError('no_boost channels must be null (every channel) or a list of '
+                             'channel indexes: %r' % (z,))
+        if not isinstance(z.get('reason'), str) or not z['reason'].strip():
+            raise ValueError('every no_boost zone needs a reason -- the physical fact it '
+                             'protects: %r' % (z,))
+    return guards
+
+
+def load_guards(tune_path, notes):
+    """The sidecar's vehicle guards for `tune_path`, or None."""
+    path = session_path(tune_path)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding='utf-8') as fh:
+        stored = json.load(fh)
+    guards = stored.get('guards') if isinstance(stored, dict) else None
+    if not guards:
+        return None
+    _validate_guards(guards)
+    if stored.get('afpx_sha256') != _sha256_file(tune_path):
+        notes.append('vehicle guards applied from a session file recorded for an earlier '
+                     'version of this tune: they describe the car, not the file, so they '
+                     'still hold -- re-confirm them if the car changed')
+    return guards
+
+
+def guard_check(guards, channels=None, freqs=None):
+    """(F, Q, G) -> None, or the reason a BOOST breaks a vehicle guard.
+
+    A zone applies when its channels are null, the caller names no channels,
+    or the two share one. Cuts are never blocked: relaxing or deepening a cut
+    cannot fill a null."""
+    if not guards:
+        return None
+    f = measure.common_grid(20.0, 20000.0, 96) if freqs is None else np.asarray(freqs)
+    qmax = guards.get('max_boost_q')
+    zones = [z for z in guards.get('no_boost') or []
+             if z.get('channels') is None or channels is None
+             or set(z['channels']) & set(channels)]
+
+    def check(F, Q, G):
+        if G <= 0:
+            return None
+        if qmax is not None and Q > qmax + 1e-9:
+            return 'boost Q %.2f exceeds the max_boost_q %g set for this car' % (Q, qmax)
+        rise = tunelib.peaking_db(f, F, Q, G)
+        for z in zones:
+            sel = (f >= z['lo_hz']) & (f <= z['hi_hz'])
+            if np.any(sel) and float(np.max(rise[sel])) > GUARD_TOLERANCE_DB:
+                return ('raises %.0f-%.0f Hz by %.1f dB: %s'
+                        % (z['lo_hz'], z['hi_hz'], float(np.max(rise[sel])), z['reason']))
+        return None
+    return check
 
 
 def _find_regions(freqs, y, flag_db, smooth_oct=1.0 / 6.0):
@@ -619,7 +708,7 @@ def _load_session(args, freqs):
         are dropped before they can inflate confidence."""
     notes = []
     support = np.ones_like(freqs, dtype=bool)
-    raw_positions, positions_db = {}, []
+    raw_positions, positions_db, kept_index = {}, [], []
     for i, p in enumerate(args.positions or []):
         f, s, _ph, _coh = measure.load_text_export(p)
         raw_positions[p if p not in raw_positions else '%s (#%d)' % (p, i + 1)] = (f, s)
@@ -628,9 +717,10 @@ def _load_session(args, freqs):
     for grp in duplicates:
         notes.append('positions %s are the SAME capture -- counted once; a repeated file '
                      'is not a second mic position' % ', '.join(grp))
-    for p, (f, s) in raw_positions.items():
+    for i, (p, (f, s)) in enumerate(raw_positions.items()):
         if p in dropped:
             continue
+        kept_index.append(i)
         positions_db.append(measure.resample_log(f, s, freqs))
         support &= measure.support_mask(f, freqs)
 
@@ -683,7 +773,7 @@ def _load_session(args, freqs):
     anchor_conf = conf if conf is not None else support.astype(float)
     anchor = tunelib.target_anchor_offset(freqs, basis_db, target_db, confidence=anchor_conf)
     return {
-        'positions_db': positions_db, 'primary_db': primary_db,
+        'positions_db': positions_db, 'kept_index': kept_index, 'primary_db': primary_db,
         'measurement_phase': measurement_phase, 'meas_axis': meas_axis,
         'measurement_header': measurement_header,
         'target_db': target_db, 'voice_knobs': voice_knobs,
@@ -692,6 +782,29 @@ def _load_session(args, freqs):
         'duplicates': duplicates, 'notes': notes,
         'anchor': anchor, 'dev_db': basis_db - (target_db + anchor),
     }
+
+
+SESSION_ANCHOR_BAND = (300.0, 3000.0)    # tunelib.target_anchor_offset's first choice
+
+
+def _band_anchor(freqs, sess, band):
+    """The level anchor taken inside `band` instead of the session default."""
+    conf = sess['conf'] if sess['conf'] is not None else sess['support'].astype(float)
+    return tunelib.target_anchor_offset(freqs, sess['basis_db'], sess['target_db'],
+                                        confidence=conf, anchor_bands=(tuple(band),))
+
+
+def _outside_anchor(band, min_cover=0.8):
+    """True when `band` holds too little of the session anchor band for that
+    anchor to stand for it -- a fit confined to one driver's passband (a
+    tweeter above it, a sub below it). Decided from the band the user gave,
+    not from the trace: an in-car solo's stopband is often filled with road
+    noise louder than the driver itself (measured: 50 dB at 25 Hz on a
+    tweeter solo playing 38 dB), so the trace cannot be trusted to say where
+    the driver plays."""
+    a_lo, a_hi = SESSION_ANCHOR_BAND
+    inside = max(0.0, np.log2(min(band[1], a_hi) / max(band[0], a_lo)))
+    return inside < min_cover * np.log2(a_hi / a_lo)
 
 
 def _bass_note(balance):
@@ -875,6 +988,29 @@ def analyze(args):
     return report
 
 
+def _sitting_groups(args, sess, notes):
+    """One sitting label per kept position (--sittings), or None.
+
+    Held-out validation then withholds a whole sitting per fold
+    (tunelib.held_out_band_validation `groups`)."""
+    labels = getattr(args, 'sittings', None)
+    if not labels:
+        if len(sess['positions_db']) >= 3:
+            notes.append('held-out validation withheld one POSITION at a time: positions from '
+                         'the same sitting share its seat, mic and noise, so label them with '
+                         '--sittings for a check that has to survive a whole new sitting')
+        return None
+    if len(labels) != len(args.positions or []):
+        raise ValueError('--sittings needs one label per --positions file (%d given for %d)'
+                         % (len(labels), len(args.positions or [])))
+    groups = [labels[i] for i in sess['kept_index']]
+    if len(set(groups)) < 3:
+        notes.append('only %d sitting(s): held-out validation needs 3+ sittings, so it was '
+                     'not run -- these positions agree with each other, not with another day'
+                     % len(set(groups)))
+    return groups
+
+
 PROPOSE_FIT_BAND = (60.0, 12000.0)
 
 
@@ -900,18 +1036,31 @@ def propose(args):
                      'may be corrected' % (band[0], band[1], clipped[0], clipped[1],
                                            ', gate-trusted' if sess['gate_floor_hz'] else ''))
         band = clipped
+    solo_band = bool(args.fit_band) and _outside_anchor(band)
+    if solo_band:
+        # Fitting one driver's passband: the 300-3000 Hz anchor sits in its
+        # stopband and would read the whole passband as one level error.
+        anchor = _band_anchor(freqs, sess, band)
+        notes.append('fit band lies outside the %.0f-%.0f Hz session anchor: level anchored '
+                     'inside %.0f-%.0f Hz instead (%+.1f dB) -- shape, not loudness, is judged '
+                     'here; set the channel level separately' % (SESSION_ANCHOR_BAND + band
+                                                                 + (anchor - sess['anchor'],)))
+        sess['anchor'] = anchor
+        sess['dev_db'] = sess['basis_db'] - (sess['target_db'] + anchor)
     mask, conf, dev_db = sess['mask'], sess['conf'], sess['dev_db']
 
     held_out = None
     band_validation = {}
-    if sess['aligned'] is not None and sess['aligned'].shape[0] >= 3:
+    groups = _sitting_groups(args, sess, notes)
+    if sess['aligned'] is not None and sess['aligned'].shape[0] >= 3 and (
+            groups is None or len(set(groups)) >= 3):
         deviations = sess['aligned'] - (sess['target_db'] + sess['anchor'])
         # Leave-one-position-out: the proposal must help positions it was not
         # fitted on (tunelib.held_out_band_validation). Its final fit IS the
         # proposal, so validation and proposal cannot drift apart.
         held_out = tunelib.held_out_band_validation(
             freqs, deviations, band, mask=mask, conf=conf,
-            fitter_kwargs={'n_bands_max': args.max_bands})
+            fitter_kwargs={'n_bands_max': args.max_bands}, groups=groups)
         bands = [(r['f_hz'], r['q'], r['gain_db']) for r in held_out['bands']]
         band_validation = {(r['f_hz'], r['q'], r['gain_db']): r for r in held_out['bands']}
         fit_report = {'held_out_verdict': held_out['verdict'],
@@ -926,8 +1075,9 @@ def propose(args):
         bands, fit_report = tunelib.fit_peq_robust(
             freqs, deviations, band, n_bands_max=args.max_bands,
             mask=mask, conf=conf, fit_smoothed=True)
-        notes.append('two positions: fitted jointly, but held-out validation needs 3+ '
-                     'positions, so no band carries a generalisation check')
+        if groups is None:
+            notes.append('two positions: fitted jointly, but held-out validation needs 3+ '
+                         'positions, so no band carries a generalisation check')
     else:
         deviations = None
         bands, fit_report = tunelib.fit_peq(
@@ -955,6 +1105,12 @@ def propose(args):
                      'boost gate could not check them for cancellation '
                      '(methodology.md §The boost gate)')
 
+    gcheck = None
+    if args.session_tune:
+        gcheck = guard_check(load_guards(args.session_tune, notes), args.channels, freqs)
+        if gcheck is None:
+            notes.append('no vehicle guards recorded in the session file for %s'
+                         % args.session_tune)
     kept, rejected = [], []
     for F, Q, G in bands:
         tunelib.validate_peq_band(F, Q, G)
@@ -972,6 +1128,11 @@ def propose(args):
                                  'the position left out -- it is fitted to particular seats')
                 rejected.append(row)
                 continue
+        why = gcheck(F, Q, G) if gcheck else None
+        if why:
+            row['reason'] = 'vehicle guard: %s' % why
+            rejected.append(row)
+            continue
         if verdict == 'BLOCK':
             row['reason'] = 'boost gate BLOCK: the dip is phase-anomalous; gain would be eaten'
             rejected.append(row)
@@ -1004,15 +1165,18 @@ def propose(args):
         notes.append('no band earned its place: nothing here is both fixable and '
                      'worth a filter -- stopping is a valid outcome')
     support = sess['support']
-    below = _find_regions(freqs, np.where(support & (freqs < band[0]), dev_db, 0.0), 2.0)
+    # A band-limited solo's region below the fit band is its stopband, not a
+    # deviation; and its low end says nothing about the system's bass balance.
+    below = [] if solo_band else _find_regions(
+        freqs, np.where(support & (freqs < band[0]), dev_db, 0.0), 2.0)
     if below:
         notes.append('deviation below the fit band (%s) was NOT considered -- for the sub '
                      'region run propose again with --fit-band on the sub measurement, or treat '
                      'it as a level question (bass_balance)'
                      % ', '.join('%.0f-%.0f Hz %+.1f dB' % (r['f_lo'], r['f_hi'], r['peak_db'])
                                  for r in below))
-    balance = tunelib.bass_balance(freqs, dev_db, support)
-    note = _bass_note(balance)
+    balance = None if solo_band else tunelib.bass_balance(freqs, dev_db, support)
+    note = _bass_note(balance) if balance else None
     if note:
         notes.append(note)
     if final:
@@ -1022,6 +1186,7 @@ def propose(args):
     return {
         'meta': {'measurement_file': args.measurement,
                  'positions_used': len(sess['positions_db']),
+                 'sittings_used': None if groups is None else len(set(groups)),
                  'deviation_source': sess['deviation_source'],
                  'fit_band_hz': list(band),
                  'gate_floor_hz': (round(sess['gate_floor_hz'], 1)
@@ -1248,6 +1413,8 @@ def probe(args):
 
 
 REFINE_END_SLOTS = ('25', '32', '20000')
+REFINE_SUB_LP_HZ = 250.0        # a channel low-passed below this is a sub channel
+REFINE_SUB_FLOOR_HZ = 20.0
 
 
 def _peq_bank(summary):
@@ -1295,20 +1462,38 @@ def refine(args):
         notes.append('non-PEQ filters are kept as they are and not re-evaluated: %s'
                      % ', '.join(retained))
 
-    band = tuple(args.fit_band) if args.fit_band else PROPOSE_FIT_BAND
     covered = freqs[sess['support']]
     hp = max((chans[c]['hp_hz'] or 0.0) for c in args.channels)
     lp = min((chans[c]['lp_hz'] or 1e9) for c in args.channels)
+    if args.fit_band:
+        band = tuple(args.fit_band)
+    elif lp < REFINE_SUB_LP_HZ:
+        # A sub channel lives below the general 60 Hz floor; judging it from
+        # there leaves a sliver of passband (60-64 Hz behind an 80 Hz low-pass).
+        band = (REFINE_SUB_FLOOR_HZ, PROPOSE_FIT_BAND[1])
+    else:
+        band = PROPOSE_FIT_BAND
     band = (max(band[0], float(covered[0]), hp * 2 ** (1 / 3.0)),
             min(band[1], float(covered[-1]), lp / 2 ** (1 / 3.0)))
     if band[1] <= band[0]:
         raise ValueError('no frequency range is inside both the measurement and the channel '
                          'passband (kept 1/3 octave inside the crossovers)')
+    if np.log2(band[1] / band[0]) < 1.0:
+        notes.append('judged band %.0f-%.0f Hz is under an octave -- too little passband for a '
+                     'bank decision; widen it with --fit-band if the driver plays wider'
+                     % band)
 
+    # Level is anchored inside the judged band, never the session's 300-3000 Hz
+    # default: that lies in a tweeter's or a sub's stopband (tunelib.refine_bank).
+    anchor = _band_anchor(freqs, sess, band)
+    if abs(anchor - sess['anchor']) > 1.0:
+        notes.append('level anchored inside the judged band (%+.1f dB vs the %.0f-%.0f Hz '
+                     'session anchor) -- this solo is band-limited' % (
+                         anchor - sess['anchor'], 300, 3000))
     if sess['aligned'] is not None:
-        devs = list(sess['aligned'] - (sess['target_db'] + sess['anchor']))
+        devs = list(sess['aligned'] - (sess['target_db'] + anchor))
     else:
-        devs = [sess['dev_db']]
+        devs = [sess['basis_db'] - (sess['target_db'] + anchor)]
         notes.append('single position: refining against one mic spot -- capture 3+ positions '
                      'before trusting a re-fit or an added band')
 
@@ -1323,10 +1508,27 @@ def refine(args):
         except ValueError as exc:
             notes.append('boost gate unavailable: %s' % exc)
 
+    gcheck = guard_check(load_guards(args.afpx, notes), args.channels, freqs)
+    guard_blocks = {}
+    if gcheck:
+        phase_check = boost_check
+
+        def boost_check(F, Q, G):
+            why = gcheck(F, Q, G)
+            if why:
+                guard_blocks.setdefault(why, (F, Q, G))
+                return 'BLOCK'
+            return phase_check(F, Q, G) if phase_check else 'UNCHECKED'
+
     result = tunelib.refine_bank(
         freqs, devs, old_bank, band, mask=sess['mask'], conf=sess['conf'], fs=fs,
         max_edits=args.max_edits, free_slots=min(len(v) for v in free.values()),
         boost_check=boost_check)
+    for why, (F, Q, G) in list(guard_blocks.items())[:3]:
+        notes.append('vehicle guard blocked a candidate boost (%.0f Hz Q%.2f %+.2f dB): %s'
+                     % (F, Q, G, why))
+    if len(guard_blocks) > 3:
+        notes.append('vehicle guards blocked %d more candidate boosts' % (len(guard_blocks) - 3))
 
     edits, plan_edits = [], []
     next_free = {c: list(free[c]) for c in args.channels}
@@ -1790,7 +1992,14 @@ def main():
                         help='deterministic PEQ proposal from the same inputs (writes nothing)')
     pr.add_argument('--measurement')
     pr.add_argument('--positions', nargs='+')
+    pr.add_argument('--sittings', nargs='+', metavar='LABEL',
+                    help='one sitting label per --positions file (e.g. 8aug 8aug 10aug): '
+                         'held-out validation then withholds a whole sitting at a time')
     pr.add_argument('--target', required=True, help='target curve file, or "default"')
+    pr.add_argument('--session-tune', metavar='AFPX',
+                    help='enforce the vehicle guards recorded in the session file of this tune')
+    pr.add_argument('--channels', nargs='+', type=int,
+                    help='channel(s) this proposal is for: selects channel-specific guards')
     pr.add_argument('--voice', nargs='+', help='e.g. tilt=-0.5 bass=2 presence=1 air=0')
     pr.add_argument('--fit-band', nargs=2, type=float, metavar=('LO_HZ', 'HI_HZ'),
                     help='band to correct (default %g-%g Hz)' % PROPOSE_FIT_BAND)

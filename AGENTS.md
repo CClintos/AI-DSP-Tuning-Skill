@@ -143,7 +143,10 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   ab-make` / `ab-result` run a blind, loudness-matched listening comparison
   (§Judge by ear only at matched loudness,). With 3+ positions, `propose` validates
   itself leave-one-position-out: each band carries APPLY / REVIEW / DO NOT
-  APPLY, and DO NOT APPLY bands land in `rejected`. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
+  APPLY, and DO NOT APPLY bands land in `rejected`. Label the positions with
+  `--sittings` so each fold withholds a whole sitting (§Held-out by sitting,),
+  and pass `--session-tune <afpx>` so the car's recorded guards apply
+  (§Vehicle guards,); `refine` reads them from its `--afpx` sidecar. **Every AFPX write must use this same CLI:** first run `pipeline.py plan`
   and review `references/tune_plan_schema.md`, then populate the plan's
   `source_sha256`, distinct not-yet-existing `output_path`, edits, and
   per-edit `confirmations`; finally run `pipeline.py apply`. Apply exclusively
@@ -258,8 +261,11 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   `mytune.afpx.tuner_session.json`) — a small JSON record of a previous
   session's confirmed intake answers (schema: `dsp_model`, `sample_rate_hz`,
   `channel_map`, `listening_seat`, `drive_side`, `rear_channel_routing`,
-  `target_curve_path`, `voicing`, and `afpx_sha256` — the SHA-256 of the
-  `.afpx` at the time it was written). Run `python scripts/pipeline.py
+  `target_curve_path`, `voicing`, `guards`, and `afpx_sha256` — the SHA-256
+  of the `.afpx` at the time it was written). `guards` are vehicle facts
+  (no-boost zones per channel, a boost-Q cap) that stay valid across tune
+  edits; record one whenever evidence shows a band EQ must never fill
+  (§Vehicle guards,). Run `python scripts/pipeline.py
   session check --tune <file>` — it reads the sidecar, hashes the *current*
   file, and reports `hash_matches` plus which answers are `stale_fields`:
   - **Hash matches** → present the stored answers back ("here's what I have

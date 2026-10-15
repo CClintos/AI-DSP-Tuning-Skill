@@ -2203,11 +2203,66 @@ without the worst position getting worse; removal wins near-ties, because a
 filter that is not earning its place is a cost. An empty edit list means the
 current bank already earns its place — that is the result, say so.
 
+**Level is anchored inside the judged band, never at 300–3000 Hz.** A single
+driver's solo is mostly stopband, and the session's 300–3000 Hz anchor lies
+wholly outside a tweeter (above it) and a sub (below it). Anchored there, the
+whole passband reads as one big level error and the fitter "fixes" loudness
+with bells: on a real car a tweeter solo scored 14.7 dB and a sub 35.8 dB
+before any edit, and the proposals were −15 dB cuts at Q0.5. Refine now
+anchors each candidate inside the band it judges, so it corrects shape only;
+the channel's level stays a separate decision (output trim, level matching).
+A sub channel (low-passed below 250 Hz) is judged from 20 Hz rather than the
+general 60 Hz floor — from 60 Hz an 80 Hz low-pass leaves a 60–64 Hz sliver.
+`propose` does the same when an explicit `--fit-band` misses the 300–3000 Hz
+anchor; it decides from the band you give, not from the trace, because an
+in-car solo's stopband is often filled with road noise louder than the driver
+(measured: 50 dB at 25 Hz on a tweeter solo playing 38 dB in its passband).
+
 Several channels are refined together only when they carry the SAME bank (a
 left/right pair measured together); unequal banks need their own solo
 measurements. Its `plan_edits` address existing slots (`G: 0` for a removal),
 `comparison` gives the loudness change for the listening test, and
 `verify_with` is what `predicted_vs_measured` needs after the re-measure.
+
+## Held-out by sitting, not by position
+
+Leave-one-position-out asks whether a band helps a mic spot it was not fitted
+on. Positions captured in the same sitting share the seat position, the mic,
+the cabin temperature and that day's noise, so withholding one of them leaves
+its siblings in the fit and the check flatters the proposal. Across sittings
+on a real car, tone below 300 Hz moved by up to 0.9 dB with nothing in the
+tune changed. Label every `--positions` file with `propose --sittings` (one
+label per file, e.g. `8aug 8aug 10aug 10aug 12aug`) and each fold withholds a
+whole sitting and scores the mean over its positions. Three distinct sittings
+are needed; with fewer, `propose` fits jointly and says no band carries a
+held-out check. When judging edits by hand, score each sitting separately and
+keep only what helps every sitting — a band that helps the mean but hurts the
+latest sitting is fitted to the past car, not this one.
+
+## Vehicle guards: what this car taught, enforced every time
+
+Some facts about a car are learned once, from evidence no single measurement
+shows, and must hold for every later proposal. Record them as `guards` in the
+session sidecar (`session save`); `refine` reads them from the `--afpx`
+sidecar and `propose` from `--session-tune` (with `--channels` to pick
+channel-specific zones). They describe the car, not the file, so they stay in
+force after a tune edit.
+
+```json
+{"guards": {"max_boost_q": 3.0, "no_boost": [
+  {"lo_hz": 380, "hi_hz": 540, "channels": [2, 3],
+   "reason": "seated-listener body-reflection null: MMM shows it, a fixed mic reads it as a fixable dip"},
+  {"lo_hz": 4400, "hi_hz": 4900, "channels": [0], "reason": "FL tweeter physical notch"}]}}
+```
+
+A guard blocks a BOOST whose own response rises more than 0.25 dB anywhere in
+a zone on a listed channel (`channels: null` = every channel), and any boost
+above `max_boost_q`. Cuts are never blocked: relaxing or deepening a cut cannot
+fill a null. Blocked bands land in `propose`'s `rejected` with the guard's
+reason; `refine` drops the move and names it in `notes`. Every zone needs a
+reason — the physical fact it protects — so a later session can tell a guard
+from a habit. Add one only from evidence: an MMM-vs-fixed-mic disagreement, a
+null that moves with the head, a notch present in every sitting.
 
 ## Judge by ear only at matched loudness, blind
 

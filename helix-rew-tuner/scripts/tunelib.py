@@ -1135,7 +1135,7 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
                              match_oct=1.0 / 3.0, fitter_kwargs=None,
                              high_stability=0.8, medium_stability=0.5,
                              high_help_fraction=0.75, max_held_out_loss_db=0.25,
-                             max_held_out_dig_db=3.0):
+                             max_held_out_dig_db=3.0, groups=None):
     """Leave-one-position-out validation of a multi-position PEQ proposal.
 
     A correction has to help mic positions it was NOT fitted on -- the
@@ -1161,6 +1161,15 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
     Whole proposal: 'validated' when the median held-out gain is positive and
     no withheld position loses more than `max_held_out_loss_db`;
     'nothing_to_validate' when the fit proposes no band.
+
+    `groups` (one label per position) withholds a whole SITTING at a time.
+    Positions captured in one sitting share the seat, mic, cabin temperature
+    and noise of that day, so leaving out one of them still leaves its
+    siblings in the fit and the check flatters the proposal. On a real car,
+    tones that held across mic spots in one sitting moved by up to 1 dB
+    between sittings; a correction has to survive the sitting it never saw.
+    Needs at least three distinct groups; each fold scores the mean over the
+    withheld group's positions.
     """
     freqs = np.asarray(freqs, dtype=float)
     devs = np.asarray(deviations_db, dtype=float)
@@ -1168,7 +1177,18 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
         raise ValueError('held-out validation needs at least three positions')
     kw = dict(fit_smoothed=True)
     kw.update(fitter_kwargs or {})
-    n = devs.shape[0]
+    if groups is None:
+        labels = list(range(devs.shape[0]))
+    else:
+        labels = list(groups)
+        if len(labels) != devs.shape[0]:
+            raise ValueError('groups needs one label per position (%d given for %d)'
+                             % (len(labels), devs.shape[0]))
+    order = list(dict.fromkeys(labels))
+    if len(order) < 3:
+        raise ValueError('held-out validation needs at least three sittings (groups)')
+    held_sets = [[j for j, g in enumerate(labels) if g == grp] for grp in order]
+    n = len(held_sets)
 
     def authority(rows):
         if rows.shape[0] >= 3:
@@ -1181,14 +1201,18 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
     def score(d):
         return audibility_score(freqs, d, band=fit_band)
 
+    def group_score(rows, eq):
+        return float(np.mean([score(devs[j] + eq) for j in rows]))
+
     folds = []
-    for i in range(n):
-        keep = [j for j in range(n) if j != i]
+    for i, held in enumerate(held_sets):
+        keep = [j for j in range(devs.shape[0]) if j not in held]
         f_mask, f_conf = authority(devs[keep])
         bands_i, _ = fit_peq_robust(freqs, devs[keep], fit_band, mask=f_mask, conf=f_conf, **kw)
-        before = score(devs[i])
-        after = score(devs[i] + cascade_db(freqs, bands_i))
-        folds.append({'held_out_position': i, 'bands': bands_i,
+        before = group_score(held, 0.0)
+        after = group_score(held, cascade_db(freqs, bands_i))
+        folds.append({'held_out_position': i if groups is None else held,
+                      'held_out_group': order[i], 'held': held, 'bands': bands_i,
                       'held_out_gain_db': round(before - after, 3)})
 
     rows = []
@@ -1201,11 +1225,12 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
                 continue
             found += 1
             k = min(match, key=lambda m: abs(np.log2(fold['bands'][m][0] / F)))
-            held = devs[fold['held_out_position']]
-            without = [b for j, b in enumerate(fold['bands']) if j != k]
-            rest = held + cascade_db(freqs, without)
-            gain = score(rest) - score(held + cascade_db(freqs, fold['bands']))
-            dig = eq_dig_depth(freqs, rest, cascade_db(freqs, [fold['bands'][k]]), fit_band)
+            without = cascade_db(freqs, [b for j, b in enumerate(fold['bands']) if j != k])
+            gain = (group_score(fold['held'], without)
+                    - group_score(fold['held'], cascade_db(freqs, fold['bands'])))
+            band_k = cascade_db(freqs, [fold['bands'][k]])
+            dig = max(eq_dig_depth(freqs, devs[j] + without, band_k, fit_band)
+                      for j in fold['held'])
             gains.append(gain)
             digs.append(dig)
             helped += gain > 0 and dig <= max_held_out_dig_db
@@ -1234,6 +1259,7 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
         verdict = 'not_validated'
     return {'verdict': verdict, 'bands': rows,
             'folds': [{'held_out_position': f['held_out_position'],
+                       'held_out_group': f['held_out_group'],
                        'held_out_gain_db': f['held_out_gain_db'],
                        'bands_found': len(f['bands'])} for f in folds],
             'median_held_out_gain_db': round(float(np.median(gains)), 3),
@@ -4176,7 +4202,12 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
     then reported as unchecked).
 
     Every candidate is re-anchored in level before scoring (overall level is
-    a separate decision from the shape the bank corrects).
+    a separate decision from the shape the bank corrects), and the anchor is
+    taken over `band` itself. A single driver's solo is mostly stopband: the
+    session's 300-3000 Hz anchor lies wholly outside a tweeter or a sub, so
+    anchoring there reads the whole passband as one big level error
+    (measured on a real car: a tweeter baseline of 14.7 dB and a sub of 35.8
+    dB, "fixed" by -15 dB Q0.5 cuts).
 
     Returns {'baseline': {...}, 'final': {...}, 'edits': [...], 'bank': [...],
     'unchanged': bool}. Edit rows: action ('remove', 'relax', 'refit', 'add'),
@@ -4185,12 +4216,21 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
     from scipy.optimize import minimize
 
     f = np.asarray(freqs, dtype=float)
-    devs = [np.asarray(d, dtype=float) for d in deviations]
     old = [tuple(float(x) for x in b) for b in old_bank]
     old_db = cascade_db(f, old, fs=fs)
 
     anchor_conf = conf if conf is not None else (
         None if mask is None else np.asarray(mask, dtype=float))
+    anchor_bands = (tuple(band),)
+
+    def level(d):
+        return target_anchor_offset(f, d, np.zeros_like(f), confidence=anchor_conf,
+                                    anchor_bands=anchor_bands)
+
+    # The add path fits the mean deviation directly, so the inputs are put on
+    # the same in-band anchor the scores use.
+    devs = [np.asarray(d, dtype=float) for d in deviations]
+    devs = [d - level(d) for d in devs]
 
     def scores(bank):
         # Overall level is not the bank's job: each candidate is re-anchored
@@ -4201,7 +4241,7 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
         out = []
         for d in devs:
             dd = d + T
-            dd = dd - target_anchor_offset(f, dd, np.zeros_like(f), confidence=anchor_conf)
+            dd = dd - level(dd)
             out.append(audibility_score(f, dd, band=band, mask=mask, conf=conf))
         return out
 
