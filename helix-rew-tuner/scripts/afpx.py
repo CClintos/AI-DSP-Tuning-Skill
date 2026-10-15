@@ -520,11 +520,14 @@ def write_filter_slot(xml, channel_index, slot_index, F=None, Q=None, G=None,
     can silently retune or disable driver protection.
 
     Returns the new XML. Verify with verify_slot_write()."""
-    blocks = channel_blocks(xml)
-    if channel_index < 0 or channel_index >= len(blocks):
+    # Positions come from the match itself, never from searching for the
+    # block's text: two channels with identical settings are identical text,
+    # and a text search would edit the first of them.
+    spans = list(re.finditer(r'<OC\b.*?</OC>', xml, re.S))
+    if channel_index < 0 or channel_index >= len(spans):
         raise ValueError('channel_index %d out of range (%d channels)'
-                         % (channel_index, len(blocks)))
-    block = blocks[channel_index]
+                         % (channel_index, len(spans)))
+    block = spans[channel_index].group(0)
     fil_ms = list(re.finditer(r'<Fil\b[^>]*/?>', block))
     if slot_index < 0 or slot_index >= len(fil_ms):
         raise ValueError('slot_index %d out of range (ch%d has %d filter slots)'
@@ -569,7 +572,7 @@ def write_filter_slot(xml, channel_index, slot_index, F=None, Q=None, G=None,
                              new_tag, count=1)
         else:  # attribute absent -- insert before the closing marker
             new_tag = re.sub(r'\s*/?>$', ' %s="%s"/>' % (k, v), new_tag, count=1)
-    b0 = xml.index(block)
+    b0 = spans[channel_index].start()
     new_block = block[:m.start()] + new_tag + block[m.end():]
     return xml[:b0] + new_block + xml[b0 + len(block):]
 

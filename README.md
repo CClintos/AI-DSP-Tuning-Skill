@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.12.1`) so you can tell whether an already-installed copy is current — open
+`1.13.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -581,6 +581,15 @@ switched off rather than run on data that has none. In their place:
 - `lr-match --target <curve>` trims the louder side and proposes cuts only
   when tone and matching both improve. It leaves unresolved dips for diagnosis
   instead of copying them onto the good side.
+
+- with MMM, a band or edit smaller than your repeat-capture variation where it
+  acts is not proposed, and an unchecked boost becomes a trial to verify;
+- `--capture-profile` records your REW setup and checks it against REW's
+  rules (pink noise in the RTA, sequence length = FFT length, separate clocks
+  when the car plays the noise);
+- `verify` tells you, filter by filter, whether a written change landed;
+- `voice-variants` builds bass/treble shelf variants of a finished tune for a
+  blind, level-matched listening test.
 
 The capture checklist is in `references/methodology.md` (MMM-first tuning).
 

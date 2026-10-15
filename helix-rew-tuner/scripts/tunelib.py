@@ -4191,7 +4191,7 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
                 max_edits=4, free_slots=0, g_lim=(-15.0, 3.0), q_lim=(0.5, 8.0),
                 f_move_oct=1.0 / 3.0, min_gain_db=0.03, min_gain_pct=2.0,
                 remove_tolerance_db=0.02, worst_tolerance_db=0.05, min_add_gain=1.0,
-                removal_credit_db=0.05,
+                removal_credit_db=0.05, local_check=None,
                 boost_check=None):
     """Greedy, deterministic refinement of an existing PEQ bank.
 
@@ -4209,6 +4209,9 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
     the worst position getting more than worst_tolerance_db worse -- except a
     removal, which only has to cost no more than remove_tolerance_db: fewer
     filters is a better tune when they are not earning their place.
+    local_check(action, old, new) -> None | reason vets every move before it
+    can be chosen (MMM: the change must exceed the repeatability where it
+    acts); a vetoed move is skipped and counted in 'vetoed'.
     boost_check(F, Q, G) -> 'ALLOW' | 'WARN' | 'BLOCK' vets any move that
     adds or raises a boost (pass None when phase is unavailable; boosts are
     then reported as unchecked).
@@ -4267,6 +4270,7 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
                 round(float(np.clip(G, *g_lim)) * 4.0) / 4.0)
 
     bank = list(old)               # None marks a removed filter
+    vetoed = []
     current = scores(bank)
     baseline = summary(current)
     edits, edited = [], set()
@@ -4326,6 +4330,12 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
                 ok = d_mean <= -need and d_worst <= worst_tolerance_db
             if not ok:
                 continue
+            if local_check is not None:
+                why = local_check(action, None if i is None else bank[i], new)
+                if why:
+                    vetoed.append({'action': action, 'old': None if i is None else list(bank[i]),
+                                   'new': None if new is None else list(new), 'reason': why})
+                    continue
             raises_boost = new is not None and new[2] > 0 and (
                 i is None or new[2] > max(0.0, bank[i][2]))
             gate = None
@@ -4356,7 +4366,7 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
     final_bank = [b for b in bank if b is not None]
     return {'baseline': baseline, 'final': summary(current), 'edits': edits,
             'bank': [list(b) for b in final_bank], 'old_bank': [list(b) for b in old],
-            'unchanged': not edits}
+            'unchanged': not edits, 'vetoed': vetoed}
 
 
 # --------------------------------------------------------------------------
@@ -4486,6 +4496,152 @@ def repeatability_noise(profile, band):
             or not np.isfinite(noise[sel]).all()):
         return None
     return max(0.1, _mmm_rms(f, noise, sel))
+
+
+CAPTURE_PROFILE_KEYS = ('analyzer', 'noise', 'fft_length', 'sequence_length', 'sample_rate_hz',
+                        'playback', 'test_file_sample_rate_hz', 'test_file_fft_length',
+                        'window', 'averaging', 'rms_level_dbfs', 'mic_cal', 'mic_aim',
+                        'seat', 'mic_path', 'engine', 'notes')
+
+
+def check_capture_profile(profile):
+    """Validate the REW setup an MMM capture was made with, from what the user
+    RECORDED rather than what the curve looks like.
+
+    profile: {'analyzer': 'rta 1/48' | 'spectrum', 'noise': 'pink periodic' |
+    'pink random' | 'white periodic' ..., 'fft_length', 'sequence_length',
+    'sample_rate_hz', 'playback': 'rew' (REW's generator, same device as the
+    mic) | 'file' (a test track played by the car's source -- a separate
+    clock), 'test_file_sample_rate_hz', 'test_file_fft_length', 'window',
+    'averaging', 'rms_level_dbfs', 'mic_cal' ('0deg' | '90deg'), 'mic_aim',
+    'seat', 'mic_path', 'engine' ('off')}.
+
+    Rules from REW's signal-generator documentation: pink periodic noise with
+    the RTA, white with the Spectrum analyser; the sequence length equal to
+    the analyser FFT length; a test file made at the same sample rate and FFT
+    length; separate playback and recording clocks need windowing and
+    averaging; periodic pink clips at -6 dBFS RMS and random pink near
+    -12 dBFS. Returns {'problems' (refuse), 'warnings', 'profile_id'}."""
+    import hashlib
+    import json as _json
+    if not isinstance(profile, dict):
+        raise ValueError('capture profile must be a JSON object')
+    unknown = set(profile) - set(CAPTURE_PROFILE_KEYS)
+    if unknown:
+        raise ValueError('capture profile has unknown field(s): %s (allowed: %s)'
+                         % (sorted(unknown), ', '.join(CAPTURE_PROFILE_KEYS)))
+    low = {k: str(v).strip().lower() for k, v in profile.items()
+           if isinstance(v, str)}
+    problems, warnings = [], []
+    analyzer, noise = low.get('analyzer', ''), low.get('noise', '')
+    if not analyzer or not noise:
+        problems.append('record "analyzer" (e.g. "rta 1/48") and "noise" (e.g. "pink periodic")')
+    spectrum = 'spectrum' in analyzer or 'fft' in analyzer
+    if spectrum and 'pink' in noise:
+        problems.append('pink noise in the Spectrum analyser reads ~3 dB/oct falling: use the '
+                        'RTA (1/N octave) with pink noise, or white noise with Spectrum')
+    if not spectrum and analyzer and 'white' in noise:
+        problems.append('white noise in the RTA (1/N octave) reads ~3 dB/oct rising: use pink')
+    periodic = 'periodic' in noise or noise.endswith(' pn') or noise == 'pn'
+    fft, seq = profile.get('fft_length'), profile.get('sequence_length')
+    if periodic and fft is not None and seq is not None and int(seq) != int(fft):
+        problems.append('periodic noise sequence length %s must equal the FFT length %s '
+                        '(shorter notches the display, longer needs more averaging)' % (seq, fft))
+    playback = low.get('playback', '')
+    if not playback:
+        warnings.append('record "playback": "rew" (REW generator, same device as the mic) or '
+                        '"file" (test track from the car source)')
+    if playback == 'file':
+        tsr, tfft = profile.get('test_file_sample_rate_hz'), profile.get('test_file_fft_length')
+        sr = profile.get('sample_rate_hz')
+        if tsr is not None and sr is not None and int(tsr) != int(sr):
+            problems.append('the test file was made at %s Hz but REW records at %s Hz: they must '
+                            'match' % (tsr, sr))
+        if periodic and tfft is not None and fft is not None and int(tfft) != int(fft):
+            problems.append('the periodic test file was made for FFT %s but the RTA uses %s'
+                            % (tfft, fft))
+        if periodic:
+            warnings.append('the car source and the mic interface run on separate clocks: REW '
+                            'needs windowing and averaging/overlap set for that with periodic '
+                            'noise -- check the RTA window and averaging are not the '
+                            'same-device "no window" settings')
+    window, averaging = low.get('window', ''), low.get('averaging', '')
+    if not periodic and noise and ('rect' in window or not window):
+        warnings.append('random noise needs a window (e.g. Hann) in the RTA, not rectangular')
+    if not averaging:
+        warnings.append('record "averaging" (e.g. "forever"): an MMM capture is an average '
+                        'over the mic path')
+    rms = profile.get('rms_level_dbfs')
+    if rms is not None:
+        limit = -6.0 if periodic else -12.0
+        if float(rms) > limit:
+            warnings.append('%s noise clips its peaks above about %.0f dBFS RMS (set %.1f)'
+                            % ('periodic' if periodic else 'random', limit, float(rms)))
+    if low.get('engine', 'off') not in ('off', 'engine off'):
+        problems.append('capture with the engine off: an RTA adds engine and road noise in')
+    for key, why in (('mic_cal', 'the calibration file (0deg / 90deg) moves the top octave by '
+                                 'several dB'),
+                     ('mic_aim', 'mic aim changes the top octave reading')):
+        if key not in profile:
+            warnings.append('record "%s": %s, so later sessions can match it' % (key, why))
+    canon = {k: profile[k] for k in sorted(profile) if k != 'notes'}
+    pid = hashlib.sha256(_json.dumps(canon, sort_keys=True, default=str).encode()).hexdigest()[:12]
+    return {'problems': problems, 'warnings': warnings, 'profile_id': pid}
+
+
+def mmm_change_support(freqs, transfer_db, region, profile, factor=2.0, floor_db=0.5):
+    """Can repeat MMM captures resolve this change? transfer_db: the predicted
+    change (dB per bin); region (lo, hi): where it acts.
+
+    Returns {'status': 'supported' | 'below_repeatability' | 'unverifiable',
+    'local_change_db' (peak ERB-smoothed |change| in the region),
+    'local_resolution_db'}. 'unverifiable' means no repeat runs cover the
+    region: nothing can confirm the change after it is written."""
+    f = np.asarray(freqs, dtype=float)
+    sel = (f >= region[0]) & (f <= region[1])
+    change = float(np.max(np.abs(erb_smooth(f, np.asarray(transfer_db, dtype=float))[sel]))) \
+        if np.any(sel) else 0.0
+    noise = repeatability_noise(profile, region) if profile else None
+    if noise is None:
+        return {'status': 'unverifiable', 'local_change_db': round(change, 2),
+                'local_resolution_db': None}
+    res = max(float(floor_db), factor * noise)
+    return {'status': 'supported' if change >= res else 'below_repeatability',
+            'local_change_db': round(change, 2), 'local_resolution_db': round(res, 2)}
+
+
+def peq_region(F, Q):
+    """(lo, hi) Hz spanned by an RBJ peaking filter's bandwidth."""
+    half = peq_bandwidth_oct(Q) / 2.0
+    return (float(F) / 2 ** half, float(F) * 2 ** half)
+
+
+def combine_repeatability(a, b):
+    """The more uncertain of two repeatability profiles, bin by bin (before
+    and after a write each have their own); None-safe."""
+    if a is None or b is None:
+        return a or b
+    if a['frequency_hz'] != b['frequency_hz']:
+        raise ValueError('repeatability profiles are on different grids')
+    noise = [None if x is None or y is None else max(x, y)
+             for x, y in zip(a['noise_by_frequency_db'], b['noise_by_frequency_db'])]
+    out = dict(a)
+    out['noise_by_frequency_db'] = noise
+    out['noise_db'] = max(a['noise_db'], b['noise_db'])
+    out['runs'] = a['runs'] + b['runs']
+    return out
+
+
+def public_repeatability(profile):
+    """The repeatability report without its per-bin arrays (for JSON output)."""
+    if profile is None:
+        return None
+    out = {k: v for k, v in profile.items()
+           if k not in ('frequency_hz', 'noise_by_frequency_db')}
+    out['noise_db'] = round(float(out['noise_db']), 2)
+    out['bands'] = [dict(b, noise_db=None if b['noise_db'] is None else round(b['noise_db'], 2))
+                    for b in out.get('bands', [])]
+    return out
 
 
 def snr_support(signal_db, ambient_db, min_snr_db=10.0):

@@ -23,6 +23,8 @@
 # python pipeline.py ab-result --key <dir>/.ab_key.json --choices X Y Y X ...
 # python pipeline.py mmm-compare --captures now=a.txt d05=b.txt ... --band LO HI [--repeat now2.txt]
 # python pipeline.py lr-match --left L.txt --right R.txt [--band 300 6000]
+# python pipeline.py verify --report refine.json --before B1 B2 --after A1 A2 --dsp-rate HZ
+# python pipeline.py voice-variants --afpx T --out-dir D --bass-channels .. --bass-db -1 1 [--confirm]
 #   analyze/propose/refine also take: --capture mmm (each --positions file is a
 #   repeat MMM run, not a seat), --ambient noise.txt, --cancel-check A B BOTH,
 #   --accept-tilt
@@ -712,6 +714,7 @@ def _load_session(args, freqs):
       - an identical trace given twice is ONE position, not two: duplicates
         are dropped before they can inflate confidence."""
     notes = []
+    profile = _load_capture_profile(args, notes)
     support = np.ones_like(freqs, dtype=bool)
     raw_positions, positions_db, kept_index = {}, [], []
     for i, p in enumerate(args.positions or []):
@@ -815,7 +818,23 @@ def _load_session(args, freqs):
         'duplicates': duplicates, 'notes': notes,
         'anchor': anchor, 'dev_db': basis_db - (target_db + anchor),
         'capture': capture, 'repeatability': repeatability, 'ambient': ambient,
+        'profile': profile,
     }
+
+
+def _load_capture_profile(args, notes):
+    """The REW setup the captures were made with, checked against REW's rules.
+    A problem refuses the session; warnings become notes."""
+    path = getattr(args, 'capture_profile', None)
+    if not path:
+        return None
+    with open(path, encoding='utf-8') as fh:
+        raw = json.load(fh)
+    chk = tunelib.check_capture_profile(raw)
+    if chk['problems']:
+        raise ValueError('capture profile %s: %s' % (path, '; '.join(chk['problems'])))
+    notes.extend('capture profile: %s' % w for w in chk['warnings'])
+    return {'file': path, 'id': chk['profile_id'], 'warnings': chk['warnings']}
 
 
 def _mask_runs(freqs, mask):
@@ -840,9 +859,14 @@ def _rta_tilt(freqs, sess, notes, refuse, accept=False):
     live = sess['support']
     tilt = tunelib.measure_tilt(freqs[live], sess['basis_db'][live])['tilt_db_per_oct']
     problem = tunelib.rta_tilt_check(tilt)
-    if problem and refuse and not accept:
-        raise ValueError(problem + ' (pass --accept-tilt only if this really is the car)')
-    if problem:
+    recorded = sess.get('profile') is not None
+    if problem and refuse and not accept and not recorded:
+        raise ValueError(problem + ' (record the setup with --capture-profile, or pass '
+                         '--accept-tilt only if this really is the car)')
+    if problem and recorded:
+        notes.append(problem + ' -- but the recorded capture profile says the RTA setup was '
+                     'right: confirm the car really is this far off before voicing')
+    elif problem:
         notes.append(problem + ('' if refuse else ' -- if this is a full-system capture'))
     return {'tilt_db_per_oct': tilt, 'problem': problem}
 
@@ -875,11 +899,16 @@ def _cancel_verdict(freqs, checks, F, Q):
 
 
 def _capture_report(sess, tilt):
+    public = tunelib.public_repeatability(sess['repeatability'])
     return {'method': sess['capture'],
             'runs': len(sess['positions_db']) or 1,
-            'repeatability': sess['repeatability'],
-            'verification_noise_db': (sess['repeatability'] or {}).get('noise_db'),
-            'rta_tilt': tilt, 'ambient': sess['ambient']}
+            'repeatability': public,
+            'verification_noise_db': (public or {}).get('noise_db'),
+            'rta_tilt': tilt, 'ambient': sess['ambient'],
+            'profile': sess.get('profile')}
+
+
+MMM_SINGLE_RUN_Q_MAX = 4.0
 
 
 SESSION_ANCHOR_BAND = (300.0, 3000.0)    # tunelib.target_anchor_offset's first choice
@@ -1159,6 +1188,11 @@ def propose(args):
                          accept=getattr(args, 'accept_tilt', False))
     mmm = sess['capture'] == 'mmm'
     unit = 'run' if mmm else 'position'
+    qkw = {}
+    if mmm and sess['repeatability'] is None:
+        qkw = {'q_lim': (0.5, MMM_SINGLE_RUN_Q_MAX)}
+        notes.append('one MMM run: filters are kept broad (Q <= %g) -- a narrower feature '
+                     'needs a repeat run to show it is real' % MMM_SINGLE_RUN_Q_MAX)
     held_out = None
     band_validation = {}
     groups = _sitting_groups(args, sess, notes)
@@ -1170,7 +1204,7 @@ def propose(args):
         # proposal, so validation and proposal cannot drift apart.
         held_out = tunelib.held_out_band_validation(
             freqs, deviations, band, mask=mask, conf=conf,
-            fitter_kwargs={'n_bands_max': args.max_bands}, groups=groups)
+            fitter_kwargs=dict({'n_bands_max': args.max_bands}, **qkw), groups=groups)
         bands = [(r['f_hz'], r['q'], r['gain_db']) for r in held_out['bands']]
         band_validation = {(r['f_hz'], r['q'], r['gain_db']): r for r in held_out['bands']}
         fit_report = {'held_out_verdict': held_out['verdict'],
@@ -1185,7 +1219,7 @@ def propose(args):
         deviations = sess['aligned'] - (sess['target_db'] + sess['anchor'])
         bands, fit_report = tunelib.fit_peq_robust(
             freqs, deviations, band, n_bands_max=args.max_bands,
-            mask=mask, conf=conf, fit_smoothed=True)
+            mask=mask, conf=conf, fit_smoothed=True, **qkw)
         if groups is None and mmm:
             notes.append('two MMM runs: fitted jointly; their repeatability (%.2f dB) is the '
                          'resolution any re-measure must beat' % sess['repeatability']['noise_db'])
@@ -1195,7 +1229,8 @@ def propose(args):
     else:
         deviations = None
         bands, fit_report = tunelib.fit_peq(
-            freqs, dev_db, band, n_bands_max=args.max_bands, mask=mask, fit_smoothed=True)
+            freqs, dev_db, band, n_bands_max=args.max_bands, mask=mask, fit_smoothed=True,
+            **qkw)
         if mmm:
             notes.append('one MMM run: already a spatial average, so the fit is not chasing '
                          'one mic spot -- capture the same tune a second time to measure '
@@ -1242,7 +1277,7 @@ def propose(args):
         if gcheck is None:
             notes.append('no vehicle guards recorded in the session file for %s'
                          % args.session_tune)
-    kept, rejected = [], []
+    kept, rejected, needs_trial = [], [], []
     for F, Q, G in bands:
         tunelib.validate_peq_band(F, Q, G)
         verdict = gate.get((float(F), float(Q), float(G)))
@@ -1271,6 +1306,24 @@ def propose(args):
             continue
         if verdict == 'WARN':
             row['caution'] = 're-measure with the mic moved ~10 cm before proposing this boost'
+        if mmm:
+            support_v = tunelib.mmm_change_support(
+                freqs, tunelib.peaking_db(freqs, F, Q, G), tunelib.peq_region(F, Q),
+                sess['repeatability'])
+            row['repeatability'] = support_v
+            if support_v['status'] == 'below_repeatability':
+                row['reason'] = ('smaller than the repeat-capture variation where it acts '
+                                 '(%.2f vs %.2f dB): a re-capture could not confirm it'
+                                 % (support_v['local_change_db'],
+                                    support_v['local_resolution_db']))
+                rejected.append(row)
+                continue
+            if G > 0 and verdict is None:
+                row['reason'] = ('boost with no cancellation evidence (no phase, no '
+                                 '--cancel-check): write it ALONE, re-capture, and keep it '
+                                 'only if pipeline.py verify confirms it')
+                needs_trial.append(row)
+                continue
         kept.append(row)
     final = [(r['f_hz'], r['q'], r['gain_db']) for r in kept]
 
@@ -1329,7 +1382,7 @@ def propose(args):
                  'voicing_applied': sess['voice_knobs'] or None},
         'tilt': {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                  'target': tunelib.measure_tilt(freqs, sess['target_db'])},
-        'proposal': {'bands': kept, 'rejected': rejected},
+        'proposal': {'bands': kept, 'rejected': rejected, 'needs_trial': needs_trial},
         'bass_balance': balance,
         'held_out_validation': None if held_out is None else {
             'verdict': held_out['verdict'], 'folds': held_out['folds'],
@@ -1654,6 +1707,27 @@ def refine(args):
             return _cancel_verdict(freqs, cancel, F, Q)
         notes.append('no phase: candidate boosts are checked for cancellation against %d '
                      'measured pair(s)' % len(cancel))
+    mmm = sess['capture'] == 'mmm'
+    if mmm and boost_check is None:
+        def boost_check(F, Q, G):
+            return 'BLOCK'
+        notes.append('MMM with no --cancel-check: raised or added boosts are not proposed -- '
+                     'give --cancel-check evidence, or trial one boost alone and verify it')
+    local_check = None
+    if mmm:
+        prof = sess['repeatability']
+
+        def local_check(action, old, new):
+            olds = [tuple(old)] if old is not None else []
+            news = [tuple(new)] if new is not None else []
+            T = (tunelib.cascade_db(freqs, news, fs=fs) - tunelib.cascade_db(freqs, olds, fs=fs))
+            spans = [tunelib.peq_region(b[0], b[1]) for b in olds + news]
+            region = (min(lo for lo, _hi in spans), max(hi for _lo, hi in spans))
+            v = tunelib.mmm_change_support(freqs, T, region, prof)
+            if v['status'] == 'below_repeatability':
+                return ('change %.2f dB is inside the repeat-capture variation (%.2f dB) '
+                        'where it acts' % (v['local_change_db'], v['local_resolution_db']))
+            return None
 
     gcheck = guard_check(load_guards(args.afpx, notes), args.channels, freqs)
     guard_blocks = {}
@@ -1670,7 +1744,15 @@ def refine(args):
     result = tunelib.refine_bank(
         freqs, devs, old_bank, band, mask=sess['mask'], conf=sess['conf'], fs=fs,
         max_edits=args.max_edits, free_slots=min(len(v) for v in free.values()),
-        boost_check=boost_check)
+        boost_check=boost_check, local_check=local_check,
+        q_lim=((0.5, MMM_SINGLE_RUN_Q_MAX) if mmm and sess['repeatability'] is None
+               else (0.5, 8.0)))
+    if result['vetoed']:
+        notes.append('%d candidate edit(s) were smaller than the repeat-capture variation where '
+                     'they act and were not proposed' % len(result['vetoed']))
+    if mmm and sess['repeatability'] is None:
+        notes.append('one MMM run: edits are kept broad (Q <= %g) and none can be checked '
+                     'against repeatability -- capture the tune twice' % MMM_SINGLE_RUN_Q_MAX)
     for why, (F, Q, G) in list(guard_blocks.items())[:3]:
         notes.append('vehicle guard blocked a candidate boost (%.0f Hz Q%.2f %+.2f dB): %s'
                      % (F, Q, G, why))
@@ -1727,8 +1809,11 @@ def refine(args):
         'edits': edits, 'plan_edits': plan_edits,
         'comparison': comparison,
         'verify_with': {'bands': result['bank'], 'old_bands': result['old_bank'],
-                        'noise_db': (sess['repeatability'] or {}).get('noise_db'),
-                        'note': 'pass these to predicted_vs_measured after re-measuring'},
+                        'noise_db': (tunelib.public_repeatability(sess['repeatability'])
+                                     or {}).get('noise_db'),
+                        'note': ('after writing, re-capture the same way and run pipeline.py '
+                                 'verify --report <this file> --before <these captures> '
+                                 '--after <the re-captures>')},
         'capture': _capture_report(sess, tilt),
         'notes': notes,
         'predicted_not_measured': True,
@@ -1856,6 +1941,195 @@ def ab_result(args):
     if n < 6:
         entry['caution'] = 'fewer than 6 decided choices -- treat any preference as provisional'
     return entry
+
+
+VERIFY_ADVICE = {
+    'confirmed': 'keep: the change landed as predicted',
+    'diverged': 'partly landed: re-capture, then refine from the new state',
+    'reverted_recommended': ('the change did not show up: remove or rethink this band '
+                             '(refine on the new captures)'),
+    'inconclusive': ('not resolvable by measurement here: keep it only if the blind, '
+                     'loudness-matched A/B prefers it'),
+}
+
+
+def _verify_bands(args):
+    """(bands, old_bands) from --bands/--old-bands or a refine/propose report."""
+    def triples(specs):
+        out = []
+        for spec in specs:
+            parts = spec.split(',')
+            if len(parts) != 3:
+                raise ValueError('a band is F,Q,G -- got %r' % spec)
+            out.append(tuple(float(x) for x in parts))
+        return out
+    bands = old = None
+    if args.report:
+        with open(args.report, encoding='utf-8') as fh:
+            report = json.load(fh)
+        if 'verify_with' in report:
+            bands = [tuple(b) for b in report['verify_with']['bands']]
+            old = [tuple(b) for b in report['verify_with']['old_bands']]
+        elif 'proposal' in report:
+            bands = [(b['f_hz'], b['q'], b['gain_db']) for b in report['proposal']['bands']]
+            old = []
+        else:
+            raise ValueError('%s is neither a refine nor a propose report' % args.report)
+    if args.bands:
+        bands = triples(args.bands)
+        old = triples(args.old_bands or [])
+    if bands is None:
+        raise ValueError('give --report (refine/propose output) or --bands F,Q,G ...')
+    return bands, old
+
+
+def verify(args):
+    """Did the written change land? Before vs after captures, judged per changed
+    filter against the repeatability where that filter acts (writes nothing)."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    if not args.dsp_rate or args.dsp_rate <= 0:
+        raise ValueError('--dsp-rate is required: the CONFIRMED internal rate')
+    notes = []
+    profile = _load_capture_profile(args, notes)
+
+    def load(paths):
+        runs, live = [], np.ones_like(freqs, dtype=bool)
+        for path in paths:
+            f, s, _ph, _c = measure.load_text_export(path)
+            runs.append(measure.resample_log(f, s, freqs))
+            live &= measure.support_mask(f, freqs)
+        return runs, live
+
+    before, lb = load(args.before)
+    after, la = load(args.after)
+    live = lb & la
+
+    def mean_of(runs):
+        if len(runs) >= 2:
+            return tunelib.spatial_consistency(freqs, runs, min_positions=2)['mean_db']
+        return runs[0]
+
+    b_db, a_db = mean_of(before), mean_of(after)
+    prof = None
+    if len(before) >= 2:
+        prof = tunelib.capture_repeatability(freqs, before, support=live)
+    if len(after) >= 2:
+        prof = tunelib.combine_repeatability(
+            prof, tunelib.capture_repeatability(freqs, after, support=live))
+    if prof is None:
+        notes.append('one capture each side: resolution ASSUMED from --noise-db %.2f dB -- '
+                     'capture before and after twice to measure it' % args.noise_db)
+    bands, old = _verify_bands(args)
+    result = tunelib.predicted_vs_measured(freqs, b_db, a_db, bands, old_bands=old,
+                                           repeatability=prof, noise_db=args.noise_db,
+                                           fs=float(args.dsp_rate))
+    for row in result['bands']:
+        row['advice'] = VERIFY_ADVICE.get(row['verdict'])
+    target_path = ASSETS_DEFAULT_TARGET if args.target == 'default' else args.target
+    target = measure.load_target(target_path, freqs)
+    covered = freqs[live]
+    band = (max(60.0, float(covered[0])), min(12000.0, float(covered[-1])))
+
+    def target_error(x):
+        anchor = tunelib.target_anchor_offset(freqs, x, target, confidence=live.astype(float))
+        return tunelib.audibility_score(freqs, x - target - anchor, band=band, mask=live)
+
+    te_b, te_a = target_error(b_db), target_error(a_db)
+    counts = {v: sum(1 for r in result['bands'] if r['verdict'] == v)
+              for v in tunelib.VERIFY_VERDICTS}
+    return {'meta': {'before': args.before, 'after': args.after, 'report': args.report,
+                     'dsp_sample_rate_hz': args.dsp_rate, 'profile': profile},
+            'repeatability': tunelib.public_repeatability(prof),
+            'level_offset_db': result['level_offset_db'],
+            'trace_changed': result['trace_changed'],
+            'target_error_db': {'before': round(te_b, 3), 'after': round(te_a, 3),
+                                'change': round(te_a - te_b, 3)},
+            'counts': counts, 'bands': result['bands'],
+            'notes': notes + result['notes'],
+            'next_step': ('keep confirmed bands; act on reverted ones; settle inconclusive '
+                          'ones by the blind A/B (ab-make with the measured level offset)')}
+
+
+def voice_variants(args):
+    """Shelf-only voicing variants of a finished tune, for a blind A/B.
+
+    Each variant changes ONE thing -- a low shelf on the bass channels or a
+    high shelf on the tweeter channels -- in the channel's end shelf slot,
+    through the verified plan/apply path. Without --confirm it only shows the
+    edits. Voicing is a preference decision: compare the variants blind and
+    level-matched (ab-make with the predicted loudness change), never by
+    which one measures closer to a curve."""
+    xml = afpx.decode(args.afpx)
+    chans = afpx.channels(xml)
+    variants = [('bass', d) for d in (args.bass_db or [])] + \
+               [('treble', d) for d in (args.treble_db or [])]
+    if not variants:
+        raise ValueError('give --bass-db and/or --treble-db values, e.g. --bass-db -1 1')
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    program = measure.load_target(ASSETS_DEFAULT_TARGET, freqs)
+    out_dir = os.path.abspath(args.out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    rows = []
+    for kind, delta in variants:
+        step = round(float(delta) * 4.0) / 4.0
+        if step == 0.0:
+            raise ValueError('%s variant %+g dB rounds to 0 at the 0.25 dB shelf step' % (kind, delta))
+        channels = args.bass_channels if kind == 'bass' else args.treble_channels
+        if not channels:
+            raise ValueError('--%s-channels is required for a %s variant' % (kind, kind))
+        end, code = ('25', '3') if kind == 'bass' else ('20000', '4')
+        hz = args.bass_hz if kind == 'bass' else args.treble_hz
+        edits, curve_spec = [], None
+        for c in channels:
+            if not 0 <= c < len(chans):
+                raise ValueError('channel %d does not exist' % c)
+            slot = next((sl for sl in chans[c]['slots'] if sl['dF'] == end), None)
+            if slot is None:
+                raise ValueError('channel %d has no %s shelf slot (dF=%s)' % (c, kind, end))
+            edit = {'id': 'voice-%s%+.2f-ch%d' % (kind, step, c), 'kind': 'filter_slot',
+                    'channel': c, 'slot': slot['slot_index']}
+            if slot['type_code'] == code and slot['G']:
+                G = float(np.clip(slot['G'] + step, -15.0, 6.0))
+                edit['G'] = G
+                spec = (slot['F'], slot['Q'], step)
+            elif slot['free'] or slot['type_code'] == code:
+                edit.update({'type_code': code, 'F': float(hz), 'Q': float(args.q), 'G': step})
+                spec = (float(hz), float(args.q), step)
+            else:
+                raise ValueError('channel %d %s slot holds a %s filter' % (c, kind, slot['type']))
+            curve_spec = curve_spec or spec
+            edits.append(edit)
+        F, Q, G = curve_spec
+        shelf = (tunelib.low_shelf_db(freqs, F, Q, G) if kind == 'bass'
+                 else tunelib.high_shelf_db(freqs, F, Q, G))
+        loud = tunelib.loudness_change_db(freqs, program, program + shelf)
+        name = '%s%+.2fdB' % (kind, step)
+        path = os.path.join(out_dir, name + '.afpx')
+        row = {'variant': name, 'file': path, 'edits': edits,
+               'predicted_loudness_change_db': round(loud, 2),
+               'ab_make': ('pipeline.py ab-make --a %s --b %s --loudness-db %.2f --out-dir '
+                           '<dir> --confirm-trim' % (args.afpx, path, loud))}
+        if args.confirm:
+            if os.path.exists(path):
+                raise ValueError('%s already exists -- use a fresh --out-dir' % path)
+            with tempfile.TemporaryDirectory() as tmp:
+                plan = create_plan(args.afpx, path)
+                plan['edits'] = edits
+                plan['confirmations'] = {e['id']: True for e in edits}
+                plan_path = os.path.join(tmp, 'voice_plan.json')
+                with open(plan_path, 'w', encoding='utf-8') as fh:
+                    json.dump(plan, fh)
+                row['manifest_output_sha256'] = apply_plan(plan_path)['output_sha256']
+        rows.append(row)
+    return {'meta': {'afpx': args.afpx, 'out_dir': out_dir, 'written': bool(args.confirm)},
+            'variants': rows,
+            'notes': ['each variant changes one shelf; the original tune is untouched',
+                      'compare each against the current tune blind and level-matched '
+                      '(its ab_make line), at your normal volume, on familiar tracks',
+                      'predicted loudness assumes the shelf reaches the whole system -- '
+                      'confirm the match by ear'] +
+                     ([] if args.confirm else ['dry run: show the user these edits, then '
+                                               're-run with --confirm to write the files'])}
 
 
 def _labelled(specs, what):
@@ -2209,6 +2483,9 @@ def _capture_args(parser):
                              'right, both): boosts into their cancellation are blocked')
     parser.add_argument('--accept-tilt', action='store_true',
                         help='proceed although the MMM tilt looks like a wrong RTA mode')
+    parser.add_argument('--capture-profile', metavar='JSON',
+                        help='the recorded REW setup (analyzer, noise, FFT, playback route, '
+                             'mic cal/aim ...), checked against REW\'s rules')
 
 
 def main():
@@ -2305,6 +2582,32 @@ def main():
     mc.add_argument('--min-snr-db', type=float, default=10.0)
     mc.add_argument('--out')
 
+    vf = sub.add_parser('verify', help='did a written change land? before vs after captures')
+    vf.add_argument('--before', nargs='+', required=True, help='captures the change was made from')
+    vf.add_argument('--after', nargs='+', required=True, help='re-captures with the new tune')
+    vf.add_argument('--report', help='the refine or propose JSON the change came from')
+    vf.add_argument('--bands', nargs='+', metavar='F,Q,G', help='bands actually written')
+    vf.add_argument('--old-bands', nargs='+', metavar='F,Q,G', help='bands they replaced')
+    vf.add_argument('--dsp-rate', type=float, required=True)
+    vf.add_argument('--target', default='default')
+    vf.add_argument('--noise-db', type=float, default=0.3,
+                    help='resolution when before/after were each captured once')
+    vf.add_argument('--capture-profile', metavar='JSON')
+    vf.add_argument('--out')
+
+    vv = sub.add_parser('voice-variants', help='shelf-only voicing variants for a blind A/B')
+    vv.add_argument('--afpx', required=True)
+    vv.add_argument('--out-dir', required=True)
+    vv.add_argument('--bass-channels', nargs='+', type=int)
+    vv.add_argument('--treble-channels', nargs='+', type=int)
+    vv.add_argument('--bass-db', nargs='+', type=float, help='e.g. -1 1')
+    vv.add_argument('--treble-db', nargs='+', type=float, help='e.g. -1 1')
+    vv.add_argument('--bass-hz', type=float, default=120.0)
+    vv.add_argument('--treble-hz', type=float, default=6000.0)
+    vv.add_argument('--q', type=float, default=0.7)
+    vv.add_argument('--confirm', action='store_true', help='write the variant files')
+    vv.add_argument('--out')
+
     lm = sub.add_parser('lr-match', help='left/right tonal match from half-system captures')
     lm.add_argument('--left', required=True, help='left side only')
     lm.add_argument('--right', required=True, help='right side only')
@@ -2395,12 +2698,14 @@ def main():
     elif args.cmd == 'apply':
         print(json.dumps(apply_plan(args.plan), indent=2))
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
-                      'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match'):
+                      'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match',
+                      'verify', 'voice-variants'):
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,
                   'ab-result': ab_result, 'mmm-compare': mmm_compare,
-                  'lr-match': lr_match}[args.cmd](args)
+                  'lr-match': lr_match, 'verify': verify,
+                  'voice-variants': voice_variants}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
             with open(args.out, 'w', encoding='utf-8') as fh:

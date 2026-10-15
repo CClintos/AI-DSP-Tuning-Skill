@@ -2214,12 +2214,43 @@ touched between captures.
 | Ambient (generator off) | `--ambient`: bins under 10 dB SNR are excluded |
 | Full system at each candidate bass delay / polarity / Phase | `mmm-compare` checks the handover against an unchanged measured midrange reference |
 
+**Record the setup once, as a capture profile** (`--capture-profile
+profile.json` on analyze/propose/refine/verify), e.g.:
+
+```json
+{"analyzer": "rta 1/48", "noise": "pink periodic", "fft_length": 65536,
+ "sequence_length": 65536, "sample_rate_hz": 48000, "playback": "file",
+ "test_file_sample_rate_hz": 48000, "test_file_fft_length": 65536,
+ "window": "hann", "averaging": "forever", "rms_level_dbfs": -12,
+ "mic_cal": "90deg", "mic_aim": "up", "seat": "driver", "engine": "off"}
+```
+
+It is checked against REW's signal-generator rules: pink noise with the RTA
+and white with the Spectrum analyser; the periodic sequence length equal to
+the FFT length; a test file made at REW's sample rate and FFT length; peaks
+clip above about -6 dBFS RMS (periodic) or -12 dBFS (random). A rule broken
+refuses the session. `playback: "file"` — pink noise played by the car's own
+source while the laptop records — is a separate clock, which REW says needs
+windowing and averaging/overlap set for it with periodic noise; the profile
+flags that. Every report carries the profile id, so captures from different
+setups are not compared by accident.
+
 **What the tools now enforce for MMM:**
 - *RTA mode.* A full-system tilt steeper than -2.5 dB/oct or rising faster
   than +1.5 dB/oct is refused by `propose`/`refine` (noted by `analyze`):
   Spectrum mode shows pink noise falling ~3 dB/oct and white noise in an
   octave RTA rises ~3 dB/oct, and voicing toward the target would tilt the
-  tune the opposite way. `--accept-tilt` only if it really is the car.
+  tune the opposite way. With a valid capture profile recorded the refusal
+  becomes a check-the-car note; otherwise `--accept-tilt` only if it really is
+  the car.
+- *EQ policy.* With `--capture mmm`, every proposed band (propose) and every
+  edit (refine) must change the response by more than the repeat-capture
+  variation where it acts — max(0.5 dB, 2 x the local repeatability) — or it
+  is not proposed: a re-capture could not confirm it. With a single run,
+  filters are kept broad (Q <= 4) because nothing yet shows a narrow feature is
+  real. A boost with no cancellation evidence (no phase, no `--cancel-check`)
+  goes to `needs_trial` in propose and is not proposed by refine: write one
+  alone, re-capture, and keep it only if `verify` confirms it.
 - *Noise.* An RTA adds the background in, so a dip can read as filled.
   `--ambient` excludes every bin less than `--min-snr-db` (10) above it.
 - *Cancellation without phase.* Where two halves measured together sum below
@@ -2250,6 +2281,26 @@ touched between captures.
   `--objective level` remains available but must pass the tonal guards too.
   More output alone does not prove better sound or correct phase.
 
+**After every write: `verify`.** `pipeline.py verify --report <refine or
+propose JSON> --before <the captures it came from> --after <re-captures>
+--dsp-rate 96000` judges each changed filter against the repeatability of
+both the before and after runs in its own region, reports the target error
+before and after, and says per band: keep (confirmed), rethink (the change did
+not show up), re-capture (partly landed), or settle by blind A/B
+(inconclusive). `--bands F,Q,G ... --old-bands ...` when only some of a
+report's edits were written.
+
+**Voicing last, by ear.** Once the corrections are verified, `pipeline.py
+voice-variants --afpx tuned.afpx --out-dir v --bass-channels <sub+midbass>
+--treble-channels <tweeters> --bass-db -1 1 --treble-db -1 1` builds one-shelf
+variants (low shelf on the bass channels, high shelf on the tweeters, in their
+end shelf slots; an existing shelf's gain is adjusted instead). It shows the
+edits first and writes only with `--confirm`. Compare each variant against the
+current tune with its `ab_make` line — blind, level-matched, at normal volume —
+and keep only a repeatable preference; then record the voiced target for the
+next session. A variant that measures further from the curve but is preferred
+blind is a voicing choice, and the right one.
+
 **Order.** Check the tilt and voicing (§Voicing,) → set the bass LEVEL
 (`bass_balance`; a trim or sub amp gain, not bells) → choose the sub/midbass
 setting with `mmm-compare --objective balanced --repeat <baseline-repeat>`
@@ -2257,8 +2308,8 @@ over the handover band, using the chosen target and unchanged reference →
 match L/R with `lr-match --target <same-target>` (only target-supported cuts) →
 `refine` (or `propose` on a channel with no PEQ yet) with
 `--capture mmm --cancel-check ...` → blind, loudness-matched A/B (§Judge by ear
-only at matched loudness,) → re-capture and verify with the measured
-local `repeatability` profile. `mmm-compare` measures repeat disagreement
+only at matched loudness,) → re-capture and `pipeline.py verify` with the
+same capture set → `voice-variants` blind A/B last. `mmm-compare` measures repeat disagreement
 from the difference BETWEEN the repeat curves, not the difference of their
 target-error scores (two different curves can have equal scores). It keeps
 the current setting unless a candidate clears twice that RMS disagreement,

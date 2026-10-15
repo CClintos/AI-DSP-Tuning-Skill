@@ -149,7 +149,10 @@ class CancellationWithoutPhaseTests(Cli):
         left, right, both = self.pair(cancelling=True)
         ungated = self.run_cli("propose", "--capture", "mmm", "--measurement", both,
                                "--target", "default")
-        self.assertTrue(self.boosts_near_1k(ungated, "bands"), ungated["proposal"])
+        # With no evidence either way the boost is not an ordinary correction:
+        # it is held back as a measured trial.
+        self.assertFalse(self.boosts_near_1k(ungated, "bands"), ungated["proposal"])
+        self.assertTrue(self.boosts_near_1k(ungated, "needs_trial"), ungated["proposal"])
         self.assertTrue(any("--cancel-check" in n for n in ungated["notes"]))
         gated = self.run_cli("propose", "--capture", "mmm", "--measurement", both,
                              "--target", "default", "--cancel-check", left, right, both)
