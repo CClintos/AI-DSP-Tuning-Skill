@@ -4377,6 +4377,226 @@ def aggregate_probe_positions(per_position):
     return out
 
 
+# --------------------------------------------------------------------------
+# MMM / RTA CAPTURES. A moving-mic RTA average is already a spatial average,
+# magnitude only, with no noise rejection. Its risks are not the fixed-mic
+# ones: a wrong RTA mode tilts the whole reading, background noise fills real
+# dips, and with no phase a cancellation looks like any other dip. These
+# checks answer those questions from magnitude data alone.
+RTA_TILT_BOUNDS = (-2.5, 1.5)
+
+
+def rta_tilt_check(tilt_db_per_oct, bounds=RTA_TILT_BOUNDS):
+    """None, or why a FULL-SYSTEM RTA reading's broadband tilt cannot be real.
+
+    REW's RTA in Spectrum (FFT) mode shows pink noise falling ~3 dB/oct, and
+    white noise in a 1/N-octave mode rises ~3 dB/oct. Either moves a car
+    that really sits near -0.9 dB/oct outside anything a real system does,
+    and voicing toward the target would then tilt the tune the opposite way
+    by the same amount. Meaningless on a solo driver capture."""
+    lo, hi = bounds
+    t = float(tilt_db_per_oct)
+    if t < lo:
+        return ('measured tilt %.2f dB/oct is steeper than any real full-system car response '
+                '-- REW\'s RTA in Spectrum (FFT) mode shows pink noise falling ~3 dB/oct. '
+                'Set the RTA to a 1/N-octave mode (e.g. 1/48 octave) with PINK periodic noise '
+                'and re-capture' % t)
+    if t > hi:
+        return ('measured tilt %+.2f dB/oct rises more than any real full-system car response '
+                '-- white noise in an octave-mode RTA rises ~3 dB/oct. Use PINK periodic '
+                'noise and re-capture' % t)
+    return None
+
+
+def capture_repeatability(freqs, runs_db, band=(100.0, 10000.0)):
+    """How far repeat captures of the SAME tune differ (shape, after level
+    alignment, ERB-smoothed) -- the resolution any before/after or
+    setting-vs-setting comparison has to beat.
+
+    Returns {'runs', 'level_spread_db', 'median_db', 'p90_db', 'noise_db'}:
+    noise_db (the median per-bin standard deviation, floored at 0.1 dB) is
+    the value predicted_vs_measured and compare_captures take."""
+    f = np.asarray(freqs, dtype=float)
+    runs = [np.asarray(r, dtype=float) for r in runs_db]
+    if len(runs) < 2:
+        raise ValueError('repeatability needs at least two captures of the same tune')
+    sel = (f >= band[0]) & (f <= band[1])
+    offsets = [weighted_median((r - runs[0])[sel]) for r in runs]
+    aligned = np.vstack([erb_smooth(f, r - o) for r, o in zip(runs, offsets)])
+    sd = np.std(aligned, axis=0, ddof=1)[sel]
+    med = float(np.median(sd))
+    return {'runs': len(runs),
+            'level_spread_db': round(float(max(offsets) - min(offsets)), 2),
+            'median_db': round(med, 2), 'p90_db': round(float(np.percentile(sd, 90)), 2),
+            'noise_db': round(max(0.1, med), 2)}
+
+
+def snr_support(signal_db, ambient_db, min_snr_db=10.0):
+    """(ok_mask, snr_db): where the capture stands at least min_snr_db above
+    an ambient capture taken the same way with the generator off. An RTA sums
+    everything it hears, so below that a dip can be filled by noise."""
+    snr = np.asarray(signal_db, dtype=float) - np.asarray(ambient_db, dtype=float)
+    return snr >= float(min_snr_db), snr
+
+
+def peq_bandwidth_oct(Q):
+    """Bandwidth in octaves of an RBJ peaking filter of quality Q."""
+    return 2.0 / np.log(2.0) * np.arcsinh(1.0 / (2.0 * float(Q)))
+
+
+def cancellation_boost_verdict(freqs, flagged, F, Q, block_frac=0.3):
+    """'ALLOW' | 'WARN' | 'BLOCK' for a boost at (F, Q) against an
+    interference_audit flag mask: BLOCK when at least block_frac of the
+    band's own bandwidth is cancellation, WARN when any of it is. A dip the
+    two halves create TOGETHER (measured sum below their power sum) is
+    destructive summation -- gain there is eaten, not heard."""
+    f = np.asarray(freqs, dtype=float)
+    half = peq_bandwidth_oct(Q) / 2.0
+    region = (f >= F / 2 ** half) & (f <= F * 2 ** half)
+    if not np.any(region):
+        return 'ALLOW'
+    frac = float(np.mean(np.asarray(flagged, dtype=bool)[region]))
+    if frac >= block_frac:
+        return 'BLOCK'
+    return 'WARN' if frac > 0 else 'ALLOW'
+
+
+COMPARE_FLOORS = {'level_db': 0.25, 'shape_error_db': 0.1}
+
+
+def compare_captures(freqs, captures, target_db, band, baseline, repeat_db=None,
+                     noise_db=None, objective='shape', support=None, floors=COMPARE_FLOORS):
+    """Rank magnitude captures of DIFFERENT settings (a sub delay, polarity,
+    Phase angle, a trim) over one band -- the MMM way to choose a
+    phase-domain setting when no phase is measured.
+
+    captures: {label: dB array}; baseline: the label of the current setting.
+    For each: level_db (in-band loudness vs the baseline, + = louder: less
+    cancellation for a summation band), shape_error_db (audibility score of
+    the in-band deviation from target after removing its own level), and
+    worst_dip_db. objective 'shape' ranks by shape error, 'level' by level.
+    A setting only counts as better when it beats the baseline by more than
+    the resolution: twice the difference between the baseline and repeat_db
+    (a second capture of the baseline setting), or twice noise_db if no
+    repeat was taken (reported as assumed) -- and never less than `floors`,
+    the smallest change worth acting on: one repeat is a single draw of the
+    noise and can land small by luck."""
+    if objective not in ('shape', 'level'):
+        raise ValueError("objective must be 'shape' or 'level'")
+    if baseline not in captures:
+        raise ValueError('baseline %r is not one of the captures' % baseline)
+    f = np.asarray(freqs, dtype=float)
+    live = np.ones_like(f, dtype=bool) if support is None else np.asarray(support, dtype=bool)
+    sel = (f >= band[0]) & (f <= band[1]) & live
+    if np.count_nonzero(sel) < 8:
+        raise ValueError('the band holds too few measured bins to compare')
+    tgt = np.asarray(target_db, dtype=float)
+    base = np.asarray(captures[baseline], dtype=float)
+
+    def metrics(trace):
+        trace = np.asarray(trace, dtype=float)
+        dev = trace - tgt
+        dev = dev - float(np.median(dev[sel]))
+        sm = erb_smooth(f, dev)
+        return {'level_db': loudness_change_db(f[sel], base[sel], trace[sel],
+                                               band=(f[sel][0], f[sel][-1])),
+                'shape_error_db': audibility_score(f, dev, band=band, mask=live),
+                'worst_dip_db': float(np.min(sm[sel]))}
+
+    rows = {label: metrics(trace) for label, trace in captures.items()}
+    if repeat_db is not None:
+        rep = metrics(repeat_db)
+        res = {'level_db': max(floors['level_db'], 2 * abs(rep['level_db'])),
+               'shape_error_db': max(floors['shape_error_db'],
+                                     2 * abs(rep['shape_error_db']
+                                             - rows[baseline]['shape_error_db']))}
+        source = 'measured (baseline repeated)'
+    else:
+        nd = 0.25 if noise_db is None else float(noise_db)
+        res = {'level_db': max(floors['level_db'], 2 * nd),
+               'shape_error_db': max(floors['shape_error_db'], nd)}
+        source = 'assumed (%.2f dB) -- capture the baseline twice to measure it' % nd
+    key = 'shape_error_db' if objective == 'shape' else 'level_db'
+    sign = 1.0 if objective == 'shape' else -1.0      # lower shape error / higher level wins
+    out = []
+    for label, m in rows.items():
+        gain = sign * (rows[baseline][key] - m[key])
+        out.append({'label': label,
+                    'level_db': round(m['level_db'], 2),
+                    'shape_error_db': round(m['shape_error_db'], 3),
+                    'worst_dip_db': round(m['worst_dip_db'], 2),
+                    'improvement_vs_baseline': round(gain, 3),
+                    'distinguishable': bool(label != baseline and gain > res[key])})
+    out.sort(key=lambda r: -r['improvement_vs_baseline'] if r['label'] != baseline else 0.0)
+    winners = [r for r in out if r['distinguishable']]
+    if winners:
+        best = max(winners, key=lambda r: r['improvement_vs_baseline'])
+        verdict = '%s beats %s by more than the measurement can resolve' % (best['label'], baseline)
+        choice = best['label']
+    else:
+        verdict = ('no setting is distinguishably better than %s -- keep it (a difference '
+                   'smaller than the repeatability is not a result)' % baseline)
+        choice = baseline
+    return {'objective': objective, 'band_hz': [float(band[0]), float(band[1])],
+            'baseline': baseline, 'resolution': {k: round(v, 3) for k, v in res.items()},
+            'resolution_source': source, 'captures': out, 'choice': choice,
+            'verdict': verdict}
+
+
+def lr_match_cuts(freqs, left_db, right_db, band=(300.0, 6000.0), flag_db=1.5,
+                  max_bands=3, max_cut_db=-6.0):
+    """Close a left/right tonal mismatch from two half-system captures (left
+    side only, right side only) the way that cannot add boost: remove the
+    broadband offset first (a trim on the louder side), then fit CUTS on the
+    louder side inside each remaining mismatch region.
+
+    Returns {'level_offset_db' (left minus right; + = left louder),
+    'trim': {'side', 'trim_db'} or None, 'regions' (lr_match_report on the
+    level-matched pair), 'cuts': [{'side', 'f_hz', 'q', 'gain_db'}],
+    'wrms_before_db', 'wrms_after_db'}."""
+    f = np.asarray(freqs, dtype=float)
+    L = np.asarray(left_db, dtype=float)
+    R = np.asarray(right_db, dtype=float)
+    sel = (f >= band[0]) & (f <= band[1])
+    # The broadband offset is what most of the band agrees on, not a median
+    # dragged by the very regions that differ: re-estimate on the bins that
+    # sit within 1 dB of the current estimate.
+    d = erb_smooth(f, L - R)[sel]
+    offset = float(np.median(d))
+    for _ in range(4):
+        near = np.abs(d - offset) < 1.0
+        if np.count_nonzero(near) < 8:
+            break
+        offset = float(np.median(d[near]))
+    trim = None
+    if abs(offset) >= 0.5:
+        trim = {'side': 'left' if offset > 0 else 'right', 'trim_db': round(-abs(offset), 2)}
+    Lm = L - offset
+    before = lr_match_report(f, Lm, R, band=band, flag_db=flag_db)
+    cuts = []
+    diff_after = erb_smooth(f, Lm - R)
+    for side, louder in (('left', Lm - R), ('right', R - Lm)):
+        # Each side is fitted only where IT is louder: the other side's excess
+        # reads here as a dip no cut can fill, and would stop the fitter.
+        bands_side, _rep = fit_peq(f, np.maximum(louder, 0.0), band, n_bands_max=max_bands,
+                                   g_lim=(max_cut_db, 0.0), min_gain=0.75, fit_smoothed=True)
+        for F, Q, G in bands_side:
+            if G < 0:
+                cuts.append({'side': side, 'f_hz': F, 'q': Q, 'gain_db': G})
+                eq = cascade_db(f, [(F, Q, G)])
+                diff_after = diff_after + (eq if side == 'left' else -eq)
+
+    def wrms(d):
+        w = audibility_weight(f[sel])
+        return float(np.sqrt(np.sum((w * d[sel]) ** 2) / np.sum(w ** 2)))
+
+    return {'level_offset_db': round(offset, 2), 'trim': trim,
+            'regions': before['regions'],
+            'cuts': cuts,
+            'wrms_before_db': round(wrms(erb_smooth(f, Lm - R)), 2),
+            'wrms_after_db': round(wrms(diff_after), 2)}
+
+
 def source_bandwidth_limits(freqs, trace_db, ref_band=(300.0, 3000.0), drop_db=6.0):
     """Where a source trace is already rolled off, as (low_hz, high_hz).
 

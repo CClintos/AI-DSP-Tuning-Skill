@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.11.0`) so you can tell whether an already-installed copy is current — open
+`1.12.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -560,6 +560,24 @@ smaller than the measurement can resolve, or a region with low confidence,
 stays `inconclusive`. Edited and removed filters are predicted relative to the
 bank that was already measured, never as another cascade on top. `reverted_recommended` is treated as an instruction to
 reconsider that band, not a suggestion.
+
+### Tuning from moving-mic (MMM) RTA captures
+
+If you measure with a moving mic and REW's RTA, pass `--capture mmm`: each
+capture is treated as the spatial average it is, extra files as repeat runs
+(which measure how repeatable your captures are), and phase-based checks are
+switched off rather than run on data that has none. In their place:
+- a full-system tilt that only a wrong RTA mode can produce (Spectrum mode, or
+  white noise) is refused before it can tilt the tune;
+- `--ambient` drops frequencies the cabin's background noise could be filling;
+- `--cancel-check LEFT RIGHT BOTH` blocks boosts into dips that two halves
+  create together (cancellation), found from magnitude alone;
+- `mmm-compare` picks a sub delay, polarity or Phase setting from captures of
+  each, keeping the current one unless another beats it by more than your
+  measured repeatability;
+- `lr-match` trims the louder side and cuts each side only where it is louder.
+
+The capture checklist is in `references/methodology.md` (MMM-first tuning).
 
 ### Improving a tune that already exists
 

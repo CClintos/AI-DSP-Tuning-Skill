@@ -141,7 +141,11 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   `pipeline.py refine` re-works the PEQ bank a tuned car was measured through
   instead of stacking new bands (§Refine the tune you have,), and `pipeline.py
   ab-make` / `ab-result` run a blind, loudness-matched listening comparison
-  (§Judge by ear only at matched loudness,). With 3+ positions, `propose` validates
+  (§Judge by ear only at matched loudness,). For MMM data, `--capture mmm`
+  plus `--ambient` and `--cancel-check` on analyze/propose/refine, and
+  `pipeline.py mmm-compare` (choose a setting from captures) and `pipeline.py
+  lr-match` (left/right tonal match), replace the phase-based tools
+  (§MMM-first tuning,). With 3+ positions, `propose` validates
   itself leave-one-position-out: each band carries APPLY / REVIEW / DO NOT
   APPLY, and DO NOT APPLY bands land in `rejected`. Label the positions with
   `--sittings` so each fold withholds a whole sitting (§Held-out by sitting,),
@@ -312,7 +316,11 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
 - **What each measurement is**: a system-sum/response is the minimum. Solo drivers,
   L+R "together" pairs, and multi-position sweeps unlock progressively more (pair
   summation analysis, per-side imaging, robustness). Ask what they captured.
-- **Ask for 3+ mic positions (or an MMM average) before any EQ proposal** — it
+- **If the user tunes by MMM (moving-mic RTA), follow §MMM-first tuning,
+  instead of asking for positions:** one MMM run is already a spatial average;
+  ask for the capture set listed there (two full-system runs, the L/R and
+  sub/midbass halves, an ambient capture) and pass `--capture mmm`.
+- **Otherwise, ask for 3+ mic positions before any EQ proposal** — it
   is the single biggest lever on how good the tune ends up. From one sweep the
   fitter cannot tell a real response fault from a reflection comb at that mic
   spot, so it correctly holds back and fixes little; on synthetic held-out

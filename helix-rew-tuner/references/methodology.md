@@ -57,6 +57,7 @@ before correcting, and prefer doing less.**
 - [Seat validation outranks nearfield aesthetics](#nearfield-aesthetics-do-not-override-a-seat-validated-filter)
 - [Retraction discipline](#retraction-discipline-a-disproven-claim-invalidates-what-was-built-on-it)
 - [Rear-fill / ambience measurement discipline](#rear-fill-ambience-channels-need-their-own-measurement-discipline)
+- [MMM-first tuning](#mmm-first-tuning-the-short-path-for-tone-bass-level-and-lr-balance)
 - [Refine the tune you have](#refine-the-tune-you-have-before-adding-to-it)
 - [Matched-loudness blind A/B](#judge-by-ear-only-at-matched-loudness-blind)
 - [Crossover what-ifs](#crossover-what-ifs-modelled-never-written)
@@ -160,7 +161,8 @@ perception is itself level-dependent, so tonal balance judged at one SPL
 doesn't necessarily hold at another.
 
 **Default protocol:** sweeps (with acoustic timing reference) for all
-delay/polarity/crossover/APF work. MMM — engine off, at or near the user's
+delay/polarity/crossover/APF work — or, MMM-only, by comparing captures of
+each candidate setting with `mmm-compare` (§MMM-first tuning). MMM — engine off, at or near the user's
 real listening volume, confirmed no loudness-contour enhancement active — as
 the primary dataset for PEQ/tonal/voicing decisions. Where both exist for
 the same tune, a large disagreement between them in a given band is itself
@@ -2181,6 +2183,59 @@ separate source, then back off 2–3 dB. Time a rear or centre against the ONE
 front driver that plays most of the 1–4 kHz voice band (usually the midrange),
 not against the summed front stage — a band-limited arrival of a sum is the
 arrival of whichever driver plays earliest in that band.
+
+## MMM-first tuning: the short path for tone, bass level and L/R balance
+
+When the user tunes from moving-mic RTA averages (MMM), each capture is
+already a spatial average: do not ask for 3+ discrete positions, and pass
+`--capture mmm` to `analyze`, `propose` and `refine` so the tools read it that
+way. Extra `--positions` files are then REPEAT RUNS of the same tune, not
+seats: two runs give the repeatability every later comparison has to beat.
+MMM has no phase, so delay, polarity, Phase angle and crossover phase are
+chosen by comparing captures, never from one trace.
+
+**Capture set (engine off, one session, nothing changed in between):**
+REW RTA in a 1/N-octave mode (1/48 octave), never Spectrum mode; pink
+periodic noise with its length matched to the FFT length; unlimited averages,
+about 30 s per capture while moving the mic slowly through the head space of
+the judged seat (ear to ear, forehead to headrest); the same mic calibration
+file and the same mic aim every time; normal listening volume, nothing
+touched between captures.
+
+| Capture | What it unlocks |
+|---|---|
+| Full system, twice | the tonal deviation, and repeatability (`verification_noise_db`) |
+| Left side only, right side only, both | `lr-match`, and `--cancel-check LEFT RIGHT BOTH` |
+| Sub only, front midbasses only, sub + midbasses | bass level (`bass_balance`) and `--cancel-check SUB MIDS SUB+MIDS` |
+| Ambient (generator off) | `--ambient`: bins under 10 dB SNR are excluded |
+| Sub + midbasses at each candidate delay / polarity / Phase | `mmm-compare` picks one, or keeps the current one |
+
+**What the tools now enforce for MMM:**
+- *RTA mode.* A full-system tilt steeper than -2.5 dB/oct or rising faster
+  than +1.5 dB/oct is refused by `propose`/`refine` (noted by `analyze`):
+  Spectrum mode shows pink noise falling ~3 dB/oct and white noise in an
+  octave RTA rises ~3 dB/oct, and voicing toward the target would tilt the
+  tune the opposite way. `--accept-tilt` only if it really is the car.
+- *Noise.* An RTA adds the background in, so a dip can read as filled.
+  `--ambient` excludes every bin less than `--min-snr-db` (10) above it.
+- *Cancellation without phase.* Where two halves measured together sum below
+  the power sum of the halves alone, the dip is destructive summation; with
+  `--cancel-check` a boost into it is BLOCKed (a dip both halves already have
+  is not, and may be filled). The three captures must share one playback level.
+- *Repeatability.* Two or more runs give `capture.verification_noise_db`: pass
+  it to `predicted_vs_measured` as `noise_db` after the re-capture.
+
+**Order.** Check the tilt and voicing (§Voicing,) → set the bass LEVEL
+(`bass_balance`; a trim or sub amp gain, not bells) → choose the sub/midbass
+setting with `mmm-compare --objective level` over the handover band (most
+output = least cancellation), then `--objective shape` if two tie → match L/R
+with `lr-match` (trim the louder side, cut-only bands where one side is
+louder) → `refine` (or `propose` on a channel with no PEQ yet) with
+`--capture mmm --cancel-check ...` → blind, loudness-matched A/B (§Judge by ear
+only at matched loudness,) → re-capture and verify with the measured
+`noise_db`. `mmm-compare` keeps the current setting unless a candidate beats
+it by more than the measured repeatability and a floor of 0.25 dB (level) or
+0.1 dB (shape): a difference the method cannot resolve is not a result.
 
 ## Refine the tune you have before adding to it
 

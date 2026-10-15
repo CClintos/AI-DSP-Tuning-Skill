@@ -21,6 +21,11 @@
 # python pipeline.py refine --afpx <tune.afpx> --channels N [N...] --dsp-rate HZ --measurement|--positions ... --target ...
 # python pipeline.py ab-make --a <A.afpx> --b <B.afpx> --loudness-db X --out-dir <dir> [--confirm-trim]
 # python pipeline.py ab-result --key <dir>/.ab_key.json --choices X Y Y X ...
+# python pipeline.py mmm-compare --captures now=a.txt d05=b.txt ... --band LO HI [--repeat now2.txt]
+# python pipeline.py lr-match --left L.txt --right R.txt [--band 300 6000]
+#   analyze/propose/refine also take: --capture mmm (each --positions file is a
+#   repeat MMM run, not a seat), --ambient noise.txt, --cancel-check A B BOTH,
+#   --accept-tilt
 # python pipeline.py session check --tune <file>  |  session save --tune <file> --answers <json>
 #   --measurement FILE           REW text export (system sum or primary trace)
 #   --positions FILE [FILE...]   2+ position sweeps -> spatial_consistency
@@ -724,6 +729,7 @@ def _load_session(args, freqs):
         positions_db.append(measure.resample_log(f, s, freqs))
         support &= measure.support_mask(f, freqs)
 
+    capture = getattr(args, 'capture', None) or 'sweep'
     measurement_phase = meas_axis = None
     measurement_header = None
     if args.measurement:
@@ -732,10 +738,33 @@ def _load_session(args, freqs):
         measurement_phase, meas_axis = ph, f
         measurement_header = measure.read_export_header(args.measurement)
         support &= measure.support_mask(f, freqs)
+        if capture == 'mmm' and ph is not None:
+            notes.append('phase column ignored: a moving-mic RTA average has no meaningful '
+                         'phase, so nothing phase-based is run on it')
+            measurement_phase = None
     elif positions_db:
         primary_db = positions_db[0]
     else:
         raise ValueError('need --measurement or --positions')
+
+    ambient = None
+    if getattr(args, 'ambient', None):
+        fa, sa, _pa, _ca = measure.load_text_export(args.ambient)
+        amb_db = measure.resample_log(fa, sa, freqs)
+        raw = positions_db + ([primary_db] if args.measurement else [])
+        ok, snr = tunelib.snr_support(np.min(np.vstack(raw), axis=0), amb_db,
+                                      getattr(args, 'min_snr_db', 10.0))
+        ok &= measure.support_mask(fa, freqs)
+        lost = _mask_runs(freqs, support & ~ok)
+        live = support & ok
+        ambient = {'file': args.ambient, 'min_snr_db': getattr(args, 'min_snr_db', 10.0),
+                   'excluded_hz': lost,
+                   'median_snr_db': round(float(np.median(snr[live])), 1) if np.any(live) else None}
+        if lost:
+            notes.append('excluded where the capture is less than %.0f dB above the ambient '
+                         'capture (an RTA adds the noise in, so a dip there can be noise-filled): '
+                         '%s' % (ambient['min_snr_db'], ', '.join(lost)))
+        support &= ok
 
     if not np.all(support) and np.any(support):
         covered = freqs[support]
@@ -757,14 +786,18 @@ def _load_session(args, freqs):
         target_db = tunelib.voice_target(freqs, target_db, **voice_knobs)
 
     sc = aligned = None
+    repeatability = None
     if len(positions_db) >= 2:
         sc = tunelib.spatial_consistency(freqs, positions_db, min_positions=2)
         aligned = np.vstack(positions_db) - np.asarray(sc['level_offsets_db'])[:, None]
         basis_db = sc['mean_db']
-        source = 'mean of %d positions' % len(positions_db)
+        source = ('mean of %d MMM runs' if capture == 'mmm' else
+                  'mean of %d positions') % len(positions_db)
+        if capture == 'mmm':
+            repeatability = tunelib.capture_repeatability(freqs, positions_db)
     else:
         basis_db = primary_db
-        source = 'single position'
+        source = 'MMM average (one run)' if capture == 'mmm' else 'single position'
     # Two positions cannot separate a real dip from a seat-specific null, so
     # only three or more earn a mask/confidence.
     authority = sc if len(positions_db) >= 3 else None
@@ -781,7 +814,72 @@ def _load_session(args, freqs):
         'mask': mask, 'conf': conf, 'support': support, 'gate_floor_hz': gate_floor,
         'duplicates': duplicates, 'notes': notes,
         'anchor': anchor, 'dev_db': basis_db - (target_db + anchor),
+        'capture': capture, 'repeatability': repeatability, 'ambient': ambient,
     }
+
+
+def _mask_runs(freqs, mask):
+    """Contiguous True runs of `mask` as 'LO-HI Hz' strings."""
+    runs, start = [], None
+    for i, on in enumerate(mask):
+        if on and start is None:
+            start = i
+        if start is not None and (not on or i == len(mask) - 1):
+            end = i if on else i - 1
+            runs.append('%.0f-%.0f Hz' % (freqs[start], freqs[end]))
+            start = None
+    return runs
+
+
+def _rta_tilt(freqs, sess, notes, refuse, accept=False):
+    """MMM only: catch an RTA in the wrong mode before it tilts the tune.
+    refuse=True for a full-system proposal; analyze only notes it (it may be
+    looking at a solo)."""
+    if sess['capture'] != 'mmm':
+        return None
+    live = sess['support']
+    tilt = tunelib.measure_tilt(freqs[live], sess['basis_db'][live])['tilt_db_per_oct']
+    problem = tunelib.rta_tilt_check(tilt)
+    if problem and refuse and not accept:
+        raise ValueError(problem + ' (pass --accept-tilt only if this really is the car)')
+    if problem:
+        notes.append(problem + ('' if refuse else ' -- if this is a full-system capture'))
+    return {'tilt_db_per_oct': tilt, 'problem': problem}
+
+
+def _cancel_checks(args, freqs):
+    """Magnitude-only cancellation maps from (part A, part B, both together)
+    captures at one playback level: where the pair measures BELOW the power
+    sum of its halves, the dip is destructive summation and no boost fills it."""
+    checks = []
+    for files in getattr(args, 'cancel_check', None) or []:
+        traces, live = [], np.ones_like(freqs, dtype=bool)
+        for path in files:
+            f, s, _ph, _c = measure.load_text_export(path)
+            traces.append(measure.resample_log(f, s, freqs))
+            live &= measure.support_mask(f, freqs)
+        _ps, _cs, interf, flagged = tunelib.interference_audit(freqs, *traces)
+        flagged = flagged & live
+        checks.append({'files': list(files), 'flagged': flagged,
+                       'cancellation_hz': _mask_runs(freqs, flagged)})
+    return checks
+
+
+def _cancel_verdict(freqs, checks, F, Q):
+    order = {'ALLOW': 0, 'WARN': 1, 'BLOCK': 2}
+    verdict = 'ALLOW'
+    for c in checks:
+        v = tunelib.cancellation_boost_verdict(freqs, c['flagged'], F, Q)
+        verdict = max(verdict, v, key=order.get)
+    return verdict
+
+
+def _capture_report(sess, tilt):
+    return {'method': sess['capture'],
+            'runs': len(sess['positions_db']) or 1,
+            'repeatability': sess['repeatability'],
+            'verification_noise_db': (sess['repeatability'] or {}).get('noise_db'),
+            'rta_tilt': tilt, 'ambient': sess['ambient']}
 
 
 SESSION_ANCHOR_BAND = (300.0, 3000.0)    # tunelib.target_anchor_offset's first choice
@@ -863,6 +961,12 @@ def analyze(args):
     if sess['voice_knobs']:
         report['voicing_applied'] = sess['voice_knobs']
 
+    tilt = _rta_tilt(freqs, sess, notes, refuse=False)
+    report['capture'] = _capture_report(sess, tilt)
+    cancel = _cancel_checks(args, freqs)
+    if cancel:
+        report['cancellation'] = [{'files': c['files'], 'cancellation_hz': c['cancellation_hz']}
+                                  for c in cancel]
     report['meta'] = {
         'measurement_file': args.measurement,
         'positions_used': len(positions_db),
@@ -937,7 +1041,7 @@ def analyze(args):
             'mean_confidence': round(float(np.mean(sc['conf'])), 2),
             'low_confidence_regions': _find_regions(freqs, sc['spread_db'], args.dev_flag_db),
         }
-    elif positions_db:
+    elif positions_db and sess['capture'] != 'mmm':
         notes.append('%d position(s) given -- need >=3 for spatial_consistency '
                      '(fewer positions cannot tell a real dip from a '
                      'position-specific null)' % len(positions_db))
@@ -1049,6 +1153,12 @@ def propose(args):
         sess['dev_db'] = sess['basis_db'] - (sess['target_db'] + anchor)
     mask, conf, dev_db = sess['mask'], sess['conf'], sess['dev_db']
 
+    tilt = None
+    if not solo_band:
+        tilt = _rta_tilt(freqs, sess, notes, refuse=True,
+                         accept=getattr(args, 'accept_tilt', False))
+    mmm = sess['capture'] == 'mmm'
+    unit = 'run' if mmm else 'position'
     held_out = None
     band_validation = {}
     groups = _sitting_groups(args, sess, notes)
@@ -1067,24 +1177,33 @@ def propose(args):
                       'median_held_out_gain_db': held_out['median_held_out_gain_db'],
                       'worst_held_out_gain_db': held_out['worst_held_out_gain_db']}
         if held_out['verdict'] == 'not_validated':
-            notes.append('held-out validation FAILED: refitted without each position in '
-                         'turn, the proposal did not reliably help the position left out -- '
-                         'treat every band as position-specific until more positions agree')
+            notes.append('held-out validation FAILED: refitted without each %s in '
+                         'turn, the proposal did not reliably help the %s left out -- '
+                         'treat every band as unconfirmed until more %ss agree'
+                         % (unit, unit, unit))
     elif sess['aligned'] is not None:
         deviations = sess['aligned'] - (sess['target_db'] + sess['anchor'])
         bands, fit_report = tunelib.fit_peq_robust(
             freqs, deviations, band, n_bands_max=args.max_bands,
             mask=mask, conf=conf, fit_smoothed=True)
-        if groups is None:
+        if groups is None and mmm:
+            notes.append('two MMM runs: fitted jointly; their repeatability (%.2f dB) is the '
+                         'resolution any re-measure must beat' % sess['repeatability']['noise_db'])
+        elif groups is None:
             notes.append('two positions: fitted jointly, but held-out validation needs 3+ '
                          'positions, so no band carries a generalisation check')
     else:
         deviations = None
         bands, fit_report = tunelib.fit_peq(
             freqs, dev_db, band, n_bands_max=args.max_bands, mask=mask, fit_smoothed=True)
-        notes.append('single position: the fit cannot tell a real feature from '
-                     'a seat-specific one, and held-out validation needs 3+ '
-                     'positions -- capture them (or MMM) before trusting narrow bands')
+        if mmm:
+            notes.append('one MMM run: already a spatial average, so the fit is not chasing '
+                         'one mic spot -- capture the same tune a second time to measure '
+                         'repeatability, which verification and mmm-compare need')
+        else:
+            notes.append('single position: the fit cannot tell a real feature from '
+                         'a seat-specific one, and held-out validation needs 3+ '
+                         'positions -- capture them (or MMM) before trusting narrow bands')
 
     gate = {}
     has_boost = any(g > 0 for _f, _q, g in bands)
@@ -1100,6 +1219,18 @@ def propose(args):
                 notes.append(_smoothing_note(sess))
         except ValueError as exc:
             notes.append('boost gate skipped: %s' % exc)
+    elif has_boost and _cancel_checks(args, freqs):
+        cancel = _cancel_checks(args, freqs)
+        for F, Q, G in bands:
+            if G > 0:
+                gate[(float(F), float(Q), float(G))] = _cancel_verdict(freqs, cancel, F, Q)
+        notes.append('no phase: boosts were checked against %d measured pair(s) instead -- '
+                     'a boost into a dip the pair creates together (measured sum below the '
+                     'power sum of its halves) is BLOCKed' % len(cancel))
+    elif has_boost and mmm:
+        notes.append('boosts are UNGATED: an MMM capture has no phase. Give --cancel-check '
+                     'LEFT RIGHT BOTH (and SUB MIDS SUB+MIDS), captured at one playback level, '
+                     'to check them for cancellation from magnitude alone')
     elif has_boost:
         notes.append('boosts are UNGATED: no phase column in --measurement, so the '
                      'boost gate could not check them for cancellation '
@@ -1134,7 +1265,8 @@ def propose(args):
             rejected.append(row)
             continue
         if verdict == 'BLOCK':
-            row['reason'] = 'boost gate BLOCK: the dip is phase-anomalous; gain would be eaten'
+            row['reason'] = ('boost gate BLOCK: the dip is a cancellation (phase-anomalous, or '
+                             'the pair sums below its power sum); gain would be eaten')
             rejected.append(row)
             continue
         if verdict == 'WARN':
@@ -1189,6 +1321,7 @@ def propose(args):
                  'sittings_used': None if groups is None else len(set(groups)),
                  'deviation_source': sess['deviation_source'],
                  'fit_band_hz': list(band),
+                 'capture': _capture_report(sess, tilt),
                  'gate_floor_hz': (round(sess['gate_floor_hz'], 1)
                                    if sess['gate_floor_hz'] else None),
                  'duplicate_positions': sess['duplicates'],
@@ -1483,6 +1616,10 @@ def refine(args):
                      'bank decision; widen it with --fit-band if the driver plays wider'
                      % band)
 
+    tilt = None
+    if not _outside_anchor(band):
+        tilt = _rta_tilt(freqs, sess, notes, refuse=True,
+                         accept=getattr(args, 'accept_tilt', False))
     # Level is anchored inside the judged band, never the session's 300-3000 Hz
     # default: that lies in a tweeter's or a sub's stopband (tunelib.refine_bank).
     anchor = _band_anchor(freqs, sess, band)
@@ -1494,8 +1631,12 @@ def refine(args):
         devs = list(sess['aligned'] - (sess['target_db'] + anchor))
     else:
         devs = [sess['basis_db'] - (sess['target_db'] + anchor)]
-        notes.append('single position: refining against one mic spot -- capture 3+ positions '
-                     'before trusting a re-fit or an added band')
+        if sess['capture'] == 'mmm':
+            notes.append('one MMM run: a spatial average already -- capture the same tune again '
+                         'to measure repeatability before trusting a small change')
+        else:
+            notes.append('single position: refining against one mic spot -- capture 3+ '
+                         'positions before trusting a re-fit or an added band')
 
     boost_check = None
     if sess['measurement_phase'] is not None:
@@ -1507,6 +1648,12 @@ def refine(args):
                 return rows[0]['verdict']
         except ValueError as exc:
             notes.append('boost gate unavailable: %s' % exc)
+    cancel = _cancel_checks(args, freqs)
+    if boost_check is None and cancel:
+        def boost_check(F, Q, G):
+            return _cancel_verdict(freqs, cancel, F, Q)
+        notes.append('no phase: candidate boosts are checked for cancellation against %d '
+                     'measured pair(s)' % len(cancel))
 
     gcheck = guard_check(load_guards(args.afpx, notes), args.channels, freqs)
     guard_blocks = {}
@@ -1580,7 +1727,9 @@ def refine(args):
         'edits': edits, 'plan_edits': plan_edits,
         'comparison': comparison,
         'verify_with': {'bands': result['bank'], 'old_bands': result['old_bank'],
-                        'note': 'pass both to predicted_vs_measured after re-measuring'},
+                        'noise_db': (sess['repeatability'] or {}).get('noise_db'),
+                        'note': 'pass these to predicted_vs_measured after re-measuring'},
+        'capture': _capture_report(sess, tilt),
         'notes': notes,
         'predicted_not_measured': True,
         'next_step': ('present each edit (what, slot, why, predicted change), copy only the '
@@ -1707,6 +1856,90 @@ def ab_result(args):
     if n < 6:
         entry['caution'] = 'fewer than 6 decided choices -- treat any preference as provisional'
     return entry
+
+
+def _labelled(specs, what):
+    out = {}
+    for spec in specs:
+        label, sep, path = spec.partition('=')
+        if not sep or not label or not path:
+            raise ValueError('%s wants LABEL=PATH, got %r' % (what, spec))
+        if label in out:
+            raise ValueError('duplicate label %r' % label)
+        out[label] = path
+    return out
+
+
+def mmm_compare(args):
+    """Which setting is better, from magnitude captures alone (writes nothing).
+
+    Capture the same MMM path at each candidate setting -- a sub delay, sub
+    polarity, a Phase angle, a trim -- and rank them over one band. Nothing
+    wins unless it beats the baseline by more than the measured repeatability
+    (--repeat: a second capture of the baseline setting)."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    files = _labelled(args.captures, '--captures')
+    if len(files) < 2:
+        raise ValueError('mmm-compare needs at least two captures')
+    captures, live = {}, np.ones_like(freqs, dtype=bool)
+    for label, path in files.items():
+        f, s, _ph, _c = measure.load_text_export(path)
+        captures[label] = measure.resample_log(f, s, freqs)
+        live &= measure.support_mask(f, freqs)
+    repeat = None
+    if args.repeat:
+        f, s, _ph, _c = measure.load_text_export(args.repeat)
+        repeat = measure.resample_log(f, s, freqs)
+        live &= measure.support_mask(f, freqs)
+    notes = []
+    if args.ambient:
+        f, s, _ph, _c = measure.load_text_export(args.ambient)
+        ok, _snr = tunelib.snr_support(np.min(np.vstack(list(captures.values())), axis=0),
+                                       measure.resample_log(f, s, freqs), args.min_snr_db)
+        lost = _mask_runs(freqs, live & ~ok)
+        if lost:
+            notes.append('excluded below %.0f dB SNR: %s' % (args.min_snr_db, ', '.join(lost)))
+        live &= ok
+    target_path = ASSETS_DEFAULT_TARGET if args.target == 'default' else args.target
+    target_db = measure.load_target(target_path, freqs)
+    baseline = args.baseline or next(iter(files))
+    result = tunelib.compare_captures(freqs, captures, target_db, tuple(args.band), baseline,
+                                      repeat_db=repeat, noise_db=args.noise_db,
+                                      objective=args.objective, support=live)
+    if args.objective == 'level':
+        notes.append('level ranking assumes every capture used the same playback volume and '
+                     'gain: change only the setting under test between captures')
+    notes.append('a choice made here is still a phase-domain change to write (delay / '
+                 'polarity / Phase) through its own plan, then confirm with a fresh capture')
+    result['files'] = files
+    result['notes'] = notes
+    return result
+
+
+def lr_match(args):
+    """Left/right tonal match from two half-system captures (writes nothing).
+
+    Left side only and right side only, same MMM path and playback level:
+    reports the broadband offset (a trim on the louder side) and the cut-only
+    PEQ that closes each remaining mismatch region on the louder side."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    fl, sl, _p, _c = measure.load_text_export(args.left)
+    fr, sr, _p, _c = measure.load_text_export(args.right)
+    left = measure.resample_log(fl, sl, freqs)
+    right = measure.resample_log(fr, sr, freqs)
+    live = measure.support_mask(fl, freqs) & measure.support_mask(fr, freqs)
+    covered = freqs[live]
+    band = (max(args.band[0], float(covered[0])), min(args.band[1], float(covered[-1])))
+    result = tunelib.lr_match_cuts(freqs, left, right, band=band, flag_db=args.flag_db)
+    notes = ['captures must share one MMM path and playback level; the trim goes on every '
+             'channel of the louder side (output_trim, attenuation only), each cut on the '
+             'driver of that side that plays its frequency',
+             'image balance is a listening decision too: confirm with a centred mono vocal, '
+             'and re-capture both halves after writing']
+    result.update({'meta': {'left': args.left, 'right': args.right,
+                            'band_hz': [round(band[0], 1), round(band[1], 1)]},
+                   'notes': notes, 'predicted_not_measured': True})
+    return result
 
 
 def junction(args):
@@ -1957,6 +2190,20 @@ def _selftest():
     print('\nALL PIPELINE SELFTESTS PASSED')
 
 
+def _capture_args(parser):
+    parser.add_argument('--capture', choices=('sweep', 'mmm'), default='sweep',
+                        help='mmm: a moving-mic RTA average -- each --positions file is a '
+                             'repeat run of the same tune, not a seat')
+    parser.add_argument('--ambient', help='RTA capture with the generator off (same settings)')
+    parser.add_argument('--min-snr-db', type=float, default=10.0)
+    parser.add_argument('--cancel-check', nargs=3, action='append',
+                        metavar=('PART_A', 'PART_B', 'BOTH'),
+                        help='two halves and both together at one playback level (e.g. left, '
+                             'right, both): boosts into their cancellation are blocked')
+    parser.add_argument('--accept-tilt', action='store_true',
+                        help='proceed although the MMM tilt looks like a wrong RTA mode')
+
+
 def main():
     ap = argparse.ArgumentParser(description='Deterministic analysis report for a tuning session.')
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -1988,6 +2235,8 @@ def main():
     an.add_argument('--dev-flag-db', type=float, default=2.0)
     an.add_argument('--out')
 
+    _capture_args(an)
+
     pr = sub.add_parser('propose',
                         help='deterministic PEQ proposal from the same inputs (writes nothing)')
     pr.add_argument('--measurement')
@@ -2008,6 +2257,7 @@ def main():
     pr.add_argument('--gate-ms', type=float,
                     help='the capture was time-gated: never fit below its trust floor')
     pr.add_argument('--out')
+    _capture_args(pr)
 
     rf = sub.add_parser('refine',
                         help='keep / relax / re-fit / remove / add on the existing PEQ bank '
@@ -2027,6 +2277,30 @@ def main():
     rf.add_argument('--gate-ms', type=float)
     rf.add_argument('--max-edits', type=int, default=4)
     rf.add_argument('--out')
+    _capture_args(rf)
+
+    mc = sub.add_parser('mmm-compare',
+                        help='rank magnitude captures of different settings over one band')
+    mc.add_argument('--captures', nargs='+', required=True, metavar='LABEL=PATH')
+    mc.add_argument('--baseline', help='label of the current setting (default: the first)')
+    mc.add_argument('--repeat', help='a second capture of the baseline setting')
+    mc.add_argument('--band', nargs=2, type=float, required=True, metavar=('LO_HZ', 'HI_HZ'))
+    mc.add_argument('--target', default='default')
+    mc.add_argument('--objective', choices=('shape', 'level'), default='shape',
+                    help='shape: closest to target in band; level: most output (summation)')
+    mc.add_argument('--noise-db', type=float,
+                    help='repeatability when no --repeat was captured (default 0.25)')
+    mc.add_argument('--ambient')
+    mc.add_argument('--min-snr-db', type=float, default=10.0)
+    mc.add_argument('--out')
+
+    lm = sub.add_parser('lr-match', help='left/right tonal match from half-system captures')
+    lm.add_argument('--left', required=True, help='left side only')
+    lm.add_argument('--right', required=True, help='right side only')
+    lm.add_argument('--band', nargs=2, type=float, default=(300.0, 6000.0),
+                    metavar=('LO_HZ', 'HI_HZ'))
+    lm.add_argument('--flag-db', type=float, default=1.5)
+    lm.add_argument('--out')
 
     abm = sub.add_parser('ab-make', help='blind, loudness-matched copies of two tunes')
     abm.add_argument('--a', required=True, help='current tune')
@@ -2109,11 +2383,12 @@ def main():
     elif args.cmd == 'apply':
         print(json.dumps(apply_plan(args.plan), indent=2))
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
-                      'refine', 'ab-make', 'ab-result'):
+                      'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match'):
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,
-                  'ab-result': ab_result}[args.cmd](args)
+                  'ab-result': ab_result, 'mmm-compare': mmm_compare,
+                  'lr-match': lr_match}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
             with open(args.out, 'w', encoding='utf-8') as fh:
