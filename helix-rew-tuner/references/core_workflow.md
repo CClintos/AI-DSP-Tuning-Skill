@@ -131,8 +131,11 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   ab-make` / `ab-result` run a blind, loudness-matched listening comparison
   (§Judge by ear only at matched loudness,). For MMM data, `--capture mmm`
   plus `--ambient` and `--cancel-check` on analyze/propose/refine, and
-  `pipeline.py mmm-compare` (choose a setting from captures) and `pipeline.py
-  lr-match` (left/right tonal match), replace the phase-based tools
+  `pipeline.py mmm-compare` (default balanced: target balance against an
+  unchanged measured reference, with output/shape guards) and `pipeline.py
+  lr-match --target <curve>` (match only by correcting target-supported
+  excess, never copying a dip onto the good side), support tonal decisions
+  without inferring phase
   (§MMM-first tuning,). With 3+ positions, `propose` validates
   itself leave-one-position-out: each band carries APPLY / REVIEW / DO NOT
   APPLY, and DO NOT APPLY bands land in `rejected`. Label the positions with
@@ -577,7 +580,10 @@ as a voicing question.
 If the user returns with a fresh measurement after loading the write, run
 `tunelib.predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
 old_bands=<filters already in the tune when before_db was measured>,
-noise_db=<measured repeatability>)` instead of just glancing at the new plot.
+repeatability=<capture.repeatability report>)` for repeated MMM captures
+instead of just glancing at the new plot. The profile supplies uncertainty
+in each filter's region; unsupported regions stay inconclusive. For other
+measurements, or legacy reports, pass `noise_db=<measured repeatability>`.
 A raw before/after diff would get swamped by exactly the things that differ
 between two real measurement runs (playback level, mic position, capture
 noise) — this function is built to not be fooled by those: it auto-aligns a
@@ -591,7 +597,7 @@ already contains them, so the prediction is new minus old, never another
 cascade on top. `'confirmed'` requires the re-measure to sit closer to the
 predicted change than to no change at all; a change smaller than the
 measurement can resolve is `'inconclusive'`, never `'confirmed'`. If
-`trace_changed` is false the whole re-measure matches the before trace —
+`trace_changed` is false no change clears the available resolution —
 check the new tune was actually loaded before judging any band. Each changed
 band comes back graded `confirmed` / `diverged` / `reverted_recommended` /
 `inconclusive`. Treat

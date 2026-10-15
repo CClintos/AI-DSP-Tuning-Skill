@@ -175,6 +175,21 @@ class CancellationWithoutPhaseTests(Cli):
 
 
 class CompareSettingsTests(Cli):
+    def test_default_rejects_louder_hump(self):
+        caps = [self.capture('now', 0), self.capture('hump', 6)]
+        r = self.run_cli('mmm-compare', '--captures', *caps, '--band', '40', '160')
+        self.assertEqual(r['objective'], 'balanced')
+        self.assertEqual(r['choice'], 'now')
+
+    def test_ambient_export_cannot_supply_unmeasured_reference(self):
+        caps = [self.capture('now', -6), self.capture('trial', -2)]
+        amb = self.root / 'ambient.txt'
+        amb.write_text('\n'.join('%.4f 30' % f for f in FREQS if f < 200), encoding='utf-8')
+        r = self.run_cli('mmm-compare', '--captures', *caps, '--band', '40', '160',
+                         '--ambient', str(amb))
+        self.assertEqual(r['choice'], 'now')
+        self.assertIsNone(r['reference_band_hz'])
+
     def capture(self, name, dip_db, noise=0.05):
         spl = (80 + _target() + tunelib.peaking_db(FREQS, 80.0, 1.5, dip_db)
                + self.rng.normal(0, noise, len(FREQS)))
@@ -204,6 +219,15 @@ class CompareSettingsTests(Cli):
 
 
 class LrMatchTests(Cli):
+    def test_custom_target_protects_correct_side(self):
+        target = _target()+tunelib.peaking_db(FREQS, 1500, 2, 4)
+        target_file = _rta(self.root / 'target.txt', target)
+        left = _rta(self.root / 'L.txt', 80+target)
+        right = _rta(self.root / 'R.txt', 80+target+tunelib.peaking_db(FREQS,1500,2,-6))
+        r = self.run_cli('lr-match', '--left', left, '--right', right, '--target', target_file)
+        self.assertEqual(r['cuts'], [])
+        self.assertTrue(r['unresolved_regions'])
+
     def test_trim_the_louder_side_then_cut_each_side_only_where_it_is_louder(self):
         left = _rta(self.root / "L.txt", 80 + _target() + tunelib.peaking_db(FREQS, 1500, 2, 3) + 1.0)
         right = _rta(self.root / "R.txt", 80 + _target() + tunelib.peaking_db(FREQS, 4000, 3, 2.5))

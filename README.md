@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.12.0`) so you can tell whether an already-installed copy is current — open
+`1.12.1`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -572,10 +572,15 @@ switched off rather than run on data that has none. In their place:
 - `--ambient` drops frequencies the cabin's background noise could be filling;
 - `--cancel-check LEFT RIGHT BOTH` blocks boosts into dips that two halves
   create together (cancellation), found from magnitude alone;
-- `mmm-compare` picks a sub delay, polarity or Phase setting from captures of
-  each, keeping the current one unless another beats it by more than your
-  measured repeatability;
-- `lr-match` trims the louder side and cuts each side only where it is louder.
+- `mmm-compare` defaults to balanced bass selection: target balance against
+  an unchanged measured midrange reference, with output and shape guards.
+  A louder hump cannot win on output alone; repeat disagreement is measured
+  between curves, and any winner needs a confirmation capture;
+- repeatability retains separate bass/midrange/treble estimates and a local
+  profile for filter verification, so quiet mids cannot certify noisy bass;
+- `lr-match --target <curve>` trims the louder side and proposes cuts only
+  when tone and matching both improve. It leaves unresolved dips for diagnosis
+  instead of copying them onto the good side.
 
 The capture checklist is in `references/methodology.md` (MMM-first tuning).
 

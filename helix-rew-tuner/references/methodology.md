@@ -2190,7 +2190,11 @@ When the user tunes from moving-mic RTA averages (MMM), each capture is
 already a spatial average: do not ask for 3+ discrete positions, and pass
 `--capture mmm` to `analyze`, `propose` and `refine` so the tools read it that
 way. Extra `--positions` files are then REPEAT RUNS of the same tune, not
-seats: two runs give the repeatability every later comparison has to beat.
+seats: two runs estimate the repeatability every later comparison has to beat.
+For one driver's seat, repeat the same compact movement around that driver's
+normal head area. Keep the seat, mic aim, signal, playback volume and capture
+duration consistent; a larger movement on the second run changes the sampled
+listening area. Two runs are an uncertainty estimate, not statistical proof.
 MMM has no phase, so delay, polarity, Phase angle and crossover phase are
 chosen by comparing captures, never from one trace.
 
@@ -2204,11 +2208,11 @@ touched between captures.
 
 | Capture | What it unlocks |
 |---|---|
-| Full system, twice | the tonal deviation, and repeatability (`verification_noise_db`) |
+| Full system, twice | tonal deviation and local repeatability (`capture.repeatability`) |
 | Left side only, right side only, both | `lr-match`, and `--cancel-check LEFT RIGHT BOTH` |
 | Sub only, front midbasses only, sub + midbasses | bass level (`bass_balance`) and `--cancel-check SUB MIDS SUB+MIDS` |
 | Ambient (generator off) | `--ambient`: bins under 10 dB SNR are excluded |
-| Sub + midbasses at each candidate delay / polarity / Phase | `mmm-compare` picks one, or keeps the current one |
+| Full system at each candidate bass delay / polarity / Phase | `mmm-compare` checks the handover against an unchanged measured midrange reference |
 
 **What the tools now enforce for MMM:**
 - *RTA mode.* A full-system tilt steeper than -2.5 dB/oct or rising faster
@@ -2222,20 +2226,49 @@ touched between captures.
   the power sum of the halves alone, the dip is destructive summation; with
   `--cancel-check` a boost into it is BLOCKed (a dip both halves already have
   is not, and may be filled). The three captures must share one playback level.
-- *Repeatability.* Two or more runs give `capture.verification_noise_db`: pass
-  it to `predicted_vs_measured` as `noise_db` after the re-capture.
+- *Repeatability.* Two or more runs give bass, midrange and treble summaries
+  plus a frequency profile in `capture.repeatability`. Pass that whole object
+  to `predicted_vs_measured(..., repeatability=profile)` after re-capture:
+  each changed filter is judged against uncertainty in its own region.
+  Missing coverage is inconclusive. `verification_noise_db` remains a
+  conservative scalar fallback; a quiet midrange must not certify noisy bass.
+- *L/R protection.* `lr-match --target <curve>` (default: the supplied in-car
+  target) proposes a cut only where the louder side also exceeds the target,
+  matching improves, and target error improves without a new deficit. Both
+  sides share one fixed target anchor after any proposed trim. A healthy side
+  is not cut to copy the other side's dip. `unresolved_regions` need diagnosis
+  and listening, not forced matching. A proposed trim is still a listening
+  decision; broad response differences can resemble a level offset.
+- *Bass selection.* `mmm-compare` defaults to `--objective balanced`: judge
+  target error in the handover relative to `--reference-band 300 3000`, with
+  guards against worse shape, new holes/humps and significant output loss.
+  Use full-system captures so that reference contains real, unchanged output;
+  never use a sub-only stopband or ambient noise as the reference. For another
+  comparison band, explicitly select an unchanged reference outside it. If
+  none is measured, balanced/level cannot choose a winner; `--objective shape`
+  can compare band shape only and cannot establish bass-to-midrange balance.
+  `--objective level` remains available but must pass the tonal guards too.
+  More output alone does not prove better sound or correct phase.
 
 **Order.** Check the tilt and voicing (§Voicing,) → set the bass LEVEL
 (`bass_balance`; a trim or sub amp gain, not bells) → choose the sub/midbass
-setting with `mmm-compare --objective level` over the handover band (most
-output = least cancellation), then `--objective shape` if two tie → match L/R
-with `lr-match` (trim the louder side, cut-only bands where one side is
-louder) → `refine` (or `propose` on a channel with no PEQ yet) with
+setting with `mmm-compare --objective balanced --repeat <baseline-repeat>`
+over the handover band, using the chosen target and unchanged reference →
+match L/R with `lr-match --target <same-target>` (only target-supported cuts) →
+`refine` (or `propose` on a channel with no PEQ yet) with
 `--capture mmm --cancel-check ...` → blind, loudness-matched A/B (§Judge by ear
 only at matched loudness,) → re-capture and verify with the measured
-`noise_db`. `mmm-compare` keeps the current setting unless a candidate beats
-it by more than the measured repeatability and a floor of 0.25 dB (level) or
-0.1 dB (shape): a difference the method cannot resolve is not a result.
+local `repeatability` profile. `mmm-compare` measures repeat disagreement
+from the difference BETWEEN the repeat curves, not the difference of their
+target-error scores (two different curves can have equal scores). It keeps
+the current setting unless a candidate clears twice that RMS disagreement,
+the engineering floors of 0.25 dB (level) / 0.1 dB (shape or target error),
+and the tonal guards. These thresholds are not universal audibility limits.
+Every winner is provisional: repeat the winning setting with the same path
+and source level, rerun the comparison, and confirm by listening before
+keeping it. MMM supports tonal decisions; it cannot prove arrival time,
+phase alignment or image position. After changing the handover, recheck bass
+level before further EQ.
 
 ## Refine the tune you have before adding to it
 

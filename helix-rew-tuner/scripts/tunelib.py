@@ -2934,7 +2934,7 @@ VERIFY_VERDICTS = ('confirmed', 'diverged', 'reverted_recommended', 'inconclusiv
 def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
                           conf=None, region_oct=0.3, consistent_db=2.0,
                           min_predicted_db=0.5, old_bands=None, noise_db=0.3,
-                          anchor_max_db=0.1, fs=FS):
+                          anchor_max_db=0.1, fs=FS, repeatability=None):
     """freqs, before_db: the ORIGINAL pre-write measurement (what the
     correction was actually proposed against). remeasured_after_db: the new
     measurement taken after loading the write. bands: the (F, Q, G) list
@@ -2961,7 +2961,9 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
     on a stand). A change smaller than max(min_predicted_db, 2 * noise_db)
     cannot be told apart from no change and grades 'inconclusive' -- never
     'confirmed'. anchor_max_db: |predicted change| below which a frequency
-    counts as untouched for level alignment.
+    counts as untouched for level alignment. repeatability: optionally pass
+    capture_repeatability's whole report; each filter then uses uncertainty
+    in its own region. Unmeasured regions are inconclusive.
 
     Returns {'level_offset_db', 'level_anchored', 'trace_changed',
     'resolution_db', 'bands': [...], 'notes'}. level_offset_db is the
@@ -2973,8 +2975,8 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
     moved the wrong way or barely moved at all despite a real predicted
     change, the same signature reaches_target_after_boost already treats as
     "phase is eating this, not an EQ problem" -- reconsider or remove that
-    band. If trace_changed is False the whole re-measure matches the before
-    trace: check the write was actually loaded before blaming the filters."""
+    band. If trace_changed is False no change clears the available resolution:
+    check the write was actually loaded before blaming the filters."""
     freqs = np.asarray(freqs, dtype=float)
     before_db = np.asarray(before_db, dtype=float)
     remeasured_after_db = np.asarray(remeasured_after_db, dtype=float)
@@ -3000,12 +3002,9 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
 
     pred_delta = erb_smooth(freqs, transfer_db)
     act_delta = erb_smooth(freqs, aligned_after_db - before_db)
-    resolution = max(float(min_predicted_db), 2.0 * float(noise_db))
+    resolution = max(float(min_predicted_db), 2.0 * float(
+        repeatability['noise_db'] if repeatability is not None else noise_db))
     trace_changed = bool(np.max(np.abs(act_delta)) > resolution)
-    if not trace_changed and np.max(np.abs(pred_delta)) > resolution:
-        notes.append('the re-measure matches the before trace everywhere -- confirm the '
-                     'new tune was actually loaded (and the right preset selected) '
-                     'before judging any filter')
 
     changed = ([b for b in new_set if b not in old_set] +
                [b for b in old_set if b not in new_set])
@@ -3019,8 +3018,15 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
         actual_change = float(np.average(act_delta[region], weights=w))
         error = actual_change - predicted_change
         region_conf = float(np.mean(conf[region])) if conf is not None else 1.0
+        local_noise = (repeatability_noise(repeatability, (F / 2 ** region_oct, F * 2 ** region_oct))
+                       if repeatability is not None else float(noise_db))
+        local_resolution = (max(float(min_predicted_db), 2.0 * local_noise)
+                            if local_noise is not None else None)
+        if local_resolution is not None and abs(actual_change) > local_resolution:
+            trace_changed = True
 
-        if region_conf < 0.3 or abs(predicted_change) < resolution:
+        if (region_conf < 0.3 or local_resolution is None
+                or abs(predicted_change) < local_resolution):
             verdict = 'inconclusive'
         elif abs(error) <= consistent_db and abs(error) < abs(actual_change):
             verdict = 'confirmed'
@@ -3036,9 +3042,15 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
                         'actual_change_db': round(actual_change, 2),
                         'error_db': round(error, 2),
                         'error_if_unchanged_db': round(abs(actual_change), 2),
+                        'resolution_db': local_resolution,
                         'confidence': round(region_conf, 2),
                         'verdict': verdict})
 
+    if not trace_changed and any(r['resolution_db'] is not None and
+                                abs(r['predicted_change_db']) > r['resolution_db']
+                                for r in reports):
+        notes.append('no resolved change in the re-measure -- confirm the new tune '
+                     'was loaded and the right preset selected before judging filters')
     return {'level_offset_db': round(float(level_offset_db), 2),
             'level_anchored': level_anchored, 'trace_changed': trace_changed,
             'resolution_db': round(resolution, 2), 'bands': reports, 'notes': notes}
@@ -4408,27 +4420,72 @@ def rta_tilt_check(tilt_db_per_oct, bounds=RTA_TILT_BOUNDS):
     return None
 
 
-def capture_repeatability(freqs, runs_db, band=(100.0, 10000.0)):
-    """How far repeat captures of the SAME tune differ (shape, after level
-    alignment, ERB-smoothed) -- the resolution any before/after or
-    setting-vs-setting comparison has to beat.
-
-    Returns {'runs', 'level_spread_db', 'median_db', 'p90_db', 'noise_db'}:
-    noise_db (the median per-bin standard deviation, floored at 0.1 dB) is
-    the value predicted_vs_measured and compare_captures take."""
+def _mmm_inputs(freqs, traces, band, support=None):
+    """Validate magnitude arrays and retain only shared, finite support."""
     f = np.asarray(freqs, dtype=float)
-    runs = [np.asarray(r, dtype=float) for r in runs_db]
+    if (f.ndim != 1 or len(f) < 8 or not np.isfinite(f).all()
+            or np.any(f <= 0) or np.any(np.diff(f) <= 0)):
+        raise ValueError('MMM frequency axis must be finite, positive and increasing')
+    if len(band) != 2 or not 0 < band[0] < band[1] or not np.isfinite(band).all():
+        raise ValueError('MMM band must have finite positive increasing limits')
+    rows = [np.asarray(r, dtype=float) for r in traces]
+    if not rows or any(r.shape != f.shape for r in rows):
+        raise ValueError('MMM traces must match the frequency axis')
+    live = np.ones_like(f, dtype=bool) if support is None else np.asarray(support, dtype=bool).copy()
+    if live.shape != f.shape:
+        raise ValueError('MMM support must match the frequency axis')
+    live &= np.all(np.isfinite(rows), axis=0)
+    sel = live & (f >= band[0]) & (f <= band[1])
+    if np.count_nonzero(sel) < 8:
+        raise ValueError('the band holds too few measured bins to compare')
+    return f, rows, live, sel
+
+
+def _mmm_rms(freqs, values, sel):
+    w = audibility_weight(freqs[sel])
+    return float(np.sqrt(np.average(np.asarray(values)[sel] ** 2, weights=w ** 2)))
+
+
+def capture_repeatability(freqs, runs_db, band=(20.0, 16000.0), support=None):
+    """Same-tune uncertainty after one broadband level alignment per run.
+
+    Keep the frequency profile and bass/mid/treble summaries: a quiet
+    midrange cannot certify noisy bass. noise_db is a conservative scalar
+    fallback (maximum supported regional RMS SD); use repeatability_noise
+    for a particular filter. Missing bins are JSON null, never extrapolated.
+    These small-sample estimates are not statistical confidence intervals.
+    """
+    f, runs, live, sel = _mmm_inputs(freqs, runs_db, band, support)
     if len(runs) < 2:
         raise ValueError('repeatability needs at least two captures of the same tune')
-    sel = (f >= band[0]) & (f <= band[1])
     offsets = [weighted_median((r - runs[0])[sel]) for r in runs]
-    aligned = np.vstack([erb_smooth(f, r - o) for r, o in zip(runs, offsets)])
-    sd = np.std(aligned, axis=0, ddof=1)[sel]
-    med = float(np.median(sd))
+    aligned = np.vstack([masked_erb_smooth(f, r - o, sel) for r, o in zip(runs, offsets)])
+    sd = np.std(aligned, axis=0, ddof=1)
+    med = float(np.median(sd[sel]))
+    regions = []
+    for name, lo, hi in (('bass', 20, 250), ('midrange', 250, 4000), ('treble', 4000, 16000)):
+        region = sel & (f >= lo) & (f <= hi)
+        regions.append({'name': name, 'band_hz': [lo, hi],
+                        'noise_db': (max(0.1, _mmm_rms(f, sd, region))
+                                     if np.count_nonzero(region) >= 8 else None)})
+    fallback = max([0.1] + [r['noise_db'] for r in regions if r['noise_db'] is not None])
     return {'runs': len(runs),
             'level_spread_db': round(float(max(offsets) - min(offsets)), 2),
-            'median_db': round(med, 2), 'p90_db': round(float(np.percentile(sd, 90)), 2),
-            'noise_db': round(max(0.1, med), 2)}
+            'median_db': round(med, 2), 'p90_db': round(float(np.percentile(sd[sel], 90)), 2),
+            'noise_db': max(fallback, _mmm_rms(f, sd, sel)), 'bands': regions,
+            'frequency_hz': f.tolist(),
+            'noise_by_frequency_db': [max(0.1, float(s)) if ok else None for s, ok in zip(sd, sel)]}
+
+
+def repeatability_noise(profile, band):
+    """RMS SD in a requested band, or None when its measured coverage is incomplete."""
+    f = np.asarray(profile['frequency_hz'], dtype=float)
+    noise = np.asarray(profile['noise_by_frequency_db'], dtype=float)
+    sel = (f >= band[0]) & (f <= band[1])
+    if (np.count_nonzero(sel) < 8 or band[0] < f[0] or band[1] > f[-1]
+            or not np.isfinite(noise[sel]).all()):
+        return None
+    return max(0.1, _mmm_rms(f, noise, sel))
 
 
 def snr_support(signal_db, ambient_db, min_snr_db=10.0):
@@ -4465,99 +4522,152 @@ COMPARE_FLOORS = {'level_db': 0.25, 'shape_error_db': 0.1}
 
 
 def compare_captures(freqs, captures, target_db, band, baseline, repeat_db=None,
-                     noise_db=None, objective='shape', support=None, floors=COMPARE_FLOORS):
-    """Rank magnitude captures of DIFFERENT settings (a sub delay, polarity,
-    Phase angle, a trim) over one band -- the MMM way to choose a
-    phase-domain setting when no phase is measured.
+                     noise_db=None, objective='shape', support=None, floors=COMPARE_FLOORS,
+                     reference_band=(300.0, 3000.0), max_new_deviation_db=0.5):
+    """Compare actual MMM trials; this does not infer phase from magnitude.
 
-    captures: {label: dB array}; baseline: the label of the current setting.
-    For each: level_db (in-band loudness vs the baseline, + = louder: less
-    cancellation for a summation band), shape_error_db (audibility score of
-    the in-band deviation from target after removing its own level), and
-    worst_dip_db. objective 'shape' ranks by shape error, 'level' by level.
-    A setting only counts as better when it beats the baseline by more than
-    the resolution: twice the difference between the baseline and repeat_db
-    (a second capture of the baseline setting), or twice noise_db if no
-    repeat was taken (reported as assumed) -- and never less than `floors`,
-    the smallest change worth acting on: one repeat is a single draw of the
-    noise and can land small by luck."""
-    if objective not in ('shape', 'level'):
-        raise ValueError("objective must be 'shape' or 'level'")
+    shape ranks level-independent shape; level ranks output but vetoes worse
+    shape, target balance or new holes/humps. balanced ranks target error
+    relative to a measured, unchanged reference band outside the trial band,
+    without losing significant output. level and balanced require that
+    reference; shape can operate without it, with a stated claim limit.
+
+    Repeat resolution comes from the RMS difference BETWEEN the curves,
+    never the difference of their target-error scores. Two captures are an
+    uncertainty estimate, not a significance test. Re-capture the winner.
+    max_new_deviation_db is a configurable engineering tolerance, not an
+    audibility threshold. All captures must share signal, level and mic path.
+    """
+    if objective not in ('shape', 'level', 'balanced'):
+        raise ValueError("objective must be 'shape', 'level' or 'balanced'")
     if baseline not in captures:
         raise ValueError('baseline %r is not one of the captures' % baseline)
-    f = np.asarray(freqs, dtype=float)
-    live = np.ones_like(f, dtype=bool) if support is None else np.asarray(support, dtype=bool)
-    sel = (f >= band[0]) & (f <= band[1]) & live
-    if np.count_nonzero(sel) < 8:
-        raise ValueError('the band holds too few measured bins to compare')
+    traces = list(captures.values()) + [target_db]
+    if repeat_db is not None:
+        traces.append(repeat_db)
+    f, _rows, live, sel = _mmm_inputs(freqs, traces, band, support)
     tgt = np.asarray(target_db, dtype=float)
     base = np.asarray(captures[baseline], dtype=float)
+    if (len(reference_band) != 2 or not np.isfinite(reference_band).all()
+            or not 0 < reference_band[0] < reference_band[1]):
+        raise ValueError('reference band must have finite positive increasing limits')
+    ref_requested = (f >= reference_band[0]) & (f <= reference_band[1])
+    ref = live & ref_requested
+    # A band partially overlapping the trial is not an independent reference.
+    ref_ok = (reference_band[1] < band[0] or reference_band[0] > band[1])
+    ref_ok = bool(ref_ok and np.count_nonzero(ref) >= 8
+                  and f[0] <= reference_band[0] and f[-1] >= reference_band[1]
+                  and np.all(live[ref_requested]))
+    anchor = float(np.median((base - tgt)[ref])) if ref_ok else None
 
     def metrics(trace):
         trace = np.asarray(trace, dtype=float)
         dev = trace - tgt
         dev = dev - float(np.median(dev[sel]))
-        sm = erb_smooth(f, dev)
+        sm = masked_erb_smooth(f, dev, live)
+        anchored = masked_erb_smooth(f, trace - tgt - anchor, live) if ref_ok else sm
         return {'level_db': loudness_change_db(f[sel], base[sel], trace[sel],
                                                band=(f[sel][0], f[sel][-1])),
-                'shape_error_db': audibility_score(f, dev, band=band, mask=live),
-                'worst_dip_db': float(np.min(sm[sel]))}
+                'shape_error_db': _mmm_rms(f, sm, sel),
+                'target_error_db': _mmm_rms(f, anchored, sel) if ref_ok else None,
+                'worst_dip_db': float(np.min(anchored[sel])),
+                'worst_peak_db': float(np.max(anchored[sel])),
+                'reference_change_db': float(np.median((trace-base)[ref])) if ref_ok else None}
 
     rows = {label: metrics(trace) for label, trace in captures.items()}
     if repeat_db is not None:
-        rep = metrics(repeat_db)
-        res = {'level_db': max(floors['level_db'], 2 * abs(rep['level_db'])),
-               'shape_error_db': max(floors['shape_error_db'],
-                                     2 * abs(rep['shape_error_db']
-                                             - rows[baseline]['shape_error_db']))}
+        delta = masked_erb_smooth(f, np.asarray(repeat_db) - base, live)
+        raw_noise = _mmm_rms(f, delta, sel)
+        shape_noise = _mmm_rms(f, delta - np.median(delta[sel]), sel)
+        res = {'level_db': max(floors['level_db'], 2 * raw_noise),
+               'shape_error_db': max(floors['shape_error_db'], 2 * shape_noise),
+               'target_error_db': max(floors['shape_error_db'], 2 * raw_noise)}
+        reference_resolution = max(floors['level_db'], 2 * _mmm_rms(f, delta, ref)) if ref_ok else None
         source = 'measured (baseline repeated)'
     else:
         nd = 0.25 if noise_db is None else float(noise_db)
+        if not np.isfinite(nd) or nd < 0:
+            raise ValueError('noise_db must be finite and nonnegative')
         res = {'level_db': max(floors['level_db'], 2 * nd),
-               'shape_error_db': max(floors['shape_error_db'], nd)}
+               'shape_error_db': max(floors['shape_error_db'], 2 * nd),
+               'target_error_db': max(floors['shape_error_db'], 2 * nd)}
+        reference_resolution = res['level_db'] if ref_ok else None
         source = 'assumed (%.2f dB) -- capture the baseline twice to measure it' % nd
-    key = 'shape_error_db' if objective == 'shape' else 'level_db'
-    sign = 1.0 if objective == 'shape' else -1.0      # lower shape error / higher level wins
+    key = {'shape': 'shape_error_db', 'level': 'level_db', 'balanced': 'target_error_db'}[objective]
+    sign = -1.0 if objective == 'level' else 1.0
     out = []
     for label, m in rows.items():
-        gain = sign * (rows[baseline][key] - m[key])
+        original = rows[baseline]
+        gain = sign * (original[key] - m[key]) if m[key] is not None else 0.0
+        reasons = []
+        if label != baseline:
+            if objective != 'shape' and not ref_ok:
+                reasons.append('no independent measured reference band for tonal balance')
+            if ref_ok and abs(m['reference_change_db']) > reference_resolution:
+                reasons.append('reference level changed; check playback gain or a wider tonal change')
+            if m['shape_error_db'] > original['shape_error_db'] + res['shape_error_db']:
+                reasons.append('shape became worse')
+            if ref_ok and m['target_error_db'] > original['target_error_db'] + res['target_error_db']:
+                reasons.append('balance relative to target became worse')
+            # Compare at EVERY bin: an existing deep hole elsewhere must not
+            # hide a newly dug hole or hump in the candidate.
+            old_dev = base - tgt - (anchor if ref_ok else np.median((base-tgt)[sel]))
+            new_trace = np.asarray(captures[label])
+            new_dev = new_trace - tgt - (anchor if ref_ok else np.median((new_trace-tgt)[sel]))
+            old_sm = masked_erb_smooth(f, old_dev, live)
+            new_sm = masked_erb_smooth(f, new_dev, live)
+            worsening = np.abs(new_sm) - np.abs(old_sm)
+            tolerance = max(max_new_deviation_db, res['target_error_db'] if ref_ok else res['shape_error_db'])
+            if float(np.max(worsening[sel])) > tolerance:
+                reasons.append('a local hole or hump became worse')
+            if objective == 'balanced' and m['level_db'] < -res['level_db']:
+                reasons.append('handover output fell significantly; assess as a level/voicing change')
         out.append({'label': label,
                     'level_db': round(m['level_db'], 2),
                     'shape_error_db': round(m['shape_error_db'], 3),
                     'worst_dip_db': round(m['worst_dip_db'], 2),
+                    'worst_peak_db': round(m['worst_peak_db'], 2),
+                    'target_error_db': round(m['target_error_db'], 3) if ref_ok else None,
+                    'reference_change_db': m['reference_change_db'],
                     'improvement_vs_baseline': round(gain, 3),
-                    'distinguishable': bool(label != baseline and gain > res[key])})
+                    'rejection_reasons': reasons,
+                    'distinguishable': bool(label != baseline and gain > res[key]),
+                    'eligible': bool(label != baseline and gain > res[key] and not reasons)})
     out.sort(key=lambda r: -r['improvement_vs_baseline'] if r['label'] != baseline else 0.0)
-    winners = [r for r in out if r['distinguishable']]
+    winners = [r for r in out if r['eligible']]
     if winners:
         best = max(winners, key=lambda r: r['improvement_vs_baseline'])
-        verdict = '%s beats %s by more than the measurement can resolve' % (best['label'], baseline)
+        verdict = '%s is a provisional improvement over %s; repeat it before keeping it' % (best['label'], baseline)
         choice = best['label']
     else:
         verdict = ('no setting is distinguishably better than %s -- keep it (a difference '
-                   'smaller than the repeatability is not a result)' % baseline)
+                   'smaller than repeatability or failing tonal guards is not a result)' % baseline)
         choice = baseline
     return {'objective': objective, 'band_hz': [float(band[0]), float(band[1])],
             'baseline': baseline, 'resolution': {k: round(v, 3) for k, v in res.items()},
             'resolution_source': source, 'captures': out, 'choice': choice,
+            'reference_band_hz': list(reference_band) if ref_ok else None,
+            'claim': 'tonal comparison only; no phase or image-position inference',
+            'requires_confirmation_capture': choice != baseline,
             'verdict': verdict}
 
 
 def lr_match_cuts(freqs, left_db, right_db, band=(300.0, 6000.0), flag_db=1.5,
-                  max_bands=3, max_cut_db=-6.0):
-    """Close a left/right tonal mismatch from two half-system captures (left
-    side only, right side only) the way that cannot add boost: remove the
-    broadband offset first (a trim on the louder side), then fit CUTS on the
-    louder side inside each remaining mismatch region.
+                  max_bands=3, max_cut_db=-6.0, target_db=None):
+    """Propose L/R cuts only where the louder side also exceeds the target.
 
-    Returns {'level_offset_db' (left minus right; + = left louder),
-    'trim': {'side', 'trim_db'} or None, 'regions' (lr_match_report on the
-    level-matched pair), 'cuts': [{'side', 'f_hz', 'q', 'gain_db'}],
-    'wrms_before_db', 'wrms_after_db'}."""
-    f = np.asarray(freqs, dtype=float)
-    L = np.asarray(left_db, dtype=float)
-    R = np.asarray(right_db, dtype=float)
-    sel = (f >= band[0]) & (f <= band[1])
+    A common target anchor is fixed after the proposed attenuation trim.
+    Every accepted cut must improve matching and that side's target error,
+    without digging a new deficit (>0.5 dB engineering tolerance). Unresolved
+    mismatch is reported for diagnosis, never copied onto the good side.
+    Without a target this is a trim/mismatch diagnostic only. All predictions
+    require repeat captures and a mono-vocal listening check.
+    """
+    traces = [left_db, right_db] + ([target_db] if target_db is not None else [])
+    f, rows, live, sel = _mmm_inputs(freqs, traces, band)
+    if not np.all(live):
+        raise ValueError('L/R matching needs finite measured curves on the supplied grid')
+    L, R = rows[:2]
     # The broadband offset is what most of the band agrees on, not a median
     # dragged by the very regions that differ: re-estimate on the bins that
     # sit within 1 dB of the current estimate.
@@ -4571,30 +4681,56 @@ def lr_match_cuts(freqs, left_db, right_db, band=(300.0, 6000.0), flag_db=1.5,
     trim = None
     if abs(offset) >= 0.5:
         trim = {'side': 'left' if offset > 0 else 'right', 'trim_db': round(-abs(offset), 2)}
-    Lm = L - offset
-    before = lr_match_report(f, Lm, R, band=band, flag_db=flag_db)
-    cuts = []
-    diff_after = erb_smooth(f, Lm - R)
-    for side, louder in (('left', Lm - R), ('right', R - Lm)):
-        # Each side is fitted only where IT is louder: the other side's excess
-        # reads here as a dip no cut can fill, and would stop the fitter.
-        bands_side, _rep = fit_peq(f, np.maximum(louder, 0.0), band, n_bands_max=max_bands,
-                                   g_lim=(max_cut_db, 0.0), min_gain=0.75, fit_smoothed=True)
-        for F, Q, G in bands_side:
-            if G < 0:
-                cuts.append({'side': side, 'f_hz': F, 'q': Q, 'gain_db': G})
-                eq = cascade_db(f, [(F, Q, G)])
-                diff_after = diff_after + (eq if side == 'left' else -eq)
-
-    def wrms(d):
-        w = audibility_weight(f[sel])
-        return float(np.sqrt(np.sum((w * d[sel]) ** 2) / np.sum(w ** 2)))
-
+    current = {'left': L.copy(), 'right': R.copy()}
+    if trim:
+        current[trim['side']] += trim['trim_db']
+    original = {side: curve.copy() for side, curve in current.items()}
+    before = lr_match_report(f, current['left'], current['right'], band=band, flag_db=flag_db)
+    cuts, rejected, notes = [], [], []
+    def error(delta):
+        return _mmm_rms(f, erb_smooth(f, delta), sel)
+    anchor = None
+    target_before = target_after = None
+    if target_db is None:
+        notes.append('target required before proposing tonal cuts; mismatch alone cannot identify the faulty side')
+    else:
+        target = np.asarray(target_db, dtype=float)
+        anchor = float(np.median(((current['left'] + current['right']) / 2 - target)[sel]))
+        target = target + anchor
+        target_before = {side: error(curve-target) for side, curve in original.items()}
+        for side, other in (('left', 'right'), ('right', 'left')):
+            excess = np.minimum(np.maximum(current[side]-current[other], 0),
+                                np.maximum(current[side]-target, 0))
+            candidates, _rep = fit_peq(f, excess, band, n_bands_max=max_bands,
+                                       g_lim=(max_cut_db, 0.0), min_gain=0.75, fit_smoothed=True)
+            for F, Q, G in candidates:
+                if G >= 0:
+                    continue
+                proposed = current[side] + cascade_db(f, [(F, Q, G)])
+                old_deficit = np.maximum(-erb_smooth(f, original[side]-target), 0)
+                new_deficit = np.maximum(-erb_smooth(f, proposed-target), 0)
+                improves = (error(proposed-current[other]) < error(current[side]-current[other])
+                            and error(proposed-target) < error(current[side]-target)
+                            and np.max((new_deficit-old_deficit)[sel]) <= 0.5)
+                row = {'side': side, 'f_hz': F, 'q': Q, 'gain_db': G}
+                if improves:
+                    current[side] = proposed
+                    cuts.append(row)
+                else:
+                    row['reason'] = 'does not improve both tone and matching without a new deficit'
+                    rejected.append(row)
+        target_after = {side: error(curve-target) for side, curve in current.items()}
+    unresolved = lr_match_report(f, current['left'], current['right'], band=band,
+                                 flag_db=flag_db)['regions']
+    if unresolved:
+        notes.append('remaining mismatch needs diagnosis/listening; do not cut a target-correct side to copy a dip')
     return {'level_offset_db': round(offset, 2), 'trim': trim,
-            'regions': before['regions'],
-            'cuts': cuts,
-            'wrms_before_db': round(wrms(erb_smooth(f, Lm - R)), 2),
-            'wrms_after_db': round(wrms(diff_after), 2)}
+            'regions': before['regions'], 'unresolved_regions': unresolved,
+            'cuts': cuts, 'rejected': rejected, 'notes': notes,
+            'target_anchor_db': anchor,
+            'target_error_before_db': target_before, 'target_error_after_db': target_after,
+            'wrms_before_db': round(error(original['left']-original['right']), 2),
+            'wrms_after_db': round(error(current['left']-current['right']), 2)}
 
 
 def source_bandwidth_limits(freqs, trace_db, ref_band=(300.0, 3000.0), drop_db=6.0):

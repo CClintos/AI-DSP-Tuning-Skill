@@ -794,7 +794,7 @@ def _load_session(args, freqs):
         source = ('mean of %d MMM runs' if capture == 'mmm' else
                   'mean of %d positions') % len(positions_db)
         if capture == 'mmm':
-            repeatability = tunelib.capture_repeatability(freqs, positions_db)
+            repeatability = tunelib.capture_repeatability(freqs, positions_db, support=support)
     else:
         basis_db = primary_db
         source = 'MMM average (one run)' if capture == 'mmm' else 'single position'
@@ -1896,6 +1896,7 @@ def mmm_compare(args):
         f, s, _ph, _c = measure.load_text_export(args.ambient)
         ok, _snr = tunelib.snr_support(np.min(np.vstack(list(captures.values())), axis=0),
                                        measure.resample_log(f, s, freqs), args.min_snr_db)
+        ok &= measure.support_mask(f, freqs)
         lost = _mask_runs(freqs, live & ~ok)
         if lost:
             notes.append('excluded below %.0f dB SNR: %s' % (args.min_snr_db, ', '.join(lost)))
@@ -1905,12 +1906,14 @@ def mmm_compare(args):
     baseline = args.baseline or next(iter(files))
     result = tunelib.compare_captures(freqs, captures, target_db, tuple(args.band), baseline,
                                       repeat_db=repeat, noise_db=args.noise_db,
-                                      objective=args.objective, support=live)
+                                      objective=args.objective, support=live,
+                                      reference_band=tuple(args.reference_band))
     if args.objective == 'level':
         notes.append('level ranking assumes every capture used the same playback volume and '
                      'gain: change only the setting under test between captures')
-    notes.append('a choice made here is still a phase-domain change to write (delay / '
-                 'polarity / Phase) through its own plan, then confirm with a fresh capture')
+    notes.append('a choice is a provisional tonal improvement, not proof of phase or image '
+                 'position; repeat it at the same source level and confirm by listening '
+                 'before keeping it; write any change through its own plan')
     result['files'] = files
     result['notes'] = notes
     return result
@@ -1920,8 +1923,7 @@ def lr_match(args):
     """Left/right tonal match from two half-system captures (writes nothing).
 
     Left side only and right side only, same MMM path and playback level:
-    reports the broadband offset (a trim on the louder side) and the cut-only
-    PEQ that closes each remaining mismatch region on the louder side."""
+    reports a trim and cuts only where matching AND target error improve."""
     freqs = measure.common_grid(20.0, 20000.0, 96)
     fl, sl, _p, _c = measure.load_text_export(args.left)
     fr, sr, _p, _c = measure.load_text_export(args.right)
@@ -1929,14 +1931,19 @@ def lr_match(args):
     right = measure.resample_log(fr, sr, freqs)
     live = measure.support_mask(fl, freqs) & measure.support_mask(fr, freqs)
     covered = freqs[live]
+    if len(covered) < 8:
+        raise ValueError('L/R captures have insufficient common measured coverage')
     band = (max(args.band[0], float(covered[0])), min(args.band[1], float(covered[-1])))
-    result = tunelib.lr_match_cuts(freqs, left, right, band=band, flag_db=args.flag_db)
-    notes = ['captures must share one MMM path and playback level; the trim goes on every '
+    target_path = ASSETS_DEFAULT_TARGET if args.target == 'default' else args.target
+    target = measure.load_target(target_path, freqs)
+    result = tunelib.lr_match_cuts(freqs[live], left[live], right[live], band=band,
+                                   flag_db=args.flag_db, target_db=target[live])
+    notes = result['notes'] + ['captures must share one MMM path and playback level; the trim goes on every '
              'channel of the louder side (output_trim, attenuation only), each cut on the '
              'driver of that side that plays its frequency',
              'image balance is a listening decision too: confirm with a centred mono vocal, '
              'and re-capture both halves after writing']
-    result.update({'meta': {'left': args.left, 'right': args.right,
+    result.update({'meta': {'left': args.left, 'right': args.right, 'target': str(target_path),
                             'band_hz': [round(band[0], 1), round(band[1], 1)]},
                    'notes': notes, 'predicted_not_measured': True})
     return result
@@ -2286,8 +2293,12 @@ def main():
     mc.add_argument('--repeat', help='a second capture of the baseline setting')
     mc.add_argument('--band', nargs=2, type=float, required=True, metavar=('LO_HZ', 'HI_HZ'))
     mc.add_argument('--target', default='default')
-    mc.add_argument('--objective', choices=('shape', 'level'), default='shape',
-                    help='shape: closest to target in band; level: most output (summation)')
+    mc.add_argument('--objective', choices=('balanced', 'shape', 'level'), default='balanced',
+                    help='balanced: target balance with output guard; shape: band shape only; '
+                         'level: output with tonal guards')
+    mc.add_argument('--reference-band', nargs=2, type=float, default=(300.0, 3000.0),
+                    metavar=('LO_HZ', 'HI_HZ'),
+                    help='unchanged measured band outside trial band (default 300-3000 Hz)')
     mc.add_argument('--noise-db', type=float,
                     help='repeatability when no --repeat was captured (default 0.25)')
     mc.add_argument('--ambient')
@@ -2297,6 +2308,7 @@ def main():
     lm = sub.add_parser('lr-match', help='left/right tonal match from half-system captures')
     lm.add_argument('--left', required=True, help='left side only')
     lm.add_argument('--right', required=True, help='right side only')
+    lm.add_argument('--target', default='default', help='desired tonal curve, or default')
     lm.add_argument('--band', nargs=2, type=float, default=(300.0, 6000.0),
                     metavar=('LO_HZ', 'HI_HZ'))
     lm.add_argument('--flag-db', type=float, default=1.5)
