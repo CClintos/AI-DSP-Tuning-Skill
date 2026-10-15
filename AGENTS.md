@@ -324,8 +324,10 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   summation analysis, per-side imaging, robustness). Ask what they captured.
 - **If the user tunes by MMM (moving-mic RTA), follow §MMM-first tuning,
   instead of asking for positions:** one MMM run is already a spatial average;
-  ask for the capture set listed there (two full-system runs, the L/R and
-  sub/midbass halves, an ambient capture) and pass `--capture mmm`.
+  ask for the capture set listed there (ONE run of each: full system, the L/R
+  and sub/midbass halves, an ambient capture) and pass `--capture mmm`. A
+  repeat run is optional, never a prerequisite: it adds repeatability checks
+  for small changes.
 - **Otherwise, ask for 3+ mic positions before any EQ proposal** — it
   is the single biggest lever on how good the tune ends up. From one sweep the
   fitter cannot tell a real response fault from a reflection comb at that mic

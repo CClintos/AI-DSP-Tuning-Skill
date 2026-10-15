@@ -2190,7 +2190,13 @@ When the user tunes from moving-mic RTA averages (MMM), each capture is
 already a spatial average: do not ask for 3+ discrete positions, and pass
 `--capture mmm` to `analyze`, `propose` and `refine` so the tools read it that
 way. Extra `--positions` files are then REPEAT RUNS of the same tune, not
-seats: two runs estimate the repeatability every later comparison has to beat.
+seats. **One run of each capture is the normal path** — every command works
+from it: filters stay broad (Q <= 4), comparisons and verification use an
+assumed resolution (0.25-0.3 dB), and nothing is rejected for repeatability.
+A repeat run is optional: it replaces the assumption with a measured,
+frequency-by-frequency repeatability, which then also screens out changes
+too small to confirm. The one place a single extra capture pays most is a
+close bass-setting comparison: repeat the baseline setting once (`--repeat`).
 For one driver's seat, repeat the same compact movement around that driver's
 normal head area. Keep the seat, mic aim, signal, playback volume and capture
 duration consistent; a larger movement on the second run changes the sampled
@@ -2208,7 +2214,7 @@ touched between captures.
 
 | Capture | What it unlocks |
 |---|---|
-| Full system, twice | tonal deviation and local repeatability (`capture.repeatability`) |
+| Full system (a second run optional) | tonal deviation; a second run adds local repeatability (`capture.repeatability`) |
 | Left side only, right side only, both | `lr-match`, and `--cancel-check LEFT RIGHT BOTH` |
 | Sub only, front midbasses only, sub + midbasses | bass level (`bass_balance`) and `--cancel-check SUB MIDS SUB+MIDS` |
 | Ambient (generator off) | `--ambient`: bins under 10 dB SNR are excluded |
