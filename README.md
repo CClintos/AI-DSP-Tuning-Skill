@@ -8,10 +8,32 @@ DSPs** (P SIX, DSP.3, M-SIX, V-SIX, …). Works as an installable
 [OpenAI Codex](https://openai.com/codex/) and other agents that read
 repo-level `AGENTS.md` instructions.
 
-You give Claude your REW measurements, your Helix `.afpx` tune file, and a target
-curve. It decodes both formats, works out what's actually wrong (and — just as
+You give the assistant your REW measurements and your Helix `.afpx` tune file;
+bring a target curve or use the bundled one. It decodes both formats, works out
+what's actually wrong (and — just as
 importantly — what *shouldn't* be touched), writes a corrected `.afpx` within the
 DSP's hardware limits, and verifies every change.
+
+## Start here
+
+| Where you are | Your next step |
+|---|---|
+| **New installation, or no measurements yet** | Follow [Your first tune](helix-rew-tuner/references/first_tune.md): verify the installation, set up REW and the mic, then capture a named baseline set. Tell the assistant: "New Helix install, REW and a USB mic; no measurements yet. Guide me through the first tune one stage at a time." |
+| **Measurements and a tune file ready** | [Install](#install) the skill, then [give the assistant your files](#use). Confirm the channel map, seat and capture method before analysis. No target curve is required; a default is included. |
+| **Improving a tune that already has EQ** | Supply the **current** tune and measurements taken through that exact tune. The assistant [refines the existing filters](#improving-a-tune-that-already-exists), then verifies the changes against a fresh capture. |
+
+The first-tune path is: **manual installation readiness → mic/playback setup →
+baseline measurements → justified driver EQ → re-measure and alignment when
+supported → final system tone → listening and verification**. A simple moving-mic
+(MMM) start can establish tone, bass level and left/right balance. Add fixed sweeps
+with a shared timing reference to measure timing and phase. You do not need to
+learn every advanced tool before starting.
+
+Initial routing, protective crossovers and amplifier/DSP gain setup must be
+established in PC-Tool using the equipment manufacturers' guidance. The assistant
+can guide those checks; it preserves crossovers in every file it writes. Any
+recommended crossover or polarity change is a manual PC-Tool step followed by a
+new saved tune and measurements.
 
 ## What it does
 
@@ -96,11 +118,11 @@ The full Helix filter set, each used for what it's good at:
 - **Whole car, not one mic** — left/right and multi-position measurements (fixed or
   swept/MMM) separate stable problems from single-point artefacts; left/right stays
   matched unless the data shows the sides genuinely differ.
-- **Timing before tone, and never both at once on the same guess** — a phase fix
-  (polarity/delay/all-pass) and an EQ band in the same crossover-adjacent region are
-  never proposed together against the same unconfirmed data: the EQ prediction goes
-  stale the moment the phase fix changes what it was measured against, so one waits
-  for a re-measure before the other is trusted.
+- **Driver EQ → re-measure → alignment → system tone** — correct a driver's own
+  response only where its solo measurements justify it, then align the corrected
+  drivers. A cancellation that appears only when drivers play together goes to the
+  polarity/delay/all-pass ladder. Phase edits and EQ edits use separate files with a
+  re-measure between them, because changing phase changes the summed response.
 - **Shape-anchored level** — it matches the shape of your target and lets overall
   level float, so swapping in a different curve changes the voicing, not the tune.
 - **A dip is not automatically a thing to fill** — before proposing a boost, it
@@ -119,6 +141,7 @@ The full Helix filter set, each used for what it's good at:
   Newer `.pct6` files (DSP PC-Tool 6) have basic beta support — see below.
 - **REW** ([Room EQ Wizard](https://www.roomeqwizard.com/)) measurements — a text
   export (`Freq  SPL  Phase`) is preferred; `.mdat` also works (with axis validation).
+  If you have not measured yet, start with the [USB-mic and capture guide](helix-rew-tuner/references/first_tune.md).
 - A **target curve** (`frequency  level` text file). One is bundled as a default;
   bring your own (ResoNix, Harman in-car, a house curve, flat) any time.
 - **Python 3.10+ with NumPy and SciPy** on whatever machine/container your agent
@@ -132,7 +155,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.13.0`) so you can tell whether an already-installed copy is current — open
+`1.14.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -192,6 +215,9 @@ for real tuning sessions; a lighter model is fine for quick mechanical edits.
 
 ## Exporting your measurements from REW
 
+No measurements yet? Use [Your first tune](helix-rew-tuner/references/first_tune.md)
+before this export step. It covers both moving-mic tone captures and timed sweeps.
+
 Text export is preferred over `.mdat` — the frequency axis is explicit rather than
 reconstructed, and phase comes along with it (which the phase/crossover analysis
 needs). Getting all your measurements out as text is one step:
@@ -214,7 +240,7 @@ repeat.)
 
 Expect a few short confirmations, not one big auto-apply. Your original tune
 file is never modified — every write creates a new, separate output file, so
-there's nothing to undo in PC-Tool if a proposal doesn't work out — and each
+you can reload the saved baseline in PC-Tool if a loaded result is rejected — and each
 proposed edit is confirmed individually before it's written. A basic tune is
 normally a handful of quick yes/no exchanges as you go.
 
@@ -363,7 +389,8 @@ whitespace drift.
 - **Your original tune file is never modified.** Every write creates a new,
   separate output file — `pipeline.py apply` refuses to overwrite an existing
   path — so your source `.afpx`/`.pct6`/`.jssh` is exactly as it was if you
-  don't like a proposal; there's nothing to undo in PC-Tool.
+  don't like a proposal. If you already loaded the new file, reload the saved
+  baseline in PC-Tool to restore it.
 - **Every proposed edit is confirmed individually before it's written** —
   nothing is ever applied in bulk from one "yes, tune it." Expect a handful of
   short confirmations for a basic tune, not one big automatic apply.
@@ -374,8 +401,9 @@ whitespace drift.
   and every write is decoded back and linted to confirm only the intended slots moved.
 - Magnitude-only measurements (RTA/MMM) are the **preferred** source for tonal/EQ
   decisions — capture with the engine off, since RTA has no noise rejection — but
-  can't capture phase outcomes; all-pass and delay work still needs a fixed,
-  phase-valid sweep, and must be confirmed by re-measuring with the tune loaded.
+  can't establish arrival time or phase alignment. Those claims need fixed sweeps
+  with a shared timing reference. MMM comparisons of manually tried settings can
+  establish a tonal improvement, which must be confirmed with the tune loaded.
 
 ## Model caveat
 

@@ -47,6 +47,8 @@ class Cli(unittest.TestCase):
         self.rng = np.random.default_rng(21)
 
     def run_cli(self, *args, ok=True):
+        if args[0] == "propose" and "--dsp-rate" not in args:
+            args = (*args, "--dsp-rate", "96000")
         run = subprocess.run([sys.executable, str(SCRIPTS / "pipeline.py"), *args],
                              text=True, capture_output=True, check=False, cwd=self.root)
         if not ok:

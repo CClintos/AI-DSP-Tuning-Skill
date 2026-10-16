@@ -17,7 +17,7 @@
 # python pipeline.py analyze --measurement <export.txt> --target <target.txt|default> [options]
 # python pipeline.py plan --source <input.afpx> --output <new.afpx> --out <plan.json>
 # python pipeline.py apply --plan <plan.json>
-# python pipeline.py propose --measurement <export.txt> | --positions A B C ... --target <file|default>
+# python pipeline.py propose --measurement <export.txt> | --positions A B C ... --target <file|default> --dsp-rate HZ
 # python pipeline.py refine --afpx <tune.afpx> --channels N [N...] --dsp-rate HZ --measurement|--positions ... --target ...
 # python pipeline.py ab-make --a <A.afpx> --b <B.afpx> --loudness-db X --out-dir <dir> [--confirm-trim]
 # python pipeline.py ab-result --key <dir>/.ab_key.json --choices X Y Y X ...
@@ -593,7 +593,7 @@ def load_guards(tune_path, notes):
     return guards
 
 
-def guard_check(guards, channels=None, freqs=None):
+def guard_check(guards, channels=None, freqs=None, fs=tunelib.FS):
     """(F, Q, G) -> None, or the reason a BOOST breaks a vehicle guard.
 
     A zone applies when its channels are null, the caller names no channels,
@@ -612,7 +612,7 @@ def guard_check(guards, channels=None, freqs=None):
             return None
         if qmax is not None and Q > qmax + 1e-9:
             return 'boost Q %.2f exceeds the max_boost_q %g set for this car' % (Q, qmax)
-        rise = tunelib.peaking_db(f, F, Q, G)
+        rise = tunelib.peaking_db(f, F, Q, G, fs=fs)
         for z in zones:
             sel = (f >= z['lo_hz']) & (f <= z['hi_hz'])
             if np.any(sel) and float(np.max(rise[sel])) > GUARD_TOLERANCE_DB:
@@ -1156,6 +1156,8 @@ def propose(args):
     per-edit confirmation, and pipeline.py plan/apply to be written."""
     freqs = measure.common_grid(20.0, 20000.0, 96)
     notes = []
+    fs = float(args.dsp_rate)
+    tunelib._validate_peq_rate(freqs, fs)
     sess = _load_session(args, freqs)
     notes.extend(sess['notes'])
     band = tuple(args.fit_band) if args.fit_band else PROPOSE_FIT_BAND
@@ -1204,7 +1206,7 @@ def propose(args):
         # proposal, so validation and proposal cannot drift apart.
         held_out = tunelib.held_out_band_validation(
             freqs, deviations, band, mask=mask, conf=conf,
-            fitter_kwargs=dict({'n_bands_max': args.max_bands}, **qkw), groups=groups)
+            fitter_kwargs=dict({'n_bands_max': args.max_bands}, **qkw), groups=groups, fs=fs)
         bands = [(r['f_hz'], r['q'], r['gain_db']) for r in held_out['bands']]
         band_validation = {(r['f_hz'], r['q'], r['gain_db']): r for r in held_out['bands']}
         fit_report = {'held_out_verdict': held_out['verdict'],
@@ -1219,7 +1221,7 @@ def propose(args):
         deviations = sess['aligned'] - (sess['target_db'] + sess['anchor'])
         bands, fit_report = tunelib.fit_peq_robust(
             freqs, deviations, band, n_bands_max=args.max_bands,
-            mask=mask, conf=conf, fit_smoothed=True, **qkw)
+            mask=mask, conf=conf, fit_smoothed=True, fs=fs, **qkw)
         if groups is None and mmm:
             notes.append('two MMM runs: fitted jointly; their repeatability (%.2f dB) is the '
                          'resolution any re-measure must beat' % sess['repeatability']['noise_db'])
@@ -1230,7 +1232,7 @@ def propose(args):
         deviations = None
         bands, fit_report = tunelib.fit_peq(
             freqs, dev_db, band, n_bands_max=args.max_bands, mask=mask, fit_smoothed=True,
-            **qkw)
+            fs=fs, **qkw)
         if mmm:
             notes.append('one MMM run: already a spatial average, so the fit is not chasing '
                          'one mic spot -- capture the same tune a second time to measure '
@@ -1245,7 +1247,7 @@ def propose(args):
     if sess['measurement_phase'] is not None and has_boost:
         try:
             _trust, fields = _phase_fields(args, freqs, sess)
-            rows, _summary = tunelib.gate_boost_bands(fields, bands)
+            rows, _summary = tunelib.gate_boost_bands(fields, bands, fs=fs)
             gate = {(r['f_hz'], r['q'], r['gain_db']): r['verdict'] for r in rows}
             if fields['mad_floored']:
                 notes.append('boost gate ran on a trace too smooth to support it -- '
@@ -1273,7 +1275,7 @@ def propose(args):
 
     gcheck = None
     if args.session_tune:
-        gcheck = guard_check(load_guards(args.session_tune, notes), args.channels, freqs)
+        gcheck = guard_check(load_guards(args.session_tune, notes), args.channels, freqs, fs=fs)
         if gcheck is None:
             notes.append('no vehicle guards recorded in the session file for %s'
                          % args.session_tune)
@@ -1308,7 +1310,7 @@ def propose(args):
             row['caution'] = 're-measure with the mic moved ~10 cm before proposing this boost'
         if mmm:
             support_v = tunelib.mmm_change_support(
-                freqs, tunelib.peaking_db(freqs, F, Q, G), tunelib.peq_region(F, Q),
+                freqs, tunelib.peaking_db(freqs, F, Q, G, fs=fs), tunelib.peq_region(F, Q),
                 sess['repeatability'])
             row['repeatability'] = support_v
             if support_v['status'] == 'below_repeatability':
@@ -1327,7 +1329,7 @@ def propose(args):
         kept.append(row)
     final = [(r['f_hz'], r['q'], r['gain_db']) for r in kept]
 
-    eq = tunelib.cascade_db(freqs, final)
+    eq = tunelib.cascade_db(freqs, final, fs=fs)
     smoothed_before = tunelib.erb_smooth(freqs, dev_db)
     smoothed_after = tunelib.erb_smooth(freqs, dev_db + eq)
     for row in kept:
@@ -1370,6 +1372,7 @@ def propose(args):
 
     return {
         'meta': {'measurement_file': args.measurement,
+                 'dsp_sample_rate_hz': fs,
                  'positions_used': len(sess['positions_db']),
                  'sittings_used': None if groups is None else len(set(groups)),
                  'deviation_source': sess['deviation_source'],
@@ -1623,6 +1626,7 @@ def refine(args):
     if not args.dsp_rate or args.dsp_rate <= 0:
         raise ValueError('--dsp-rate is required: the CONFIRMED internal rate, never assumed')
     fs = float(args.dsp_rate)
+    tunelib._validate_peq_rate(freqs, fs)
     sess = _load_session(args, freqs)
     notes.extend(sess['notes'])
     xml = afpx.decode(args.afpx)
@@ -1697,7 +1701,7 @@ def refine(args):
             _trust, fields = _phase_fields(args, freqs, sess)
 
             def boost_check(F, Q, G):
-                rows, _summary = tunelib.gate_boost_bands(fields, [(F, Q, G)])
+                rows, _summary = tunelib.gate_boost_bands(fields, [(F, Q, G)], fs=fs)
                 return rows[0]['verdict']
         except ValueError as exc:
             notes.append('boost gate unavailable: %s' % exc)
@@ -1729,7 +1733,7 @@ def refine(args):
                         'where it acts' % (v['local_change_db'], v['local_resolution_db']))
             return None
 
-    gcheck = guard_check(load_guards(args.afpx, notes), args.channels, freqs)
+    gcheck = guard_check(load_guards(args.afpx, notes), args.channels, freqs, fs=fs)
     guard_blocks = {}
     if gcheck:
         phase_check = boost_check
@@ -2529,6 +2533,8 @@ def main():
                     help='one sitting label per --positions file (e.g. 8aug 8aug 10aug): '
                          'held-out validation then withholds a whole sitting at a time')
     pr.add_argument('--target', required=True, help='target curve file, or "default"')
+    pr.add_argument('--dsp-rate', type=float, required=True,
+                    help='the CONFIRMED DSP sample rate in Hz (P SIX DSP MK2: 96000)')
     pr.add_argument('--session-tune', metavar='AFPX',
                     help='enforce the vehicle guards recorded in the session file of this tune')
     pr.add_argument('--channels', nargs='+', type=int,

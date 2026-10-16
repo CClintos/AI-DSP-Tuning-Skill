@@ -39,6 +39,8 @@ class ProposeTests(unittest.TestCase):
         self.root = Path(tmp.name)
 
     def run_cli(self, *args):
+        if args[0] == "propose" and "--dsp-rate" not in args:
+            args = (*args, "--dsp-rate", "96000")
         run = subprocess.run(
             [sys.executable, str(SCRIPTS / "pipeline.py"), *args],
             text=True, capture_output=True, check=False, cwd=self.root)
