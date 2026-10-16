@@ -65,14 +65,24 @@ control, writable only through the verified Phase-control path in
 `afpx_format.md` (which refuses a write unless `PM="4"`); never write either
 field as a polarity substitute.
 
+Polarity is advisory and manual in the current workflow. State the exact driver
+or L/R driver pair and current → recommended setting; the user applies it in
+PC-Tool, saves a new baseline tune and re-measures the affected solos, junctions
+and system. Decode that saved baseline fresh before any further proposal. The
+plan writer refuses polarity edits; knowing the `CINV` mapping does not authorize
+a direct XML write or a substitute Phase-control edit.
+
 **Sample rate is model-specific — never assume it.** The P SIX DSP MK2 runs at
 96 kHz internally, so `delay_ms = samples / 96`. A different Helix model may run at
 a different internal rate. Converting a delay computed for one rate into samples at
 the wrong rate silently doubles (or halves) the real physical delay and wrecks
 alignment — the error won't be obvious from the numbers alone. **Confirm the actual
-internal sample rate for the specific unit (from PC-Tool, not assumed) before doing
-any delay math**, and use `tunelib.ms_to_samples` / `samples_to_ms` with that
-confirmed rate rather than hardcoding 96 kHz. Keep proposals anchored in physical
+internal sample rate for the specific unit (from PC-Tool, not assumed) before
+fitting/modelling filters or doing delay math.** Pass that rate to `pipeline.py
+propose`, `refine` and `verify` with `--dsp-rate <confirmed_internal_hz>`; REW's
+recording sample rate does not establish the DSP processing rate. Use
+`tunelib.ms_to_samples` / `samples_to_ms` with the confirmed rate rather than
+hardcoding 96 kHz. Keep proposals anchored in physical
 milliseconds first — that's the number that stays meaningful across models — and
 convert to samples last.
 

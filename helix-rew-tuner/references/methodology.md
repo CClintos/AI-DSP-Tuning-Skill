@@ -4,10 +4,16 @@ This is the judgment layer. The scripts give you numbers; this tells you what th
 mean and which action type each problem calls for. The overarching bias: **classify
 before correcting, and prefer doing less.**
 
+For a first tune or a system without a verified starting setup, begin with
+[First tune: from setup to a verified result](first_tune.md). That guide checks
+the safe baseline and measurement setup before this reference's analysis tools.
+
 ## Contents
 
+- [First tune: setup and measurement checklist](first_tune.md)
 - [Audit the source before correcting the system](#audit-the-source-before-correcting-the-system)
 - [Measurement method selection — sweep vs Moving Mic (MMM)](#measurement-method-selection-sweep-vs-moving-mic-mmm)
+- [MMM-first tuning](#mmm-first-tuning-the-short-path-for-tone-bass-level-and-lr-balance)
 - [Sweep capture setup](#sweep-capture-setup-before-you-have-data-to-analyze)
 - [Beyond magnitude — decay and distortion](#beyond-magnitude-the-decay-time-domain-and-distortion-axes)
 - [Deviation analysis](#deviation-analysis)
@@ -57,7 +63,6 @@ before correcting, and prefer doing less.**
 - [Seat validation outranks nearfield aesthetics](#nearfield-aesthetics-do-not-override-a-seat-validated-filter)
 - [Retraction discipline](#retraction-discipline-a-disproven-claim-invalidates-what-was-built-on-it)
 - [Rear-fill / ambience measurement discipline](#rear-fill-ambience-channels-need-their-own-measurement-discipline)
-- [MMM-first tuning](#mmm-first-tuning-the-short-path-for-tone-bass-level-and-lr-balance)
 - [Refine the tune you have](#refine-the-tune-you-have-before-adding-to-it)
 - [Matched-loudness blind A/B](#judge-by-ear-only-at-matched-loudness-blind)
 - [Crossover what-ifs](#crossover-what-ifs-modelled-never-written)
@@ -97,10 +102,19 @@ Also check `bandwidth` in the report. A source already 6 dB down at 60 Hz sets
 a ceiling no output EQ can lift, and boosting into it just burns headroom
 against a wall.
 
-## Measurement method selection — sweep vs Moving Mic (MMM)
+## Measurement method selection: sweep vs Moving Mic (MMM)
 
-**Not "one is better" — they answer different questions, and a full tune needs
-both.** Established from a real project session (2026-07-14) that hit this
+**Confirm the DSP's internal sample rate before fitting or modelling filters.**
+Pass it as `--dsp-rate <confirmed_internal_hz>` to `pipeline.py propose`,
+`refine` and `verify`. This is the DSP processing rate, which can differ from
+REW's recording/playback sample rate; the 48000 Hz capture-profile example below
+does not establish the DSP rate. See `helix_hardware.md` for model-specific
+confirmation and delay conversion.
+
+**They answer different questions.** A full tune that claims phase or timing
+alignment needs phase-valid sweeps; an MMM-only tune can improve tone and compare
+the tonal results of candidate settings. Established from a real project session
+(2026-07-14) that hit this
 distinction the hard way, and independently reconfirmed the same day in a second
 live session on the same tune (same conclusion, same ~8dB-cut-read-as-flat
 failure signature) — see "Analysis traps" (below) for that session's other
@@ -112,10 +126,10 @@ just general acoustics theory:
   TuneToTarget algorithms use a moving-mic-at-listening-position technique
   internally, not a fixed single point.
 
-**Fixed-position sweep (log sine, ideally with an acoustic timing
-reference)** is the only valid tool for anything phase-domain — delay,
-polarity, crossover summation/interference audits, all-pass design (this
-matches everything already established elsewhere in this file). Strong noise
+**Fixed-position sweep (log sine, with a shared acoustic or loopback timing
+reference)** supports phase and arrival-time measurement: delay estimation,
+polarity and crossover phase diagnosis, and all-pass design. A phase column
+alone does not establish a shared time base. Strong noise
 rejection via deconvolution, fine spectral resolution. Its weakness: in a
 car's near field, a single fixed mic point can show position-specific comb-
 filtering/standing-wave structure that doesn't represent what's heard across
@@ -132,8 +146,10 @@ It's the continuous, mechanically-averaged version of the same idea
 `spatial_consistency` implements with discrete positions — both exist to stop
 a single fixed point from being mistaken for what's actually heard. Two real
 weaknesses to guard against, not reasons to avoid it:
-1. **Magnitude only, no phase** — same rule as any other magnitude-only
-   capture: never use it for delay/crossover/polarity/APF decisions.
+1. **Magnitude only, no phase** — a single capture cannot establish a delay,
+   polarity, crossover phase or all-pass setting. Controlled captures of candidate
+   settings can compare their tonal summation with `mmm-compare`; that result
+   does not prove arrival time, phase alignment or image position.
 2. **No noise rejection.** A sweep's deconvolution rejects steady background
    noise; plain RTA/MMM sums everything at each frequency, including it. A
    real dip in a band where cabin noise (engine/HVAC/road) has energy can
@@ -160,9 +176,10 @@ level the user actually listens at — equal-loudness (Fletcher-Munson)
 perception is itself level-dependent, so tonal balance judged at one SPL
 doesn't necessarily hold at another.
 
-**Default protocol:** sweeps (with acoustic timing reference) for all
-delay/polarity/crossover/APF work — or, MMM-only, by comparing captures of
-each candidate setting with `mmm-compare` (§MMM-first tuning). MMM — engine off, at or near the user's
+**Default protocol:** phase-valid sweeps on one shared timing reference for
+phase/timing diagnosis and alignment. In an MMM-only session, compare captures of
+candidate settings with `mmm-compare` for their tonal summation only; report the
+alignment as unverified (§MMM-first tuning). MMM — engine off, at or near the user's
 real listening volume, confirmed no loudness-contour enhancement active — as
 the primary dataset for PEQ/tonal/voicing decisions. Where both exist for
 the same tune, a large disagreement between them in a given band is itself
@@ -182,6 +199,157 @@ failure is worth watching for: a delay whose predicted improvement sits close
 to a cycle-slip / period-ambiguity interval can look clearly beneficial at one
 coherent point and simply not survive spatial averaging.
 
+## MMM-first tuning: the short path for tone, bass level and L/R balance
+
+When the user tunes from moving-mic RTA averages (MMM), each capture is
+already a spatial average: do not ask for 3+ discrete positions, and pass
+`--capture mmm` to `analyze`, `propose` and `refine` so the tools read it that
+way. Extra `--positions` files are then REPEAT RUNS of the same tune, not
+seats. **One run of each capture is the normal path** — every command works
+from it: filters stay broad (Q <= 4), comparisons and verification use an
+assumed resolution (0.25-0.3 dB), and nothing is rejected for repeatability.
+A repeat run is optional: it replaces the assumption with a measured,
+frequency-by-frequency repeatability, which then also screens out changes
+too small to confirm. The one place a single extra capture pays most is a
+close bass-setting comparison: repeat the baseline setting once (`--repeat`).
+For one driver's seat, repeat the same compact movement around that driver's
+normal head area. Keep the seat, mic aim, signal, playback volume and capture
+duration consistent; a larger movement on the second run changes the sampled
+listening area. Two runs are an uncertainty estimate, not statistical proof.
+MMM has no phase. Captures of candidate delay, polarity or Phase settings can
+compare tonal summation, never calculate arrival time or prove phase alignment
+from one trace. Keep those claims unverified until phase-valid sweeps exist.
+Polarity changes use the manual PC-Tool handoff in §The crossover action-ladder.
+
+**Capture set (engine off, one session, nothing changed in between):**
+REW RTA in a 1/N-octave mode (1/48 octave), never Spectrum mode; pink
+periodic noise with its length matched to the FFT length; unlimited averages,
+about 30 s per capture while moving the mic slowly through the head space of
+the judged seat (ear to ear, forehead to headrest); the same mic calibration
+file and the same mic aim every time; normal listening volume, nothing
+touched between captures.
+
+| Capture | What it unlocks |
+|---|---|
+| Full system (a second run optional) | tonal deviation; a second run adds local repeatability (`capture.repeatability`) |
+| Left side only, right side only, both | `lr-match`, and `--cancel-check LEFT RIGHT BOTH` |
+| Sub only, front midbasses only, sub + midbasses | bass level (`bass_balance`) and `--cancel-check SUB MIDS SUB+MIDS` |
+| Ambient (generator off) | `--ambient`: bins under 10 dB SNR are excluded |
+| Full system at each candidate bass delay / polarity / Phase | `mmm-compare` checks the handover against an unchanged measured midrange reference |
+
+**Record the setup once, as a capture profile** (`--capture-profile
+profile.json` on analyze/propose/refine/verify), e.g.:
+
+```json
+{"analyzer": "rta 1/48", "noise": "pink periodic", "fft_length": 65536,
+ "sequence_length": 65536, "sample_rate_hz": 48000, "playback": "file",
+ "test_file_sample_rate_hz": 48000, "test_file_fft_length": 65536,
+ "window": "hann", "averaging": "forever", "rms_level_dbfs": -12,
+ "mic_cal": "90deg", "mic_aim": "up", "seat": "driver", "engine": "off"}
+```
+
+It is checked against REW's signal-generator rules: pink noise with the RTA
+and white with the Spectrum analyser; the periodic sequence length equal to
+the FFT length; a test file made at REW's sample rate and FFT length; peaks
+clip above about -6 dBFS RMS (periodic) or -12 dBFS (random). A rule broken
+refuses the session. `playback: "file"` — pink noise played by the car's own
+source while the laptop records — is a separate clock, which REW says needs
+windowing and averaging/overlap set for it with periodic noise; the profile
+flags that. Every report carries the profile id, so captures from different
+setups are not compared by accident.
+
+**What the tools now enforce for MMM:**
+- *RTA mode.* A full-system tilt steeper than -2.5 dB/oct or rising faster
+  than +1.5 dB/oct is refused by `propose`/`refine` (noted by `analyze`):
+  Spectrum mode shows pink noise falling ~3 dB/oct and white noise in an
+  octave RTA rises ~3 dB/oct, and voicing toward the target would tilt the
+  tune the opposite way. With a valid capture profile recorded the refusal
+  becomes a check-the-car note; otherwise `--accept-tilt` only if it really is
+  the car.
+- *EQ policy.* With `--capture mmm`, every proposed band (propose) and every
+  edit (refine) must change the response by more than the repeat-capture
+  variation where it acts — max(0.5 dB, 2 x the local repeatability) — or it
+  is not proposed: a re-capture could not confirm it. With a single run,
+  filters are kept broad (Q <= 4) because nothing yet shows a narrow feature is
+  real. A boost with no cancellation evidence (no phase, no `--cancel-check`)
+  goes to `needs_trial` in propose and is not proposed by refine: write one
+  alone, re-capture, and keep it only if `verify` confirms it.
+- *Noise.* An RTA adds the background in, so a dip can read as filled.
+  `--ambient` excludes every bin less than `--min-snr-db` (10) above it.
+- *Cancellation without phase.* Where two halves measured together sum below
+  the power sum of the halves alone, the dip is destructive summation; with
+  `--cancel-check` a boost into it is BLOCKed (a dip both halves already have
+  is not, and may be filled). The three captures must share one playback level.
+- *Repeatability.* Two or more runs give bass, midrange and treble summaries
+  plus a frequency profile in `capture.repeatability`. Pass that whole object
+  to `predicted_vs_measured(..., repeatability=profile)` after re-capture:
+  each changed filter is judged against uncertainty in its own region.
+  Missing coverage is inconclusive. `verification_noise_db` remains a
+  conservative scalar fallback; a quiet midrange must not certify noisy bass.
+- *L/R protection.* `lr-match --target <curve>` (default: the supplied in-car
+  target) proposes a cut only where the louder side also exceeds the target,
+  matching improves, and target error improves without a new deficit. Both
+  sides share one fixed target anchor after any proposed trim. A healthy side
+  is not cut to copy the other side's dip. `unresolved_regions` need diagnosis
+  and listening, not forced matching. A proposed trim is still a listening
+  decision; broad response differences can resemble a level offset.
+- *Bass selection.* `mmm-compare` defaults to `--objective balanced`: judge
+  target error in the handover relative to `--reference-band 300 3000`, with
+  guards against worse shape, new holes/humps and significant output loss.
+  Use full-system captures so that reference contains real, unchanged output;
+  never use a sub-only stopband or ambient noise as the reference. For another
+  comparison band, explicitly select an unchanged reference outside it. If
+  none is measured, balanced/level cannot choose a winner; `--objective shape`
+  can compare band shape only and cannot establish bass-to-midrange balance.
+  `--objective level` remains available but must pass the tonal guards too.
+  More output alone does not prove better sound or correct phase.
+
+**After every write: `verify`.** `pipeline.py verify --report <refine or
+propose JSON> --before <the captures it came from> --after <re-captures>
+--dsp-rate <confirmed_internal_hz>` judges each changed filter against the repeatability of
+both the before and after runs in its own region, reports the target error
+before and after, and says per band: keep (confirmed), rethink (the change did
+not show up), re-capture (partly landed), or settle by blind A/B
+(inconclusive). `--bands F,Q,G ... --old-bands ...` when only some of a
+report's edits were written.
+
+**Voicing last, by ear.** Once the corrections are verified, `pipeline.py
+voice-variants --afpx tuned.afpx --out-dir v --bass-channels <sub+midbass>
+--treble-channels <tweeters> --bass-db -1 1 --treble-db -1 1` builds one-shelf
+variants (low shelf on the bass channels, high shelf on the tweeters, in their
+end shelf slots; an existing shelf's gain is adjusted instead). It shows the
+edits first and writes only with `--confirm`. Compare each variant against the
+current tune with its `ab_make` line — blind, level-matched, at normal volume —
+and keep only a repeatable preference; then record the voiced target for the
+next session. A variant that measures further from the curve but is preferred
+blind is a voicing choice, and the right one.
+
+**Order.** Choose the target/initial voicing (§Voicing,). If solo captures justify
+driver-local EQ, do that first with `refine` (or `propose` on a channel with no
+PEQ), then re-capture and verify before any handover trials. Use phase-valid
+sweeps for alignment when available. In an MMM-only session, compare the tonal
+result of sub/midbass candidates with `mmm-compare --objective balanced
+--repeat <baseline-repeat>` over the handover band, using the chosen target and
+unchanged reference; do not claim measured phase alignment. Re-capture the kept
+setting before final system tone: set bass LEVEL (`bass_balance`; a trim or sub
+amp gain, not bells), match L/R with `lr-match --target <same-target>` (only
+target-supported cuts), and use `refine`/`propose` with
+`--capture mmm --cancel-check ...` for remaining tonal corrections. After each
+write, re-capture and run `pipeline.py verify` with the same capture set; compare
+blind at matched loudness (§Judge by ear only at matched loudness,). Keep EQ and
+phase changes in separate plans, and recheck the handover if later unequal EQ
+touches it. `voice-variants` blind A/B comes last. `mmm-compare` measures repeat disagreement
+from the difference BETWEEN the repeat curves, not the difference of their
+target-error scores (two different curves can have equal scores). It keeps
+the current setting unless a candidate clears twice that RMS disagreement,
+the engineering floors of 0.25 dB (level) / 0.1 dB (shape or target error),
+and the tonal guards. These thresholds are not universal audibility limits.
+Every winner is provisional: repeat the winning setting with the same path
+and source level, rerun the comparison, and confirm by listening before
+keeping it. MMM supports tonal decisions; it cannot prove arrival time,
+phase alignment or image position. After changing the handover, recheck bass
+level before further EQ.
+
 ## Sweep capture setup (before you have data to analyze)
 
 Bad capture produces confidently-wrong analysis no amount of downstream care can
@@ -191,18 +359,24 @@ fix. A few things to get right before trusting a measurement:
   crossover corner to one–two octaves above its high corner — not REW's full
   10 Hz–24 kHz default. A full-range sweep on a bandpassed midrange wastes
   resolution outside its passband and can make out-of-band noise look like signal.
-- **Test level, not DSP gain, is the lever for clipping.** If a driver clips or
-  audibly resonates during a sweep but is clean on pink noise or music, that's
-  expected, not a fault — a sustained sweep tone holds energy at each frequency far
-  longer than any transient content ever does, exciting mechanical resonances music
-  never triggers. **Fix it by lowering REW's sweep level (dBFS)**, never by
-  touching live DSP gain "just for the measurement" — a gain change there is a real
-  tune edit, not a measurement setting, and it's easy to forget to revert.
+- **Stop a sweep that clips or causes audible driver distress.** Lower REW's
+  sweep level (dBFS), then check whether the overload is at REW's recording input,
+  the DSP/amplifier, or the driver. Input clipping invalidates the capture;
+  amplifier clipping, rattling or driver distress also needs a clean recapture
+  before analysis. A sweep can expose stress that music did not reveal, so being
+  clean on music is not evidence that the sweep is safe. Keep protective
+  crossovers active. Do not change the live DSP gain just to hide a measurement
+  problem: it changes the tune being measured. If a recording-input adjustment is
+  needed, record it and update the SPL calibration when applicable. Repeat at the
+  lower level and proceed only after the signal and driver are clean; if distress
+  persists, diagnose the setup before continuing.
 - **Mismatched levels across solos are expected and fine — but must be corrected
   before joint magnitude analysis.** Solos are often necessarily captured at
   different test levels (e.g. a sub measured much quieter than the mids under an
-  aggressive bass shelf, to keep the sweep clean). Phase is level-independent, so
-  this never hurts polarity/delay/all-pass work. But `interference_audit`,
+  aggressive bass shelf, to keep the sweep clean). Phase comparisons remain usable
+  only while the system is linear and every capture shares a valid timing
+  reference; level-dependent processing or overload invalidates that assumption.
+  `interference_audit`,
   `prediction_confidence`, and `tune_scorecard` are magnitude-based and will
   "detect" a fake gap or cancellation that's actually just a level mismatch between
   captures. Run `tunelib.calibrate_solo_levels` first to fit the real relative
@@ -986,9 +1160,11 @@ does not undo itself (Resonalyze's manual makes the same argument):
    Keep bands broad near a crossover — many narrow bands near a sub/midbass
    junction turn the relative phase so fast that no single delay sums the
    pair over a useful bandwidth.
-2. **Re-measure, then align** — polarity → delay → all-pass on the EQ'd
-   drivers (the ladder below), top junction first. Re-align after any
-   all-pass, which shifts group delay.
+2. **Re-measure, then align** — polarity → delay → all-pass/channel Phase on
+   the EQ'd drivers (the ladder below), top junction first for delays; follow
+   §The image outranks the crossover above ~300 Hz for channel Phase order.
+   Polarity uses the manual PC-Tool handoff. Recheck all affected junctions
+   after an all-pass or Phase edit, which shifts group delay.
 3. **System tone last** — broad shelves and bells away from the junctions,
    or applied to both drivers of a junction alike, so they do not disturb
    what step 2 settled.
@@ -1025,7 +1201,13 @@ well through their crossover, test in this order and stop when the problem is
 solved (a later, riskier tool must clearly beat the earlier one to be worth
 it):
 
-1. **Polarity** (free, binary).
+1. **Polarity** (binary, applied manually in PC-Tool). Name the exact driver or
+   L/R driver pair, its current polarity and the recommended setting. The user
+   sets it in PC-Tool, saves a new baseline tune and re-measures the affected
+   solos, junction sums and system. Freshly decode that saved baseline before
+   continuing, so subsequent delay/EQ work uses the actual state. There is no
+   polarity edit in the tune-plan writer; never substitute the Phase control or
+   patch `CINV` by hand. See §Polarity belongs to the driver.
 2. **Delay** (cheap, no group-delay cost). `tunelib.polarity_delay_search` searches
    both together from complex solos. It also cross-checks itself against
    `tunelib.estimate_delay_xcorr` (a generalized cross-correlation estimate,
@@ -1039,10 +1221,11 @@ it):
 3. **All-pass** (adds group delay — only if polarity/delay leave a residual phase
    problem). `tunelib.optimize_allpass` searches F/Q against the summation.
 
-Only after those, consider EQ — and only if the *solo* response justifies it.
 `polarity_delay_search` returns `residual_needs_apf` to tell you whether step 3 is
-even warranted. (EQ that the solo justifies is driver-local and belongs BEFORE
-this ladder — see Tune order; EQ that only the sum "wants" is not EQ's job.)
+even warranted. Driver-local EQ that the solos justify belongs BEFORE this ladder,
+with a re-measure before alignment (see Tune order). After alignment, re-measure
+before considering final system tone; a dip caused by destructive summation never
+becomes an EQ boost merely because the ladder is finished.
 
 ### A channel hands over twice
 
@@ -1110,22 +1293,15 @@ explicit confirmation for that number before writing, exactly as for any
 other write. The write itself is safe and verified; the decision to make it
 still isn't automatic.
 
-**Never combine a phase-domain write (polarity/delay/APF) with a PEQ write
-in the same crossover-adjacent region in the same pass.** A PEQ band's
-predicted effect is computed against the *currently measured* summed
-response. Once a phase fix actually changes how the two drivers sum through
-that crossover, the summed curve there changes too — a PEQ that was fit to
-the pre-fix curve is now validated against data that no longer describes the
-system. This is exactly why the ladder above is ordered polarity → delay →
-all-pass → *only then* EQ: it isn't just "cheapest fix first," it's "don't
-let a later step's math go stale out from under an earlier one still being
-decided." If a phase write is happening this turn for a crossover region,
-either leave that region's PEQ proposal for a later turn (after a
-re-measure — `predicted_vs_measured` is the tool for confirming the phase
-fix actually landed before trusting anything built on top of it), or say
-explicitly that the PEQ prediction there is provisional pending that
-re-measure. Don't write both against the same stale prediction and report
-them as equally confident — they aren't.
+**Keep phase-domain and EQ-domain changes in separate plans and written
+files, even across channels.** Delay, all-pass and channel Phase edits cannot
+share a plan with PEQ or shelves. Manual polarity changes follow the same
+measurement boundary. The sequence is driver-local EQ → re-measure →
+polarity/delay/phase alignment → re-measure → final system tone, with a fresh
+plan for each domain. EQ moves a driver's phase; alignment changes the summed
+curve. Each makes predictions based on the previous state stale. If later
+unequal EQ changes a junction, re-measure and recheck its alignment. Do not write
+both domains against the old captures, even with a provisional confidence label.
 
 ## Shelf cookbook (broad tonal balance only)
 
@@ -1457,8 +1633,8 @@ bottom-up, then re-check every junction.
 ### Polarity belongs to the driver
 
 A driver's left and right instances share one polarity. A proposal that
-inverts the left midrange but not the right one is not a tune, it is a wiring
-question — check the physical connection before writing anything. Settle a
+inverts the left midrange but not the right one is a wiring question — check the
+physical connection before changing polarity. Settle a
 pair's polarity at the junction where it is clearest and carry it to the
 twin; at a low junction where the two polarities score within ~0.05, keep the
 current one.
@@ -2184,149 +2360,6 @@ front driver that plays most of the 1–4 kHz voice band (usually the midrange),
 not against the summed front stage — a band-limited arrival of a sum is the
 arrival of whichever driver plays earliest in that band.
 
-## MMM-first tuning: the short path for tone, bass level and L/R balance
-
-When the user tunes from moving-mic RTA averages (MMM), each capture is
-already a spatial average: do not ask for 3+ discrete positions, and pass
-`--capture mmm` to `analyze`, `propose` and `refine` so the tools read it that
-way. Extra `--positions` files are then REPEAT RUNS of the same tune, not
-seats. **One run of each capture is the normal path** — every command works
-from it: filters stay broad (Q <= 4), comparisons and verification use an
-assumed resolution (0.25-0.3 dB), and nothing is rejected for repeatability.
-A repeat run is optional: it replaces the assumption with a measured,
-frequency-by-frequency repeatability, which then also screens out changes
-too small to confirm. The one place a single extra capture pays most is a
-close bass-setting comparison: repeat the baseline setting once (`--repeat`).
-For one driver's seat, repeat the same compact movement around that driver's
-normal head area. Keep the seat, mic aim, signal, playback volume and capture
-duration consistent; a larger movement on the second run changes the sampled
-listening area. Two runs are an uncertainty estimate, not statistical proof.
-MMM has no phase, so delay, polarity, Phase angle and crossover phase are
-chosen by comparing captures, never from one trace.
-
-**Capture set (engine off, one session, nothing changed in between):**
-REW RTA in a 1/N-octave mode (1/48 octave), never Spectrum mode; pink
-periodic noise with its length matched to the FFT length; unlimited averages,
-about 30 s per capture while moving the mic slowly through the head space of
-the judged seat (ear to ear, forehead to headrest); the same mic calibration
-file and the same mic aim every time; normal listening volume, nothing
-touched between captures.
-
-| Capture | What it unlocks |
-|---|---|
-| Full system (a second run optional) | tonal deviation; a second run adds local repeatability (`capture.repeatability`) |
-| Left side only, right side only, both | `lr-match`, and `--cancel-check LEFT RIGHT BOTH` |
-| Sub only, front midbasses only, sub + midbasses | bass level (`bass_balance`) and `--cancel-check SUB MIDS SUB+MIDS` |
-| Ambient (generator off) | `--ambient`: bins under 10 dB SNR are excluded |
-| Full system at each candidate bass delay / polarity / Phase | `mmm-compare` checks the handover against an unchanged measured midrange reference |
-
-**Record the setup once, as a capture profile** (`--capture-profile
-profile.json` on analyze/propose/refine/verify), e.g.:
-
-```json
-{"analyzer": "rta 1/48", "noise": "pink periodic", "fft_length": 65536,
- "sequence_length": 65536, "sample_rate_hz": 48000, "playback": "file",
- "test_file_sample_rate_hz": 48000, "test_file_fft_length": 65536,
- "window": "hann", "averaging": "forever", "rms_level_dbfs": -12,
- "mic_cal": "90deg", "mic_aim": "up", "seat": "driver", "engine": "off"}
-```
-
-It is checked against REW's signal-generator rules: pink noise with the RTA
-and white with the Spectrum analyser; the periodic sequence length equal to
-the FFT length; a test file made at REW's sample rate and FFT length; peaks
-clip above about -6 dBFS RMS (periodic) or -12 dBFS (random). A rule broken
-refuses the session. `playback: "file"` — pink noise played by the car's own
-source while the laptop records — is a separate clock, which REW says needs
-windowing and averaging/overlap set for it with periodic noise; the profile
-flags that. Every report carries the profile id, so captures from different
-setups are not compared by accident.
-
-**What the tools now enforce for MMM:**
-- *RTA mode.* A full-system tilt steeper than -2.5 dB/oct or rising faster
-  than +1.5 dB/oct is refused by `propose`/`refine` (noted by `analyze`):
-  Spectrum mode shows pink noise falling ~3 dB/oct and white noise in an
-  octave RTA rises ~3 dB/oct, and voicing toward the target would tilt the
-  tune the opposite way. With a valid capture profile recorded the refusal
-  becomes a check-the-car note; otherwise `--accept-tilt` only if it really is
-  the car.
-- *EQ policy.* With `--capture mmm`, every proposed band (propose) and every
-  edit (refine) must change the response by more than the repeat-capture
-  variation where it acts — max(0.5 dB, 2 x the local repeatability) — or it
-  is not proposed: a re-capture could not confirm it. With a single run,
-  filters are kept broad (Q <= 4) because nothing yet shows a narrow feature is
-  real. A boost with no cancellation evidence (no phase, no `--cancel-check`)
-  goes to `needs_trial` in propose and is not proposed by refine: write one
-  alone, re-capture, and keep it only if `verify` confirms it.
-- *Noise.* An RTA adds the background in, so a dip can read as filled.
-  `--ambient` excludes every bin less than `--min-snr-db` (10) above it.
-- *Cancellation without phase.* Where two halves measured together sum below
-  the power sum of the halves alone, the dip is destructive summation; with
-  `--cancel-check` a boost into it is BLOCKed (a dip both halves already have
-  is not, and may be filled). The three captures must share one playback level.
-- *Repeatability.* Two or more runs give bass, midrange and treble summaries
-  plus a frequency profile in `capture.repeatability`. Pass that whole object
-  to `predicted_vs_measured(..., repeatability=profile)` after re-capture:
-  each changed filter is judged against uncertainty in its own region.
-  Missing coverage is inconclusive. `verification_noise_db` remains a
-  conservative scalar fallback; a quiet midrange must not certify noisy bass.
-- *L/R protection.* `lr-match --target <curve>` (default: the supplied in-car
-  target) proposes a cut only where the louder side also exceeds the target,
-  matching improves, and target error improves without a new deficit. Both
-  sides share one fixed target anchor after any proposed trim. A healthy side
-  is not cut to copy the other side's dip. `unresolved_regions` need diagnosis
-  and listening, not forced matching. A proposed trim is still a listening
-  decision; broad response differences can resemble a level offset.
-- *Bass selection.* `mmm-compare` defaults to `--objective balanced`: judge
-  target error in the handover relative to `--reference-band 300 3000`, with
-  guards against worse shape, new holes/humps and significant output loss.
-  Use full-system captures so that reference contains real, unchanged output;
-  never use a sub-only stopband or ambient noise as the reference. For another
-  comparison band, explicitly select an unchanged reference outside it. If
-  none is measured, balanced/level cannot choose a winner; `--objective shape`
-  can compare band shape only and cannot establish bass-to-midrange balance.
-  `--objective level` remains available but must pass the tonal guards too.
-  More output alone does not prove better sound or correct phase.
-
-**After every write: `verify`.** `pipeline.py verify --report <refine or
-propose JSON> --before <the captures it came from> --after <re-captures>
---dsp-rate 96000` judges each changed filter against the repeatability of
-both the before and after runs in its own region, reports the target error
-before and after, and says per band: keep (confirmed), rethink (the change did
-not show up), re-capture (partly landed), or settle by blind A/B
-(inconclusive). `--bands F,Q,G ... --old-bands ...` when only some of a
-report's edits were written.
-
-**Voicing last, by ear.** Once the corrections are verified, `pipeline.py
-voice-variants --afpx tuned.afpx --out-dir v --bass-channels <sub+midbass>
---treble-channels <tweeters> --bass-db -1 1 --treble-db -1 1` builds one-shelf
-variants (low shelf on the bass channels, high shelf on the tweeters, in their
-end shelf slots; an existing shelf's gain is adjusted instead). It shows the
-edits first and writes only with `--confirm`. Compare each variant against the
-current tune with its `ab_make` line — blind, level-matched, at normal volume —
-and keep only a repeatable preference; then record the voiced target for the
-next session. A variant that measures further from the curve but is preferred
-blind is a voicing choice, and the right one.
-
-**Order.** Check the tilt and voicing (§Voicing,) → set the bass LEVEL
-(`bass_balance`; a trim or sub amp gain, not bells) → choose the sub/midbass
-setting with `mmm-compare --objective balanced --repeat <baseline-repeat>`
-over the handover band, using the chosen target and unchanged reference →
-match L/R with `lr-match --target <same-target>` (only target-supported cuts) →
-`refine` (or `propose` on a channel with no PEQ yet) with
-`--capture mmm --cancel-check ...` → blind, loudness-matched A/B (§Judge by ear
-only at matched loudness,) → re-capture and `pipeline.py verify` with the
-same capture set → `voice-variants` blind A/B last. `mmm-compare` measures repeat disagreement
-from the difference BETWEEN the repeat curves, not the difference of their
-target-error scores (two different curves can have equal scores). It keeps
-the current setting unless a candidate clears twice that RMS disagreement,
-the engineering floors of 0.25 dB (level) / 0.1 dB (shape or target error),
-and the tonal guards. These thresholds are not universal audibility limits.
-Every winner is provisional: repeat the winning setting with the same path
-and source level, rerun the comparison, and confirm by listening before
-keeping it. MMM supports tonal decisions; it cannot prove arrival time,
-phase alignment or image position. After changing the handover, recheck bass
-level before further EQ.
-
 ## Refine the tune you have before adding to it
 
 After the first session, every measurement is taken THROUGH a tune that
@@ -2335,7 +2368,7 @@ does, so run on a tuned car it can only stack more filters on top: it cannot
 see that an old cut is now digging a hole, and each extra band near a
 crossover moves phase that was aligned earlier.
 
-`pipeline.py refine --afpx tune.afpx --channels N [N...] --dsp-rate 96000
+`pipeline.py refine --afpx tune.afpx --channels N [N...] --dsp-rate <confirmed_internal_hz>
 --positions ... --target ...` starts from the bank the measurement was taken
 through. For every PEQ inside the channel's passband (kept 1/3 octave inside
 its crossovers) it tries removing it, halving it, and re-fitting it in place;

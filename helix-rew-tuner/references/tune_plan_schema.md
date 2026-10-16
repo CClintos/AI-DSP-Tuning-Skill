@@ -28,6 +28,10 @@ equality is numeric (`"00"` and `0` are the same sample count), and a relative
 `0.0` dB trim is always a no-op regardless of how the stored linear level is
 spelled in XML.
 Crossover and polarity edits are not part of version 1 and are always refused.
+For a recommended polarity change, name the driver or L/R driver pair and the
+current → recommended setting. The user sets it manually in PC-Tool, saves a new
+baseline tune and re-measures; decode that saved baseline fresh before creating
+the next plan. Do not substitute a `phase_rotation` edit for polarity.
 
 ## Edit objects
 
@@ -78,7 +82,11 @@ derived at the DSP's confirmed sample rate and shown to the user. Every delay
 edit requires its own `true` confirmation. Version 1 treats delays and T=19/20
 all-pass filters as phase-domain and treats T=17 PEQ and T=3/4 shelves as
 EQ-domain. It refuses any plan containing both domains, even across different
-channels: apply the phase edit, remeasure, then create a fresh EQ plan.
+channels. When both are needed, apply driver-local EQ justified by the solos,
+re-measure, align polarity/delay/phase, re-measure, then propose final system tone.
+Use a fresh plan for each domain and fresh captures after each stage; the
+separation rule does not put alignment before driver-local EQ. Polarity remains a
+manual PC-Tool step as described above.
 
 ### Channel Phase control
 

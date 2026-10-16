@@ -80,7 +80,8 @@ class RepositoryReleaseContractsTests(unittest.TestCase):
                 self.assertIn(token, core)
             with self.subTest(document="README", token=token):
                 self.assertIn(token, readme)
-        self.assertIn(core.strip(), agents)
+        self.assertIn(core.strip(), agents.replace(
+            "](helix-rew-tuner/references/", "]("))
 
     def test_readme_records_both_verified_pct6_versions_with_caveat(self):
         readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
@@ -283,6 +284,23 @@ class BuildSkillTests(unittest.TestCase):
 
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("generated files and package are current", result.stdout)
+
+    def test_generated_agents_links_open_the_packaged_references(self) -> None:
+        reference = self.root / "helix-rew-tuner" / "references" / "first_tune.md"
+        reference.write_text("# First tune\n", encoding="utf-8")
+        core = reference.with_name("core_workflow.md")
+        core.write_text(
+            "# Workflow\n\n[Start](first_tune.md#first-tune)\n"
+            "[Local](#workflow)\n[REW](https://www.roomeqwizard.com/)\n",
+            encoding="utf-8",
+        )
+        self.write_outputs()
+        agents = (self.root / "AGENTS.md").read_text(encoding="utf-8")
+        target = re.search(r"\[Start\]\(([^)]+)\)", agents).group(1)
+        self.assertEqual(target.partition("#")[2], "first-tune")
+        self.assertEqual((self.root / target.partition("#")[0]).resolve(), reference.resolve())
+        self.assertIn("[Local](#workflow)", agents)
+        self.assertIn("[REW](https://www.roomeqwizard.com/)", agents)
 
 
 if __name__ == "__main__":

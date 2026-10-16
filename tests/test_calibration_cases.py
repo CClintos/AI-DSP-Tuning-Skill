@@ -42,8 +42,9 @@ def _export(path, spl_db, phase_deg=None):
 
 
 def _propose(*args):
-    run = subprocess.run([sys.executable, str(SCRIPTS / "pipeline.py"), "propose", *args,
-                          "--target", "default"], text=True, capture_output=True, check=False)
+    run = subprocess.run([sys.executable, str(SCRIPTS / "pipeline.py"), "propose",
+                          "--dsp-rate", "96000", *args, "--target", "default"],
+                         text=True, capture_output=True, check=False)
     if run.returncode != 0:
         raise AssertionError(run.stdout + run.stderr)
     return json.loads(run.stdout)
