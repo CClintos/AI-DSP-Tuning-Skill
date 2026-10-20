@@ -57,6 +57,7 @@ before correcting, and prefer doing less.**
 - [Seat validation outranks nearfield aesthetics](#nearfield-aesthetics-do-not-override-a-seat-validated-filter)
 - [Retraction discipline](#retraction-discipline-a-disproven-claim-invalidates-what-was-built-on-it)
 - [Rear-fill / ambience measurement discipline](#rear-fill-ambience-channels-need-their-own-measurement-discipline)
+- [Preparing for EMMA judging](#preparing-for-emma-sound-quality-judging)
 - [MMM-first tuning](#mmm-first-tuning-the-short-path-for-tone-bass-level-and-lr-balance)
 - [Refine the tune you have](#refine-the-tune-you-have-before-adding-to-it)
 - [Matched-loudness blind A/B](#judge-by-ear-only-at-matched-loudness-blind)
@@ -2183,6 +2184,59 @@ separate source, then back off 2–3 dB. Time a rear or centre against the ONE
 front driver that plays most of the 1–4 kHz voice band (usually the midrange),
 not against the summed front stage — a band-limited arrival of a sum is the
 arrival of whichever driver plays earliest in that band.
+
+## Preparing for EMMA Sound Quality judging
+
+From the EMMA competition manual (edition 2026) and the Sound Quality judge
+book (2024, V3); check the current editions before an event, as EMMA updates
+them. What the rules mean for a tune, and which command answers each item:
+
+- **One judge, in the driver's seat.** Judging is "single seat": all scoring
+  comes from the judge in the driver's seat (the right-hand seat in a
+  right-hand-drive car), who may not move or re-adjust the seat. Tune that
+  seat, with the seat where you will present it. Judges' heads are not your
+  height: run the MMM a little higher and lower than your own head.
+- **You suggest the volume; the cap is 80 dB** (unweighted, slow, on pink
+  noise). Capture at the volume you will suggest.
+- **Then the judge turns it up about 6 dB.** "Overall spectral balance at
+  higher volume" is a full 30-point item in the 2026 matrix, and a system that
+  cannot play 6 dB louder loses 12 points. Capture the same MMM at your volume
+  and about 6 dB up (2-3 head-unit steps; check with an SPL meter), then
+  `pipeline.py emma-volume --normal N.txt --loud L.txt`: it reports whether the
+  system reached +6 dB and which EMMA band compresses (amplifier clipping, a
+  limiter, a driver at its limit) or rises faster (loudness or dynamic bass
+  still active). The rulebook's gain-structure hint applies: the head unit
+  should use most of its range before an amplifier clips.
+- **Tonal accuracy is four bands of 30 points**: sub-bass 10-60 Hz, mid-bass
+  60-200 Hz, midrange 200 Hz-3 kHz, high 3 kHz up. Judges score the quality
+  inside each band there, and the RELATIVE level of the bands under spectral
+  balance; big differences between bands score lower than an average would
+  suggest. `analyze` reports `emma_bands`: each band's level against the
+  target (`median_db`, what spectral balance hears), its peaks and holes
+  about its own level (`roughness_db`, what tonal accuracy hears), and the
+  spread between bands. A mistake around a crossover costs both bands either
+  side of it, so junction work pays twice.
+- **Imaging positions and focus (25 + 25)** use five instruments in their own
+  bands: electronic bass 40-100 Hz, guitar 100-250 Hz, flute 250 Hz-1 kHz,
+  celesta 1-2 kHz, triangle 2-4 kHz and up, at left, left-centre, centre,
+  right-centre and right. An instrument heard in more than one place scores
+  0. `pipeline.py imaging --bands emma` (from left-only and right-only
+  captures) shows which instrument band pulls away from the others;
+  `lr-match` addresses level-caused pulls. From MMM data this is the level
+  cue only — confirm by ear on the technical tracks.
+- **System noise costs up to 6 points**: hum, hiss, pops, anything not on the
+  recording, judged on the zero-bit track (engine off unless the head judge
+  announces otherwise for every car). Capture an RTA with the system off and
+  one with it on playing silence at your volume, then `pipeline.py
+  noise-check --off OFF.txt --on ON.txt`. Listen separately for turn-on pops
+  and noise while changing volume or track.
+- **The car is judged "ready for driving"**: windows, trunk and sunroof
+  closed, no curtains or window covers. Capture that way.
+- **Channel check**: tracks 2 and 3 verify left and right; a reversal gives
+  you five minutes to fix it, once.
+- The 2026 recording has new tonal tracks (the 2026 Tuning judge book names
+  13 "Ocean Drive", 14 "One Fine Day", 15 "Coming Back to You", with track 16
+  for spectral balance); listen to them on your own system before the event.
 
 ## MMM-first tuning: the short path for tone, bass level and L/R balance
 

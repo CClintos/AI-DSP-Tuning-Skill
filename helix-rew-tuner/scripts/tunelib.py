@@ -4644,6 +4644,158 @@ def public_repeatability(profile):
     return out
 
 
+# --------------------------------------------------------------------------
+# EMMA SOUND QUALITY. EMMA judges score tonal accuracy in four bands (sub-bass
+# 10-60 Hz, mid-bass 60-200 Hz, midrange 200 Hz-3 kHz, high 3 kHz up, 30
+# points each), then spectral balance -- how the four combine -- at the
+# suggested volume and again ~6 dB louder (30 points each in the 2026
+# matrix; failing to play 6 dB louder costs 12 points). Imaging positions are
+# scored per instrument of the technical tracks, each in its own band. These
+# helpers report the measurements in the judges' own terms. They describe a
+# capture; they do not predict a score.
+EMMA_BANDS = (('sub_bass', 20.0, 60.0), ('mid_bass', 60.0, 200.0),
+              ('midrange', 200.0, 3000.0), ('high', 3000.0, 16000.0))
+EMMA_IMAGING_BANDS = ((40.0, 100.0), (100.0, 250.0), (250.0, 1000.0),
+                      (1000.0, 2000.0), (2000.0, 4000.0))
+EMMA_IMAGING_INSTRUMENTS = ('electronic bass', 'electric guitar', 'flute', 'celesta',
+                            'triangle')
+
+
+def emma_band_balance(freqs, dev_db, support=None, bands=EMMA_BANDS, uneven_db=2.0):
+    """Anchored deviation from target in EMMA's four tonal bands.
+
+    Per band: median_db (the band's level against the target -- what
+    spectral balance hears), roughness_db (RMS of the band about its own
+    median -- peaks and holes inside it, what tonal accuracy hears), and
+    worst_db. spread_db is the largest difference between band levels; the
+    judge book notes big differences between bands score lower in spectral
+    balance than any band average would suggest. verdict 'balanced' or
+    'uneven' (spread above uneven_db)."""
+    f = np.asarray(freqs, dtype=float)
+    live = np.ones_like(f, dtype=bool) if support is None else np.asarray(support, dtype=bool)
+    sm = masked_erb_smooth(f, np.asarray(dev_db, dtype=float), live)
+    rows = []
+    for name, lo, hi in bands:
+        sel = live & (f >= lo) & (f <= hi)
+        if np.count_nonzero(sel) < 8:
+            rows.append({'band': name, 'band_hz': [lo, hi], 'median_db': None,
+                         'roughness_db': None, 'worst_db': None})
+            continue
+        med = float(np.median(sm[sel]))
+        rows.append({'band': name, 'band_hz': [lo, hi], 'median_db': round(med, 2),
+                     'roughness_db': round(_mmm_rms(f, sm - med, sel), 2),
+                     'worst_db': round(float(sm[sel][np.argmax(np.abs(sm[sel] - med))]), 2)})
+    levels = [r['median_db'] for r in rows if r['median_db'] is not None]
+    spread = round(float(max(levels) - min(levels)), 2) if len(levels) >= 2 else None
+    verdict = None
+    if spread is not None:
+        if spread > uneven_db:
+            hi_band = max((r for r in rows if r['median_db'] is not None),
+                          key=lambda r: r['median_db'])['band']
+            lo_band = min((r for r in rows if r['median_db'] is not None),
+                          key=lambda r: r['median_db'])['band']
+            verdict = 'uneven: %s sits %.1f dB above %s' % (hi_band, spread, lo_band)
+        else:
+            verdict = 'balanced'
+    return {'bands': rows, 'spread_db': spread, 'verdict': verdict}
+
+
+def emma_volume_check(freqs, normal_db, loud_db, step_db=6.0, support=None,
+                      bands=EMMA_BANDS, band_flag_db=1.0, reach_tolerance_db=0.75):
+    """The 2026 'spectral balance at higher volume' check from two captures:
+    the same signal and mic path at the volume you will suggest, and again
+    about step_db louder.
+
+    overall_rise_db is the broadband loudness rise. Each EMMA band's rise is
+    compared with it: a band that rises band_flag_db less than the rest is
+    compressing (amplifier clipping, a limiter, a driver at its limit); one
+    that rises more is level-dependent processing (loudness, dynamic bass).
+    Either changes the balance the judge hears at the louder setting.
+    verdict: 'holds' | 'changes_balance' | 'cannot_reach_step' (the rulebook
+    deducts 12 points when the system cannot play 6 dB louder)."""
+    f = np.asarray(freqs, dtype=float)
+    live = np.ones_like(f, dtype=bool) if support is None else np.asarray(support, dtype=bool)
+    normal = np.asarray(normal_db, dtype=float)
+    loud = np.asarray(loud_db, dtype=float)
+    overall = loudness_change_db(f[live], normal[live], loud[live])
+    rise = masked_erb_smooth(f, loud - normal, live)
+    rows, notes = [], []
+    changed = []
+    for name, lo, hi in bands:
+        sel = live & (f >= lo) & (f <= hi)
+        if np.count_nonzero(sel) < 8:
+            rows.append({'band': name, 'band_hz': [lo, hi], 'rise_db': None,
+                         'vs_overall_db': None, 'state': 'unmeasured'})
+            continue
+        r = float(np.median(rise[sel]))
+        d = r - overall
+        state = ('compressing' if d < -band_flag_db else
+                 'rising_faster' if d > band_flag_db else 'tracks')
+        if state != 'tracks':
+            changed.append((name, d, state))
+        rows.append({'band': name, 'band_hz': [lo, hi], 'rise_db': round(r, 2),
+                     'vs_overall_db': round(d, 2), 'state': state})
+    if overall < step_db - reach_tolerance_db:
+        verdict = 'cannot_reach_step'
+        notes.append('the louder capture is only %.1f dB up, not %.0f: if the judge cannot get '
+                     '%.0f dB more, the rulebook deducts 12 points -- leave volume headroom '
+                     '(suggest a lower judging volume, or fix the gain structure)'
+                     % (overall, step_db, step_db))
+    elif changed:
+        verdict = 'changes_balance'
+    else:
+        verdict = 'holds'
+    for name, d, state in changed:
+        if state == 'compressing':
+            notes.append('%s rises %.1f dB less than the rest: something is compressing there at '
+                         'the louder setting (amplifier clipping, a limiter, or a driver at its '
+                         'limit) -- the judge hears the balance shift and the attack soften'
+                         % (name.replace('_', '-'), -d))
+        else:
+            notes.append('%s rises %.1f dB more than the rest: level-dependent processing '
+                         '(loudness, dynamic bass) is active somewhere in the chain -- turn it off '
+                         'or the louder pass will sound differently balanced'
+                         % (name.replace('_', '-'), d))
+    return {'step_db': step_db, 'overall_rise_db': round(overall, 2), 'bands': rows,
+            'verdict': verdict, 'notes': notes}
+
+
+NOISE_BANDS = (('hum', 40.0, 300.0), ('midrange', 300.0, 2000.0), ('hiss', 2000.0, 12000.0))
+
+
+def system_noise_check(freqs, off_db, on_db, support=None, bands=NOISE_BANDS,
+                       audible_db=3.0, barely_db=1.0):
+    """What the audio system adds to a quiet cabin, from two RTA captures made
+    the same way at the judging seat: system OFF, and system ON playing
+    digital silence (EMMA's zero-bit track) at the suggested volume.
+
+    Per band: excess_db (median) and peak_excess_db; state 'quiet' (< 1 dB),
+    'barely' or 'audible' (> 3 dB above the cabin). EMMA deducts up to 6
+    points for system noise (hum, hiss, pops). An RTA reads relative level,
+    so this compares against the car's own background rather than an
+    absolute threshold."""
+    f = np.asarray(freqs, dtype=float)
+    live = np.ones_like(f, dtype=bool) if support is None else np.asarray(support, dtype=bool)
+    excess = masked_erb_smooth(f, np.asarray(on_db, dtype=float) - np.asarray(off_db, dtype=float),
+                               live)
+    rows, worst = [], 'quiet'
+    rank = {'quiet': 0, 'barely': 1, 'audible': 2}
+    for name, lo, hi in bands:
+        sel = live & (f >= lo) & (f <= hi)
+        if np.count_nonzero(sel) < 8:
+            continue
+        med, peak = float(np.median(excess[sel])), float(np.max(excess[sel]))
+        state = 'audible' if peak > audible_db else 'barely' if peak > barely_db else 'quiet'
+        if rank[state] > rank[worst]:
+            worst = state
+        row = {'band': name, 'band_hz': [lo, hi], 'excess_db': round(med, 2),
+               'peak_excess_db': round(peak, 2), 'state': state}
+        if state != 'quiet':
+            row['peak_hz'] = round(float(f[sel][np.argmax(excess[sel])]), 1)
+        rows.append(row)
+    return {'bands': rows, 'verdict': worst}
+
+
 def snr_support(signal_db, ambient_db, min_snr_db=10.0):
     """(ok_mask, snr_db): where the capture stands at least min_snr_db above
     an ambient capture taken the same way with the generator off. An RTA sums

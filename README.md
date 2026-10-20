@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.13.0`) so you can tell whether an already-installed copy is current — open
+`1.14.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -592,6 +592,17 @@ switched off rather than run on data that has none. In their place:
   blind, level-matched listening test.
 
 The capture checklist is in `references/methodology.md` (MMM-first tuning).
+
+### Preparing for an EMMA Sound Quality event
+
+The skill reports in the judges' terms: `analyze` gives each of EMMA's four
+tonal bands (sub-bass, mid-bass, midrange, high) against the target and the
+spread between them; `emma-volume` checks the "6 dB louder" spectral-balance
+pass (30 points in 2026, and 12 lost if the system cannot get there);
+`noise-check` compares system off with system on playing silence; and
+`imaging --bands emma` uses the five instrument bands of the imaging tracks.
+The methodology's "Preparing for EMMA judging" section summarises the rules
+that matter for a tune (one judge, driver's seat, 80 dB cap, +6 dB pass).
 
 ### Improving a tune that already exists
 

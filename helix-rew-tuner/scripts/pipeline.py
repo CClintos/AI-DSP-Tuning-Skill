@@ -25,6 +25,8 @@
 # python pipeline.py lr-match --left L.txt --right R.txt [--band 300 6000]
 # python pipeline.py verify --report refine.json --before B1 B2 --after A1 A2 --dsp-rate HZ
 # python pipeline.py voice-variants --afpx T --out-dir D --bass-channels .. --bass-db -1 1 [--confirm]
+# python pipeline.py emma-volume --normal judge.txt --loud judge_plus6.txt
+# python pipeline.py noise-check --off system_off.txt --on zero_bit.txt
 #   analyze/propose/refine also take: --capture mmm (each --positions file is a
 #   repeat MMM run, not a seat), --ambient noise.txt, --cancel-check A B BOTH,
 #   --accept-tilt
@@ -1015,6 +1017,7 @@ def analyze(args):
     report['tilt'] = {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                       'target': tunelib.measure_tilt(freqs, target_db)}
     report['bass_balance'] = tunelib.bass_balance(freqs, dev_db, support)
+    report['emma_bands'] = tunelib.emma_band_balance(freqs, dev_db, support)
     note = _bass_note(report['bass_balance'])
     if note:
         notes.append(note)
@@ -1475,7 +1478,10 @@ def imaging(args):
                      'arrival-time difference between the sides is missing from '
                      'this prediction')
 
-    rows = tunelib.band_itd_ild(freqs, left_db, right_db, lp, rp)
+    emma = getattr(args, 'bands', 'default') == 'emma'
+    rows = (tunelib.band_itd_ild(freqs, left_db, right_db, lp, rp,
+                                 bands=tunelib.EMMA_IMAGING_BANDS) if emma
+            else tunelib.band_itd_ild(freqs, left_db, right_db, lp, rp))
     pull = tunelib.image_pull(rows)
     if pull['verdict'] == 'smeared':
         notes.append('image position disagrees across frequency -- one delay or trim '
@@ -1491,6 +1497,13 @@ def imaging(args):
               'verdict': pull['verdict'],
               'spread': pull['spread'], 'mean_pull': pull['mean_pull'],
               'bands': pull['bands'], 'notes': notes}
+    if emma:
+        for band, instrument in zip(report['bands'], tunelib.EMMA_IMAGING_INSTRUMENTS):
+            band['instrument'] = instrument
+        notes.append('bands follow the EMMA position/focus tracks (2-6): electronic bass '
+                     '40-100 Hz, guitar 100-250, flute 250-1k, celesta 1-2k, triangle 2-4k. '
+                     'An instrument heard in two places scores 0, so a band pulled off the '
+                     'others costs that instrument at every position')
     near_side = getattr(args, 'near_side', None)
     if near_side:
         report['centre_steering'] = tunelib.centre_steering(rows, near_side)
@@ -2132,6 +2145,40 @@ def voice_variants(args):
                                                're-run with --confirm to write the files'])}
 
 
+def _load_pair(a_path, b_path, freqs):
+    fa, sa, _p, _c = measure.load_text_export(a_path)
+    fb, sb, _p, _c = measure.load_text_export(b_path)
+    live = measure.support_mask(fa, freqs) & measure.support_mask(fb, freqs)
+    return measure.resample_log(fa, sa, freqs), measure.resample_log(fb, sb, freqs), live
+
+
+def emma_volume(args):
+    """EMMA's higher-volume spectral balance check from two captures (writes nothing)."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    normal, loud, live = _load_pair(args.normal, args.loud, freqs)
+    result = tunelib.emma_volume_check(freqs, normal, loud, step_db=args.step_db, support=live)
+    result['meta'] = {'normal': args.normal, 'loud': args.loud}
+    result['notes'].append('capture both with the same signal, mic path and everything else; '
+                           'only the head-unit volume changes (about 2-3 steps for 6 dB -- '
+                           'check with an SPL meter on pink noise)')
+    return result
+
+
+def noise_check(args):
+    """What the system adds to the quiet cabin: system off vs on with silence."""
+    freqs = measure.common_grid(20.0, 20000.0, 96)
+    off, on, live = _load_pair(args.off, args.on, freqs)
+    result = tunelib.system_noise_check(freqs, off, on, support=live)
+    result['meta'] = {'off': args.off, 'on': args.on}
+    result['notes'] = ['capture both at the judging seat with the same RTA settings and no '
+                       'generator; "on" plays digital silence (the zero-bit track) at the '
+                       'volume you will suggest',
+                       'hum points at grounding or the source; hiss at amplifier gain set too '
+                       'high for the source level; also listen for turn-on pops and noise while '
+                       'changing volume or track -- EMMA deducts for those too']
+    return result
+
+
 def _labelled(specs, what):
     out = {}
     for spec in specs:
@@ -2608,6 +2655,17 @@ def main():
     vv.add_argument('--confirm', action='store_true', help='write the variant files')
     vv.add_argument('--out')
 
+    ev = sub.add_parser('emma-volume', help='does the balance hold 6 dB louder? (EMMA)')
+    ev.add_argument('--normal', required=True, help='capture at the volume you will suggest')
+    ev.add_argument('--loud', required=True, help='same capture about 6 dB louder')
+    ev.add_argument('--step-db', type=float, default=6.0)
+    ev.add_argument('--out')
+
+    nc = sub.add_parser('noise-check', help='system noise: system off vs on playing silence')
+    nc.add_argument('--off', required=True, help='RTA with the audio system off')
+    nc.add_argument('--on', required=True, help='RTA with the system on, playing silence')
+    nc.add_argument('--out')
+
     lm = sub.add_parser('lr-match', help='left/right tonal match from half-system captures')
     lm.add_argument('--left', required=True, help='left side only')
     lm.add_argument('--right', required=True, help='right side only')
@@ -2650,6 +2708,8 @@ def main():
                         help='predicted image position vs frequency from solo L/R')
     im.add_argument('--solo-l', required=True)
     im.add_argument('--solo-r', required=True)
+    im.add_argument('--bands', choices=('default', 'emma'), default='default',
+                    help='emma: the five instrument bands of the EMMA imaging tracks')
     im.add_argument('--near-side', choices=('left', 'right'),
                     help='the side nearer the listener (right = RHD driver seat): '
                          'adds centre-steering options')
@@ -2699,13 +2759,14 @@ def main():
         print(json.dumps(apply_plan(args.plan), indent=2))
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
                       'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match',
-                      'verify', 'voice-variants'):
+                      'verify', 'voice-variants', 'emma-volume', 'noise-check'):
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,
                   'ab-result': ab_result, 'mmm-compare': mmm_compare,
                   'lr-match': lr_match, 'verify': verify,
-                  'voice-variants': voice_variants}[args.cmd](args)
+                  'voice-variants': voice_variants, 'emma-volume': emma_volume,
+                  'noise-check': noise_check}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
             with open(args.out, 'w', encoding='utf-8') as fh:

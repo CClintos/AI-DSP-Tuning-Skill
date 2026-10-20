@@ -139,7 +139,10 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   (§MMM-first tuning,). `--capture-profile` records and checks the REW setup;
   `pipeline.py verify` checks a written change against the re-captures, and
   `pipeline.py voice-variants` builds one-shelf voicing variants for a blind
-  A/B. With 3+ positions, `propose` validates
+  A/B. For an EMMA event read §Preparing for EMMA, first: `analyze` reports
+  `emma_bands`, `pipeline.py emma-volume` checks the 6 dB-louder pass,
+  `pipeline.py noise-check` the system noise, and `imaging --bands emma` the
+  technical tracks' instrument bands. With 3+ positions, `propose` validates
   itself leave-one-position-out: each band carries APPLY / REVIEW / DO NOT
   APPLY, and DO NOT APPLY bands land in `rejected`. Label the positions with
   `--sittings` so each fold withholds a whole sitting (§Held-out by sitting,),
