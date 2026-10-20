@@ -73,16 +73,31 @@ class HigherVolumeTests(Cli):
                          "--loud", _rta(self.root / "l.txt", loud))
         self.assertEqual(r["verdict"], "changes_balance")
         states = {b["band"]: b["state"] for b in r["bands"]}
-        self.assertEqual(states["sub_bass"], "compressing")
+        self.assertEqual(states["sub_bass"], "rising_less")
         self.assertEqual(states["midrange"], "tracks")
-        self.assertTrue(any("compressing" in n for n in r["notes"]))
+        self.assertTrue(any("cannot identify the cause" in n for n in r["notes"]))
 
-    def test_a_system_that_cannot_play_six_db_louder_is_flagged(self):
+    def test_a_four_db_capture_does_not_prove_maximum_output(self):
         normal = self.car()
         r = self.run_cli("emma-volume", "--normal", _rta(self.root / "n.txt", normal),
                          "--loud", _rta(self.root / "l.txt", normal + 4.0))
-        self.assertEqual(r["verdict"], "cannot_reach_step")
-        self.assertTrue(any("12 points" in n for n in r["notes"]))
+        self.assertEqual(r["verdict"], "step_not_demonstrated")
+        self.assertFalse(any("12 points" in n for n in r["notes"]))
+
+    def test_an_excessive_step_does_not_validate_the_six_db_test(self):
+        normal = self.car()
+        r = tunelib.emma_volume_check(FREQS, normal, normal + 12)
+        self.assertEqual(r["verdict"], "step_not_demonstrated")
+
+    def test_missing_bass_cannot_pass_full_band_balance(self):
+        normal = self.car()
+        r = tunelib.emma_volume_check(FREQS, normal, normal + 6, support=FREQS >= 300)
+        self.assertEqual(r["verdict"], "incomplete_coverage")
+
+    def test_invalid_step_is_rejected(self):
+        for step in (0, -6, float('nan'), float('inf')):
+            with self.subTest(step=step), self.assertRaises(ValueError):
+                tunelib.emma_volume_check(FREQS, self.car(), self.car(), step_db=step)
 
     def test_loudness_processing_shows_as_a_band_rising_faster(self):
         normal = self.car()
@@ -116,14 +131,27 @@ class NoiseTests(Cli):
 class EmmaImagingTests(Cli):
     def test_imaging_in_the_technical_track_bands(self):
         left = _rta(self.root / "L.txt", self.car())
-        right = _rta(self.root / "R.txt", self.car(3.0 * ((FREQS > 1000) & (FREQS < 2000))))
+        right = _rta(self.root / "R.txt", self.car(3.0 * (FREQS > 5500)))
         r = self.run_cli("imaging", "--solo-l", left, "--solo-r", right, "--bands", "emma")
         names = [b["instrument"] for b in r["bands"]]
         self.assertEqual(names, list(tunelib.EMMA_IMAGING_INSTRUMENTS))
-        celesta = [b for b in r["bands"] if b["instrument"] == "celesta"][0]
-        others = [b for b in r["bands"] if b["instrument"] != "celesta"]
-        self.assertEqual(celesta["side"], "right")
+        self.assertEqual(r['meta']['emma_edition'], 2026)
+        triangle = [b for b in r["bands"] if b["instrument"] == "triangle"][0]
+        others = [b for b in r["bands"] if b["instrument"] != "triangle"]
+        self.assertEqual(triangle["side"], "right")
         self.assertTrue(all(abs(b["pull"]) < 0.1 for b in others), others)
+
+    def test_partial_capture_does_not_shift_instrument_labels(self):
+        # image_pull drops bands without data. Zip-by-position used to relabel
+        # the surviving upper band as bass when lower bands were missing.
+        f = FREQS[FREQS > 6000]
+        paths = []
+        for name, offset in (('L', 0), ('R', 3)):
+            path = self.root / (name + '.txt')
+            path.write_text('\n'.join('%g %g' % (x, 75 + offset) for x in f))
+            paths.append(str(path))
+        r = self.run_cli('imaging', '--solo-l', paths[0], '--solo-r', paths[1], '--bands', 'emma')
+        self.assertEqual([b['instrument'] for b in r['bands']], ['triangle'])
 
 
 if __name__ == "__main__":

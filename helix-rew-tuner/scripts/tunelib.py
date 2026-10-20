@@ -4655,9 +4655,9 @@ def public_repeatability(profile):
 # capture; they do not predict a score.
 EMMA_BANDS = (('sub_bass', 20.0, 60.0), ('mid_bass', 60.0, 200.0),
               ('midrange', 200.0, 3000.0), ('high', 3000.0, 16000.0))
-EMMA_IMAGING_BANDS = ((40.0, 100.0), (100.0, 250.0), (250.0, 1000.0),
-                      (1000.0, 2000.0), (2000.0, 4000.0))
-EMMA_IMAGING_INSTRUMENTS = ('electronic bass', 'electric guitar', 'flute', 'celesta',
+EMMA_IMAGING_BANDS = ((20.0, 500.0), (60.0, 1200.0), (160.0, 5500.0),
+                      (200.0, 5000.0), (2000.0, 20000.0))
+EMMA_IMAGING_INSTRUMENTS = ('electronic bass', 'electric guitar', 'banjo', 'vibraphone',
                             'triangle')
 
 
@@ -4706,55 +4706,62 @@ def emma_volume_check(freqs, normal_db, loud_db, step_db=6.0, support=None,
     the same signal and mic path at the volume you will suggest, and again
     about step_db louder.
 
-    overall_rise_db is the broadband loudness rise. Each EMMA band's rise is
-    compared with it: a band that rises band_flag_db less than the rest is
-    compressing (amplifier clipping, a limiter, a driver at its limit); one
-    that rises more is level-dependent processing (loudness, dynamic bass).
-    Either changes the balance the judge hears at the louder setting.
-    verdict: 'holds' | 'changes_balance' | 'cannot_reach_step' (the rulebook
-    deducts 12 points when the system cannot play 6 dB louder)."""
-    f = np.asarray(freqs, dtype=float)
-    live = np.ones_like(f, dtype=bool) if support is None else np.asarray(support, dtype=bool)
-    normal = np.asarray(normal_db, dtype=float)
-    loud = np.asarray(loud_db, dtype=float)
+    Each band's rise is compared with the overall rise. A difference is
+    evidence of changed balance, not a diagnosis of compression or source
+    processing. A capture below the requested step does not establish the
+    system's maximum output. Engineering tolerances are not EMMA scores."""
+    if not np.isfinite(step_db) or step_db <= 0:
+        raise ValueError('step_db must be finite and positive')
+    f, traces, live, _sel = _mmm_inputs(freqs, [normal_db, loud_db],
+                                      (bands[0][1], bands[-1][2]), support)
+    normal, loud = traces
     overall = loudness_change_db(f[live], normal[live], loud[live])
     rise = masked_erb_smooth(f, loud - normal, live)
     rows, notes = [], []
+    incomplete = False
     changed = []
     for name, lo, hi in bands:
         sel = live & (f >= lo) & (f <= hi)
-        if np.count_nonzero(sel) < 8:
+        requested = (f >= lo) & (f <= hi)
+        complete = (f[0] <= lo and f[-1] >= hi and np.all(live[requested])
+                    and np.count_nonzero(sel) >= 8)
+        if not complete:
+            incomplete = True
             rows.append({'band': name, 'band_hz': [lo, hi], 'rise_db': None,
                          'vs_overall_db': None, 'state': 'unmeasured'})
             continue
         r = float(np.median(rise[sel]))
         d = r - overall
-        state = ('compressing' if d < -band_flag_db else
+        state = ('rising_less' if d < -band_flag_db else
                  'rising_faster' if d > band_flag_db else 'tracks')
         if state != 'tracks':
             changed.append((name, d, state))
         rows.append({'band': name, 'band_hz': [lo, hi], 'rise_db': round(r, 2),
                      'vs_overall_db': round(d, 2), 'state': state})
-    if overall < step_db - reach_tolerance_db:
-        verdict = 'cannot_reach_step'
-        notes.append('the louder capture is only %.1f dB up, not %.0f: if the judge cannot get '
-                     '%.0f dB more, the rulebook deducts 12 points -- leave volume headroom '
-                     '(suggest a lower judging volume, or fix the gain structure)'
-                     % (overall, step_db, step_db))
+    if incomplete:
+        verdict = 'incomplete_coverage'
+        notes.append('not all analysis bands have complete shared measurement coverage; '
+                     'the full-band volume check is inconclusive')
+    elif abs(overall - step_db) > reach_tolerance_db:
+        verdict = 'step_not_demonstrated'
+        notes.append('this capture rose %.1f dB; the requested %.1f dB step was not demonstrated. '
+                     'Check the actual volume increment and repeat at the intended level. '
+                     'This pair cannot establish maximum output or a competition penalty.'
+                     % (overall, step_db))
     elif changed:
         verdict = 'changes_balance'
     else:
         verdict = 'holds'
     for name, d, state in changed:
-        if state == 'compressing':
-            notes.append('%s rises %.1f dB less than the rest: something is compressing there at '
-                         'the louder setting (amplifier clipping, a limiter, or a driver at its '
-                         'limit) -- the judge hears the balance shift and the attack soften'
+        if state == 'rising_less':
+            notes.append('%s rises %.1f dB less than the rest: repeat with the same mic path. '
+                         'Possible causes include compression, level-dependent processing or '
+                         'capture variation; this acoustic pair cannot identify the cause'
                          % (name.replace('_', '-'), -d))
         else:
-            notes.append('%s rises %.1f dB more than the rest: level-dependent processing '
-                         '(loudness, dynamic bass) is active somewhere in the chain -- turn it off '
-                         'or the louder pass will sound differently balanced'
+            notes.append('%s rises %.1f dB more than the rest: repeat with the same mic path. '
+                         'Check processing and compression in other bands; this acoustic pair '
+                         'cannot identify the cause'
                          % (name.replace('_', '-'), d))
     return {'step_db': step_db, 'overall_rise_db': round(overall, 2), 'bands': rows,
             'verdict': verdict, 'notes': notes}
@@ -4831,7 +4838,8 @@ COMPARE_FLOORS = {'level_db': 0.25, 'shape_error_db': 0.1}
 
 def compare_captures(freqs, captures, target_db, band, baseline, repeat_db=None,
                      noise_db=None, objective='shape', support=None, floors=COMPARE_FLOORS,
-                     reference_band=(300.0, 3000.0), max_new_deviation_db=0.5):
+                     reference_band=(300.0, 3000.0), max_new_deviation_db=0.5,
+                     candidate_repeats=None):
     """Compare actual MMM trials; this does not infer phase from magnitude.
 
     shape ranks level-independent shape; level ranks output but vetoes worse
@@ -4842,7 +4850,9 @@ def compare_captures(freqs, captures, target_db, band, baseline, repeat_db=None,
 
     Repeat resolution comes from the RMS difference BETWEEN the curves,
     never the difference of their target-error scores. Two captures are an
-    uncertainty estimate, not a significance test. Re-capture the winner.
+    uncertainty estimate, not a significance test. candidate_repeats maps
+    candidate labels to a second capture: both runs must beat both baseline
+    runs with one fixed anchor, using the larger repeat disagreement.
     max_new_deviation_db is a configurable engineering tolerance, not an
     audibility threshold. All captures must share signal, level and mic path.
     """
@@ -4850,7 +4860,10 @@ def compare_captures(freqs, captures, target_db, band, baseline, repeat_db=None,
         raise ValueError("objective must be 'shape', 'level' or 'balanced'")
     if baseline not in captures:
         raise ValueError('baseline %r is not one of the captures' % baseline)
-    traces = list(captures.values()) + [target_db]
+    candidate_repeats = candidate_repeats or {}
+    if any(k == baseline or k not in captures for k in candidate_repeats):
+        raise ValueError('candidate repeats must name non-baseline labels in captures')
+    traces = list(captures.values()) + [target_db] + list(candidate_repeats.values())
     if repeat_db is not None:
         traces.append(repeat_db)
     f, _rows, live, sel = _mmm_inputs(freqs, traces, band, support)
@@ -4903,33 +4916,68 @@ def compare_captures(freqs, captures, target_db, band, baseline, repeat_db=None,
         source = 'assumed (%.2f dB) -- capture the baseline twice to measure it' % nd
     key = {'shape': 'shape_error_db', 'level': 'level_db', 'balanced': 'target_error_db'}[objective]
     sign = -1.0 if objective == 'level' else 1.0
+
+    def guard_reasons(m, original, new_trace, old_trace, limits, ref_limit):
+        reasons = []
+        if objective != 'shape' and not ref_ok:
+            reasons.append('no independent measured reference band for tonal balance')
+        if ref_ok and abs(m['reference_change_db'] - original['reference_change_db']) > ref_limit:
+            reasons.append('reference level changed; check playback gain or a wider tonal change')
+        if m['shape_error_db'] > original['shape_error_db'] + limits['shape_error_db']:
+            reasons.append('shape became worse')
+        if ref_ok and m['target_error_db'] > original['target_error_db'] + limits['target_error_db']:
+            reasons.append('balance relative to target became worse')
+        # Check every bin; a pre-existing hole must not hide a newly dug hole.
+        old_dev = old_trace - tgt - (anchor if ref_ok else np.median((old_trace-tgt)[sel]))
+        new_dev = new_trace - tgt - (anchor if ref_ok else np.median((new_trace-tgt)[sel]))
+        old_sm = masked_erb_smooth(f, old_dev, live)
+        new_sm = masked_erb_smooth(f, new_dev, live)
+        worsening = np.abs(new_sm) - np.abs(old_sm)
+        tolerance = max(max_new_deviation_db, limits['target_error_db'] if ref_ok
+                        else limits['shape_error_db'])
+        if float(np.max(worsening[sel])) > tolerance:
+            reasons.append('a local hole or hump became worse')
+        if objective == 'balanced' and m['level_db'] - original['level_db'] < -limits['level_db']:
+            reasons.append('handover output fell significantly; assess as a level/voicing change')
+        return reasons
+
     out = []
     for label, m in rows.items():
         original = rows[baseline]
         gain = sign * (original[key] - m[key]) if m[key] is not None else 0.0
         reasons = []
+        limits, ref_limit = dict(res), reference_resolution
+        repeated = label in candidate_repeats
         if label != baseline:
-            if objective != 'shape' and not ref_ok:
-                reasons.append('no independent measured reference band for tonal balance')
-            if ref_ok and abs(m['reference_change_db']) > reference_resolution:
-                reasons.append('reference level changed; check playback gain or a wider tonal change')
-            if m['shape_error_db'] > original['shape_error_db'] + res['shape_error_db']:
-                reasons.append('shape became worse')
-            if ref_ok and m['target_error_db'] > original['target_error_db'] + res['target_error_db']:
-                reasons.append('balance relative to target became worse')
-            # Compare at EVERY bin: an existing deep hole elsewhere must not
-            # hide a newly dug hole or hump in the candidate.
-            old_dev = base - tgt - (anchor if ref_ok else np.median((base-tgt)[sel]))
-            new_trace = np.asarray(captures[label])
-            new_dev = new_trace - tgt - (anchor if ref_ok else np.median((new_trace-tgt)[sel]))
-            old_sm = masked_erb_smooth(f, old_dev, live)
-            new_sm = masked_erb_smooth(f, new_dev, live)
-            worsening = np.abs(new_sm) - np.abs(old_sm)
-            tolerance = max(max_new_deviation_db, res['target_error_db'] if ref_ok else res['shape_error_db'])
-            if float(np.max(worsening[sel])) > tolerance:
-                reasons.append('a local hole or hump became worse')
-            if objective == 'balanced' and m['level_db'] < -res['level_db']:
-                reasons.append('handover output fell significantly; assess as a level/voicing change')
+            trial_runs = [np.asarray(captures[label], dtype=float)]
+            base_runs = [base]
+            if repeated:
+                trial_runs.append(np.asarray(candidate_repeats[label], dtype=float))
+                if np.array_equal(trial_runs[0][live], trial_runs[1][live]):
+                    reasons.append('candidate repeat is identical; independent capture not established')
+                delta = masked_erb_smooth(f, trial_runs[1] - trial_runs[0], live)
+                raw_noise = 2 * _mmm_rms(f, delta, sel)
+                shape_noise = 2 * _mmm_rms(f, delta - np.median(delta[sel]), sel)
+                limits = {k: max(v, shape_noise if k == 'shape_error_db' else raw_noise)
+                          for k, v in limits.items()}
+                if ref_ok:
+                    if _mmm_rms(f, delta, ref) > reference_resolution:
+                        reasons.append('candidate repeat changes the reference; recapture at a stable level')
+                if repeat_db is not None:
+                    base_runs.append(np.asarray(repeat_db, dtype=float))
+                    if np.array_equal(base_runs[0][live], base_runs[1][live]):
+                        reasons.append('baseline repeat is identical; independent capture not established')
+            gains = []
+            for old_trace in base_runs:
+                old_metrics = metrics(old_trace)
+                for new_trace in trial_runs:
+                    new_metrics = metrics(new_trace)
+                    gains.append(sign * (old_metrics[key] - new_metrics[key])
+                                 if new_metrics[key] is not None else 0.0)
+                    reasons.extend(guard_reasons(new_metrics, old_metrics, new_trace,
+                                                 old_trace, limits, ref_limit))
+            gain = min(gains)
+            reasons = list(dict.fromkeys(reasons))
         out.append({'label': label,
                     'level_db': round(m['level_db'], 2),
                     'shape_error_db': round(m['shape_error_db'], 3),
@@ -4939,14 +4987,21 @@ def compare_captures(freqs, captures, target_db, band, baseline, repeat_db=None,
                     'reference_change_db': m['reference_change_db'],
                     'improvement_vs_baseline': round(gain, 3),
                     'rejection_reasons': reasons,
-                    'distinguishable': bool(label != baseline and gain > res[key]),
-                    'eligible': bool(label != baseline and gain > res[key] and not reasons)})
+                    'resolution': {k: round(v, 3) for k, v in limits.items()},
+                    'candidate_repeated': repeated,
+                    'repeat_supported': bool(repeated and repeat_db is not None
+                                             and gain > limits[key] and not reasons),
+                    'distinguishable': bool(label != baseline and gain > limits[key]),
+                    'eligible': bool(label != baseline and gain > limits[key] and not reasons)})
     out.sort(key=lambda r: -r['improvement_vs_baseline'] if r['label'] != baseline else 0.0)
     winners = [r for r in out if r['eligible']]
     if winners:
         best = max(winners, key=lambda r: r['improvement_vs_baseline'])
         verdict = '%s is a provisional improvement over %s; repeat it before keeping it' % (best['label'], baseline)
         choice = best['label']
+        if best['repeat_supported']:
+            verdict = ('%s improves both baseline captures on both candidate runs; '
+                       'confirm by matched-level listening (not statistical proof)' % choice)
     else:
         verdict = ('no setting is distinguishably better than %s -- keep it (a difference '
                    'smaller than repeatability or failing tonal guards is not a result)' % baseline)
@@ -4956,7 +5011,7 @@ def compare_captures(freqs, captures, target_db, band, baseline, repeat_db=None,
             'resolution_source': source, 'captures': out, 'choice': choice,
             'reference_band_hz': list(reference_band) if ref_ok else None,
             'claim': 'tonal comparison only; no phase or image-position inference',
-            'requires_confirmation_capture': choice != baseline,
+            'requires_confirmation_capture': bool(winners and not best['repeat_supported']),
             'verdict': verdict}
 
 

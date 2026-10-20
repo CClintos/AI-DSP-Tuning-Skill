@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.14.0`) so you can tell whether an already-installed copy is current — open
+`1.15.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -598,11 +598,21 @@ The capture checklist is in `references/methodology.md` (MMM-first tuning).
 The skill reports in the judges' terms: `analyze` gives each of EMMA's four
 tonal bands (sub-bass, mid-bass, midrange, high) against the target and the
 spread between them; `emma-volume` checks the "6 dB louder" spectral-balance
-pass (30 points in 2026, and 12 lost if the system cannot get there);
+pass, reporting an incorrect capture step separately from changed balance;
 `noise-check` compares system off with system on playing silence; and
-`imaging --bands emma` uses the five instrument bands of the imaging tracks.
+`imaging --bands emma` uses the 2026 SQ judgebook's five overlapping instrument
+ranges, with position tracks 2-6 and focus tracks 7-11. These diagnostics do
+not predict judging points. A capture that rises only 4 dB does not prove
+the system cannot play 6 dB louder.
 The methodology's "Preparing for EMMA judging" section summarises the rules
 that matter for a tune (one judge, driver's seat, 80 dB cap, +6 dB pass).
+
+For a close final MMM comparison, capture A1, B1, B2, A2 and give
+`mmm-compare` both `--repeat A2.txt` and `--candidate-repeat trial=B2.txt`
+(where `trial=B1.txt` is in `--captures`). Both candidate captures must
+improve on both baseline captures, using one target anchor and the larger
+repeat disagreement. A successful comparison still needs matched-level
+listening. See the MMM-first section for a complete command.
 
 ### Improving a tune that already exists
 

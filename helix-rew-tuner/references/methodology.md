@@ -2187,9 +2187,10 @@ arrival of whichever driver plays earliest in that band.
 
 ## Preparing for EMMA Sound Quality judging
 
-From the EMMA competition manual (edition 2026) and the Sound Quality judge
-book (2024, V3); check the current editions before an event, as EMMA updates
-them. What the rules mean for a tune, and which command answers each item:
+Checked against the [2026 competition manual and SQ judgebook](https://www.emmanet.info/competition/rules/)
+on 21 October 2026. The SQ judgebook's body identifies Edition 2026 despite
+stale PDF title/index metadata. Confirm which edition and recordings the event
+uses. What the rules mean for a tune, and which command answers each item:
 
 - **One judge, in the driver's seat.** Judging is "single seat": all scoring
   comes from the judge in the driver's seat (the right-hand seat in a
@@ -2203,9 +2204,12 @@ them. What the rules mean for a tune, and which command answers each item:
   cannot play 6 dB louder loses 12 points. Capture the same MMM at your volume
   and about 6 dB up (2-3 head-unit steps; check with an SPL meter), then
   `pipeline.py emma-volume --normal N.txt --loud L.txt`: it reports whether the
-  system reached +6 dB and which EMMA band compresses (amplifier clipping, a
-  limiter, a driver at its limit) or rises faster (loudness or dynamic bass
-  still active). The rulebook's gain-structure hint applies: the head unit
+  capture reached +6 dB and which analysis band rises less or more. A
+  `step_not_demonstrated` verdict does not prove the system cannot reach it:
+  the knob increment may simply be wrong. An acoustic pair cannot distinguish
+  compression, processing and capture variation; repeat a suspect result.
+  `incomplete_coverage` cannot pass the full-band check. The rulebook's
+  gain-structure hint applies: the head unit
   should use most of its range before an amplifier clips.
 - **Tonal accuracy is four bands of 30 points**: sub-bass 10-60 Hz, mid-bass
   60-200 Hz, midrange 200 Hz-3 kHz, high 3 kHz up. Judges score the quality
@@ -2213,17 +2217,20 @@ them. What the rules mean for a tune, and which command answers each item:
   balance; big differences between bands score lower than an average would
   suggest. `analyze` reports `emma_bands`: each band's level against the
   target (`median_db`, what spectral balance hears), its peaks and holes
-  about its own level (`roughness_db`, what tonal accuracy hears), and the
-  spread between bands. A mistake around a crossover costs both bands either
+  about its own level (`roughness_db`, a response-shape diagnostic), and the
+  spread between bands. These are target-relative engineering summaries,
+  not predicted judging points: MMM does not measure attack, distortion,
+  stage depth or listening pleasure. A mistake around a crossover costs both bands either
   side of it, so junction work pays twice.
-- **Imaging positions and focus (25 + 25)** use five instruments in their own
-  bands: electronic bass 40-100 Hz, guitar 100-250 Hz, flute 250 Hz-1 kHz,
-  celesta 1-2 kHz, triangle 2-4 kHz and up, at left, left-centre, centre,
-  right-centre and right. An instrument heard in more than one place scores
-  0. `pipeline.py imaging --bands emma` (from left-only and right-only
-  captures) shows which instrument band pulls away from the others;
-  `lr-match` addresses level-caused pulls. From MMM data this is the level
-  cue only — confirm by ear on the technical tracks.
+- **Imaging positions and focus (25 + 25)** in the 2026 SQ judgebook use
+  electronic bass (20-500 Hz), electric guitar (60-1200 Hz), banjo
+  (160-5500 Hz), vibraphone (200-5000 Hz), and triangle (2-20 kHz).
+  Position uses tracks 2-6; focus uses tracks 7-11. `pipeline.py imaging
+  --bands emma` summarises these overlapping instrument ranges, from
+  left-only and right-only captures. Also inspect the default frequency
+  bands: a broad average can hide opposing errors within one instrument's
+  range. MMM supplies level cues only; establish position and focus by
+  listening to the event's technical tracks. No output predicts points.
 - **System noise costs up to 6 points**: hum, hiss, pops, anything not on the
   recording, judged on the zero-bit track (engine off unless the head judge
   announces otherwise for every car). Capture an RTA with the system off and
@@ -2380,6 +2387,27 @@ and source level, rerun the comparison, and confirm by listening before
 keeping it. MMM supports tonal decisions; it cannot prove arrival time,
 phase alignment or image position. After changing the handover, recheck bass
 level before further EQ.
+
+**For a close final touch-up, capture A1 → B1 → B2 → A2.** A is the retained
+baseline and B is one candidate. Keep the target, playback level, mic path
+and all other settings fixed. Return to A for the last capture to expose
+drift. Feed both repeats to the comparison, for example for a bass handover:
+
+```bash
+python scripts/pipeline.py mmm-compare --captures current=A1.txt trial=B1.txt --baseline current --repeat A2.txt --candidate-repeat trial=B2.txt --band 40 160 --reference-band 300 3000 --target target.txt
+```
+
+Choose the trial/reference bands for the actual change: the reference must
+be measured, unchanged, and outside the trial. The command keeps the
+original baseline's target anchor, checks both candidate runs against both
+baseline runs, uses the worse repeat disagreement to set the candidate's
+resolution, and applies tonal guards to every comparison. The reported
+`improvement_vs_baseline` is the smallest improvement across these pairs.
+An identical re-export cannot count as an independent repeat. A
+`repeat_supported` result still needs matched-level listening; four captures
+are not a statistical confidence interval or proof that a judge will prefer
+the change. If results disagree, retain A and investigate. This is optional
+confirmation for small changes, not a new prerequisite for ordinary MMM.
 
 ## Refine the tune you have before adding to it
 

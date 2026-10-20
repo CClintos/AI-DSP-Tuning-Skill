@@ -1498,12 +1498,15 @@ def imaging(args):
               'spread': pull['spread'], 'mean_pull': pull['mean_pull'],
               'bands': pull['bands'], 'notes': notes}
     if emma:
-        for band, instrument in zip(report['bands'], tunelib.EMMA_IMAGING_INSTRUMENTS):
-            band['instrument'] = instrument
-        notes.append('bands follow the EMMA position/focus tracks (2-6): electronic bass '
-                     '40-100 Hz, guitar 100-250, flute 250-1k, celesta 1-2k, triangle 2-4k. '
-                     'An instrument heard in two places scores 0, so a band pulled off the '
-                     'others costs that instrument at every position')
+        instruments = dict(zip(tunelib.EMMA_IMAGING_BANDS, tunelib.EMMA_IMAGING_INSTRUMENTS))
+        for band in report['bands']:
+            band['instrument'] = instruments[(band['f_lo'], band['f_hi'])]
+        report['meta']['emma_edition'] = 2026
+        notes.append('instrument ranges follow the 2026 SQ judgebook: position tracks 2-6, '
+                     'focus tracks 7-11. These overlapping ranges are diagnostic summaries, '
+                     'not isolated test bands or predictions of judging points. A broad-band '
+                     'average can hide opposing pulls: also inspect the default frequency '
+                     'bands and listen to the actual tracks. MMM supplies level cues only.')
     near_side = getattr(args, 'near_side', None)
     if near_side:
         report['centre_steering'] = tunelib.centre_steering(rows, near_side)
@@ -2212,10 +2215,22 @@ def mmm_compare(args):
         f, s, _ph, _c = measure.load_text_export(args.repeat)
         repeat = measure.resample_log(f, s, freqs)
         live &= measure.support_mask(f, freqs)
+    baseline = args.baseline or next(iter(files))
+    repeat_files = _labelled(getattr(args, 'candidate_repeat', None) or [], '--candidate-repeat')
+    candidate_repeats = {}
+    for label, path in repeat_files.items():
+        if label == baseline or label not in files:
+            raise ValueError('--candidate-repeat must name a non-baseline label in --captures')
+        f, s, _ph, _c = measure.load_text_export(path)
+        candidate_repeats[label] = measure.resample_log(f, s, freqs)
+        live &= measure.support_mask(f, freqs)
     notes = []
     if args.ambient:
         f, s, _ph, _c = measure.load_text_export(args.ambient)
-        ok, _snr = tunelib.snr_support(np.min(np.vstack(list(captures.values())), axis=0),
+        all_runs = list(captures.values()) + list(candidate_repeats.values())
+        if repeat is not None:
+            all_runs.append(repeat)
+        ok, _snr = tunelib.snr_support(np.min(np.vstack(all_runs), axis=0),
                                        measure.resample_log(f, s, freqs), args.min_snr_db)
         ok &= measure.support_mask(f, freqs)
         lost = _mask_runs(freqs, live & ~ok)
@@ -2224,11 +2239,11 @@ def mmm_compare(args):
         live &= ok
     target_path = ASSETS_DEFAULT_TARGET if args.target == 'default' else args.target
     target_db = measure.load_target(target_path, freqs)
-    baseline = args.baseline or next(iter(files))
     result = tunelib.compare_captures(freqs, captures, target_db, tuple(args.band), baseline,
                                       repeat_db=repeat, noise_db=args.noise_db,
                                       objective=args.objective, support=live,
-                                      reference_band=tuple(args.reference_band))
+                                      reference_band=tuple(args.reference_band),
+                                      candidate_repeats=candidate_repeats)
     if args.objective == 'level':
         notes.append('level ranking assumes every capture used the same playback volume and '
                      'gain: change only the setting under test between captures')
@@ -2236,6 +2251,7 @@ def mmm_compare(args):
                  'position; repeat it at the same source level and confirm by listening '
                  'before keeping it; write any change through its own plan')
     result['files'] = files
+    result['repeat_files'] = {'baseline': args.repeat, 'candidates': repeat_files}
     result['notes'] = notes
     return result
 
@@ -2615,6 +2631,9 @@ def main():
     mc.add_argument('--captures', nargs='+', required=True, metavar='LABEL=PATH')
     mc.add_argument('--baseline', help='label of the current setting (default: the first)')
     mc.add_argument('--repeat', help='a second capture of the baseline setting')
+    mc.add_argument('--candidate-repeat', nargs='+', metavar='LABEL=PATH',
+                    help='independent second capture of a candidate; compare both runs '
+                         'against both baseline runs with the same target anchor')
     mc.add_argument('--band', nargs=2, type=float, required=True, metavar=('LO_HZ', 'HI_HZ'))
     mc.add_argument('--target', default='default')
     mc.add_argument('--objective', choices=('balanced', 'shape', 'level'), default='balanced',

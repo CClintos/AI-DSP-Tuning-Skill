@@ -142,7 +142,13 @@ skill directory's absolute path. For ad-hoc Python that imports them, put
   A/B. For an EMMA event read §Preparing for EMMA, first: `analyze` reports
   `emma_bands`, `pipeline.py emma-volume` checks the 6 dB-louder pass,
   `pipeline.py noise-check` the system noise, and `imaging --bands emma` the
-  technical tracks' instrument bands. With 3+ positions, `propose` validates
+  2026 SQ technical tracks' instrument ranges (overlapping, not isolated
+  bands). For a close MMM final touch-up, use `mmm-compare --repeat A2.txt
+  --candidate-repeat trial=B2.txt` with captures A1/B1: both candidate runs
+  must beat both baseline runs using the same anchor and the worse repeat
+  disagreement; confirm by matched-level listening. A short volume step is
+  `step_not_demonstrated`, not proof the system has reached maximum output.
+  With 3+ positions, `propose` validates
   itself leave-one-position-out: each band carries APPLY / REVIEW / DO NOT
   APPLY, and DO NOT APPLY bands land in `rejected`. Label the positions with
   `--sittings` so each fold withholds a whole sitting (§Held-out by sitting,),
