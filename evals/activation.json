@@ -1,0 +1,30 @@
+{
+  "version": 1,
+  "skill": "helix-rew-tuner",
+  "prompts": [
+    {"id": "t01", "label": "trigger", "prompt": "Tune my Helix P SIX DSP. Here's my REW measurement export and my .afpx tune file."},
+    {"id": "t02", "label": "trigger", "prompt": "My vocals pull to the left in my car. I've got left and right tweeter and midrange sweeps from REW, can you work out why?"},
+    {"id": "t03", "label": "trigger", "prompt": "Can you check the crossovers and EQ in this DSP PC-Tool 6 .pct6 file?"},
+    {"id": "t04", "label": "trigger", "prompt": "I did a moving-mic RTA capture in REW in my car. Is my tonal balance OK against a Harman in-car target?"},
+    {"id": "t05", "label": "trigger", "prompt": "I'm entering an EMMA sound quality event next month. Help me prepare my car's tune with the measurements I have."},
+    {"id": "t06", "label": "trigger", "prompt": "Add a -3 dB cut at 2 kHz on the front left tweeter in my Alpine PXE-X121 .jssh preset."},
+    {"id": "t07", "label": "trigger", "prompt": "What time alignment should my tweeters get? Helix DSP.3, REW sweeps attached with an acoustic timing reference."},
+    {"id": "t08", "label": "trigger", "prompt": "Is my sub cancelling with my midbass around 80 Hz? Solo and together REW exports attached."},
+    {"id": "t09", "label": "trigger", "prompt": "I re-measured after loading the new tune you made. Did the cuts actually land?"},
+    {"id": "t10", "label": "trigger", "prompt": "Audiotec Fischer M-SIX: here are three mic positions around the driver's head. What should I EQ?"},
+    {"id": "t11", "label": "trigger", "prompt": "Inspect this .afpx and tell me which channel is which driver."},
+    {"id": "t12", "label": "trigger", "prompt": "My car audio sounds bright and thin. I have REW measurements of the system and a Helix DSP. What's wrong?"},
+    {"id": "n01", "label": "no_trigger", "prompt": "Help me set up room EQ for my home theatre with REW and a miniDSP 2x4 HD."},
+    {"id": "n02", "label": "no_trigger", "prompt": "How do I measure my studio monitors with REW and place them in the room?"},
+    {"id": "n03", "label": "no_trigger", "prompt": "Explain what a Linkwitz-Riley crossover is for a two-way bookshelf speaker design."},
+    {"id": "n04", "label": "no_trigger", "prompt": "My Windows laptop audio crackles over Bluetooth. How do I fix the driver?"},
+    {"id": "n05", "label": "no_trigger", "prompt": "Write a Python function that designs an RBJ peaking biquad."},
+    {"id": "n06", "label": "no_trigger", "prompt": "My car stereo won't power on after I installed an amp. Where do I start with the wiring?"},
+    {"id": "n07", "label": "no_trigger", "prompt": "Configure the Helix text editor's keybindings for Rust."},
+    {"id": "n08", "label": "no_trigger", "prompt": "Recommend a good 6.5 inch component speaker set for my car under $300."},
+    {"id": "b01", "label": "borderline", "prompt": "Tune my Audison bit One HD from these REW measurements.", "expect": "If loaded: analysis and PEQ proposals only, entered by hand; no file writes for that DSP; hardware limits must be confirmed by the user."},
+    {"id": "t13", "label": "trigger", "prompt": "Here's a REW measurement of my car's system. I don't have the tune file yet, just tell me what's wrong.", "expect": "Response must: measurement-only analysis, no writes; asks which drivers and seat the capture covers."},
+    {"id": "t14", "label": "trigger", "prompt": "Open my password-protected .pct6 file and change the delays.", "expect": "Response must: says password-protected .pct6 is unsupported and does not guess."},
+    {"id": "t15", "label": "trigger", "prompt": "Change my tweeter crossover from 3 kHz to 2.5 kHz in the .afpx.", "expect": "Response must: refuses to write crossovers; may model the change with probe and give PC-Tool steps."}
+  ]
+}

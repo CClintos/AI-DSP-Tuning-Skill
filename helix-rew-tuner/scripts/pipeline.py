@@ -1010,9 +1010,14 @@ def analyze(args):
         'duplicate_positions': sess['duplicates'],
         'measurement_smoothing': (sess['measurement_header'] or {}).get('smoothing'),
     }
-    if measurement_phase is None:
-        notes.append('no phase column in --measurement -- minimum-phase/delay '
-                     'decisions are unavailable from this file alone')
+    if measurement_phase is None and sess['capture'] != 'mmm':
+        if args.measurement:
+            notes.append('no phase column in --measurement -- minimum-phase/delay '
+                         'decisions are unavailable from this file alone')
+        else:
+            notes.append('--positions are used for magnitude only: give one fixed-position '
+                         'export with phase as --measurement for the boost gate and other '
+                         'phase-based checks')
 
     report['tilt'] = {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                       'target': tunelib.measure_tilt(freqs, target_db)}
@@ -1233,7 +1238,7 @@ def propose(args):
         deviations = None
         bands, fit_report = tunelib.fit_peq(
             freqs, dev_db, band, n_bands_max=args.max_bands, mask=mask, fit_smoothed=True,
-            **qkw)
+            cut_seed_retry=mmm, **qkw)
         if mmm:
             notes.append('one MMM run: already a spatial average, so the fit is not chasing '
                          'one mic spot -- capture the same tune a second time to measure '
@@ -1242,6 +1247,7 @@ def propose(args):
             notes.append('single position: the fit cannot tell a real feature from '
                          'a seat-specific one, and held-out validation needs 3+ '
                          'positions -- capture them (or MMM) before trusting narrow bands')
+    bands, stacked = tunelib.limit_stacked_boosts(freqs, bands, band=band, dev_db=dev_db)
 
     gate = {}
     has_boost = any(g > 0 for _f, _q, g in bands)
@@ -1328,6 +1334,10 @@ def propose(args):
                 needs_trial.append(row)
                 continue
         kept.append(row)
+    for F, Q, G in stacked:
+        rejected.append({'f_hz': F, 'q': Q, 'gain_db': G, 'kind': 'boost', 'boost_gate': None,
+                         'reason': 'stacks on another boost past the +3 dB boost limit: the fit '
+                                   'was filling one dip with several bands'})
     final = [(r['f_hz'], r['q'], r['gain_db']) for r in kept]
 
     eq = tunelib.cascade_db(freqs, final)
@@ -1382,7 +1392,10 @@ def propose(args):
                                    if sess['gate_floor_hz'] else None),
                  'duplicate_positions': sess['duplicates'],
                  'anchor_offset_db': round(float(sess['anchor']), 2),
-                 'voicing_applied': sess['voice_knobs'] or None},
+                 'voicing_applied': sess['voice_knobs'] or None,
+                 # Bands are modelled at this rate. On a 48 kHz unit a band above
+                 # ~6 kHz lands up to ~0.4 dB differently; refine takes --dsp-rate.
+                 'prediction_sample_rate_hz': tunelib.FS},
         'tilt': {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                  'target': tunelib.measure_tilt(freqs, sess['target_db'])},
         'proposal': {'bands': kept, 'rejected': rejected, 'needs_trial': needs_trial},
@@ -2756,6 +2769,50 @@ def main():
                          help='JSON object with any of: ' + ', '.join(SESSION_FIELDS))
 
     args = ap.parse_args()
+    try:
+        _dispatch(args)
+    except (ValueError, OSError) as exc:
+        # An input problem, not a bug: one line an agent can act on instead of
+        # a traceback that buries it. HELIX_TUNER_DEBUG=1 shows the traceback.
+        if os.environ.get('HELIX_TUNER_DEBUG'):
+            raise
+        print('error: %s' % exc, file=sys.stderr)
+        sys.exit(2)
+
+
+# Reports are JSON. A mistyped --out must never replace a tune, a capture, or
+# one of the command's own inputs: plan/apply is the only route that writes tunes.
+_PROTECTED_OUT_SUFFIXES = ('.afpx', '.pct6', '.jssh', '.mdat', '.wav')
+
+
+def _arg_strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _arg_strings(item)
+
+
+def _check_report_out(args):
+    out = getattr(args, 'out', None)
+    if not out:
+        return
+    if os.path.splitext(out)[1].lower() in _PROTECTED_OUT_SUFFIXES:
+        raise ValueError('--out %s looks like a tune or capture file; reports are JSON, '
+                         'so choose a new .json path' % out)
+    if not os.path.exists(out):
+        return
+    for name, value in vars(args).items():
+        if name == 'out':
+            continue
+        for text in _arg_strings(value):
+            for path in {text, text.partition('=')[2]}:
+                if path and os.path.exists(path) and os.path.samefile(path, out):
+                    raise ValueError('--out %s is one of this command\'s inputs; '
+                                     'refusing to overwrite it' % out)
+
+
+def _dispatch(args):
     if args.cmd == 'selftest':
         _selftest()
     elif args.cmd == 'session':
@@ -2779,6 +2836,7 @@ def main():
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
                       'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match',
                       'verify', 'voice-variants', 'emma-volume', 'noise-check'):
+        _check_report_out(args)
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,

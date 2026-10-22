@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.15.0`) so you can tell whether an already-installed copy is current — open
+`1.16.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -305,8 +305,17 @@ helix-rew-tuner/
 tools/
 └── build_skill.py                    generated-wrapper/package drift check and writer
 
+evals/
+├── README.md                         three-layer evaluation plan and pass bars
+├── activation.json                   should / should-not trigger prompts
+├── scenarios.json                    agent-behaviour scenarios, rubric, critical failures
+└── make_fixtures.py                  synthetic tune + REW fixtures for the scenarios
+
+docs/audits/                          dated skill audits and what each one changed
+
 tests/
 ├── test_build_skill.py               build, metadata, anchor, and archive parity tests
+├── test_skill_evals.py               layer-1 evals: known answers, write safety, CLI errors, loaders, docs vs CLI
 ├── test_calibration_cases.py         the research note's known-answer decision cases
 ├── test_codec_and_loader_integrity.py  tune-codec byte integrity and REW/target loader validation
 ├── test_delay_consensus.py           multi-estimator delay with gross-timing guard
@@ -357,6 +366,14 @@ GitHub Actions runs this full release gate on Windows and Linux with Python
 3.10 and 3.13 for every push and pull request. It also compiles all Python
 sources, runs the official skill validator, and rejects generated-package or
 whitespace drift.
+
+The unit suite includes the deterministic layer of the skill evaluation
+(`tests/test_skill_evals.py`). The activation and agent-behaviour layers need
+a live agent and are run before a release; [`evals/README.md`](evals/README.md)
+explains the scenarios, the rubric and the pass bars. Two known-answer cases
+are marked as expected failures until the fitter floats the target level (see
+[`docs/audits/2026-10-22-skill-audit.md`](docs/audits/2026-10-22-skill-audit.md),
+finding F1).
 
 ## Safety & scope
 
@@ -584,6 +601,8 @@ switched off rather than run on data that has none. In their place:
 
 - with MMM, a band or edit smaller than your repeat-capture variation where it
   acts is not proposed, and an unchecked boost becomes a trial to verify;
+- one dip can no longer end the search before a real peak is cut, and no fit
+  stacks several boosts on one dip: expect at most one trial per dip;
 - `--capture-profile` records your REW setup and checks it against REW's
   rules (pink noise in the RTA, sequence length = FFT length, separate clocks
   when the car plays the noise);

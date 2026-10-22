@@ -2318,6 +2318,16 @@ setups are not compared by accident.
   real. A boost with no cancellation evidence (no phase, no `--cancel-check`)
   goes to `needs_trial` in propose and is not proposed by refine: write one
   alone, re-capture, and keep it only if `verify` confirms it.
+- *One dip does not end the search.* The fitter tries the largest
+  audibility-weighted deviation first. On an MMM capture, a dip whose boost
+  fails the gate now blocks its region and the fit moves on to the peaks; it
+  used to stop there, so a dip outranking a real peak left the peak uncut. On
+  synthetic one-run cars this gave every car a correction and helped seats
+  the fit never saw, with none worse.
+- *No stacked boosts.* Any fit (sweep or MMM) could put two or three boosts
+  on one dip (+7 dB into a narrow notch from one sweep). The whole cascade
+  now stays within the +3 dB boost limit, and the extra boosts are listed in
+  `rejected` with that reason. Expect at most one trial per dip.
 - *Noise.* An RTA adds the background in, so a dip can read as filled.
   `--ambient` excludes every bin less than `--min-snr-db` (10) above it.
 - *Cancellation without phase.* Where two halves measured together sum below

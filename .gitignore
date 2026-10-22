@@ -14,3 +14,8 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# Profiler output (must never ship inside the skill package)
+prof
+*.prof
+*.pstats

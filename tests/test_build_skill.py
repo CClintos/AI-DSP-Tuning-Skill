@@ -284,6 +284,21 @@ class BuildSkillTests(unittest.TestCase):
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertIn("generated files and package are current", result.stdout)
 
+    def test_a_stray_binary_in_the_skill_folder_is_refused_not_packaged(self) -> None:
+        """Packaging every file once shipped a profiler dump with local paths."""
+        self.write_outputs()
+        archive = self.root / "helix-rew-tuner.skill"
+        before = archive.read_bytes()
+        (self.root / "helix-rew-tuner" / "scripts" / "prof").write_bytes(b"\xfb)\x03\xda")
+
+        for mode in ("--check", "--write"):
+            with self.subTest(mode=mode):
+                result = self.run_build(mode)
+                self.assertEqual(1, result.returncode)
+                self.assertIn("unexpected file(s)", result.stdout + result.stderr)
+                self.assertIn("scripts/prof", result.stdout + result.stderr)
+        self.assertEqual(before, archive.read_bytes())
+
 
 if __name__ == "__main__":
     unittest.main()

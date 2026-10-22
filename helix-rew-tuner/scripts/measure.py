@@ -26,10 +26,29 @@ import numpy as np
 _DECIMAL_COMMA = re.compile(r'-?\d+,\d+')
 
 
+def _read_lines(path):
+    """Lines of a text export, whichever Windows tool last saved it: UTF-8
+    with or without a BOM, UTF-16 (Excel's "Unicode Text"; BOM or not), or a
+    legacy code page. Undecodable bytes are replaced -- only header text,
+    never a number, carries them in practice."""
+    with open(path, 'rb') as fh:
+        raw = fh.read()
+    if raw.startswith((b'\xff\xfe', b'\xfe\xff')):
+        return raw.decode('utf-16', errors='replace').splitlines()
+    head = raw[:400]
+    if head[1::2].count(0) > len(head) // 4:
+        return raw.decode('utf-16-le', errors='replace').splitlines()
+    if head[0::2].count(0) > len(head) // 4:
+        return raw.decode('utf-16-be', errors='replace').splitlines()
+    return raw.decode('utf-8-sig', errors='replace').splitlines()
+
+
 def _split_row(line):
     """Split one numeric row. Whitespace/semicolon-separated tokens written
     with a decimal comma ("20,508  72,3  -45,2", as REW writes in comma-decimal
-    locales) are read as decimals; otherwise commas are field separators."""
+    locales) are read as decimals; otherwise commas are field separators.
+    Spreadsheet quoting ("20.000","72.3") is removed first."""
+    line = line.replace('"', '')
     tokens = [t for t in re.split(r'[\s;]+', line) if t]
     if (len(tokens) >= 2 and '.' not in line
             and any(_DECIMAL_COMMA.fullmatch(t) for t in tokens)):
@@ -53,10 +72,8 @@ def load_text_export(path):
     Smaart-style trust signal this project's usual REW-only pipeline can't
     otherwise compute (see methodology.md)."""
     f, s, p, coh = [], [], [], []
-    with open(path, encoding='utf-8', errors='replace') as fh:
-        lines = fh.read().splitlines()
-    for line in lines:
-        line = line.strip()
+    for line in _read_lines(path):
+        line = line.strip().lstrip('"')
         if not line or line[0].isalpha() or line[0] in '*#/':
             continue
         parts = _split_row(line)
@@ -101,13 +118,12 @@ def read_export_header(path):
     "timing reference: NONE -- no shared time base", "smoothing 1/48, ...")
     and REW's own text-export headers ("Smoothing: 1/48 octave")."""
     lines = []
-    with open(path, encoding='utf-8', errors='replace') as fh:
-        for raw in fh:
-            line = raw.strip()
-            if not line:
-                continue
-            if line[0] in '*#/' or line[0].isalpha():
-                lines.append(line.lstrip('*#/ ').strip())
+    for raw in _read_lines(path):
+        line = raw.strip()
+        if not line:
+            continue
+        if line[0] in '*#/' or line[0].isalpha():
+            lines.append(line.lstrip('*#/ ').strip())
     out = {'timing_reference': None, 'timing_reference_text': None,
            'smoothing': None, 'unsmoothed': None, 'lines': lines}
     for line in lines:
@@ -325,10 +341,8 @@ def load_target(path, freqs):
     """Load a target curve (freq, level) text file, interpolate onto `freqs`.
     Level anchoring (matching overall loudness) is done by the caller."""
     f, s = [], []
-    with open(path, encoding='utf-8', errors='replace') as fh:
-        lines = fh.read().splitlines()
-    for line in lines:
-        line = line.strip()
+    for line in _read_lines(path):
+        line = line.strip().lstrip('"')
         if not line or line[0].isalpha() or line[0] in '*#/':
             continue
         parts = _split_row(line)
