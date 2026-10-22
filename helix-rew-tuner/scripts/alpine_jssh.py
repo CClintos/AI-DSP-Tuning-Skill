@@ -1239,7 +1239,13 @@ def _main():
     elif cmd == 'decode':
         obj = decode(sys.argv[2])
         out = Path(sys.argv[2]).with_suffix('.decoded.json')
-        out.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding='utf-8')
+        # Never replace an existing decode: it may hold the edits for `encode`.
+        try:
+            with open(out, 'x', encoding='utf-8') as fh:
+                fh.write(json.dumps(obj, indent=2, ensure_ascii=False))
+        except FileExistsError:
+            sys.exit('error: %s already exists (it may hold your edits); rename or '
+                     'remove it, then decode again' % out)
         print('decoded ->', out)
     elif cmd == 'encode':
         if len(sys.argv) != 5:

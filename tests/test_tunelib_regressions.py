@@ -135,6 +135,83 @@ class RobustPeqTests(unittest.TestCase):
         self.assertTrue(report["rejected_worst_position"])
         self.assertEqual(0.0, report["worst_position_loss_db"])
 
+    def _shared_peak_with_wandering_notches(self):
+        """Two seats of a three-seat held-out fold: a +6 dB shared peak, and a
+        deep notch that sits somewhere different at each seat."""
+        freqs = np.geomspace(20.0, 20000.0, 961)
+        rng = np.random.default_rng(5)
+        shared = tunelib.peaking_db(freqs, 150.0, 3.0, 6.0)
+        seats = [shared + tunelib.peaking_db(freqs, notch, 8.0, -9.0)
+                 + rng.normal(0.0, 0.25, freqs.size) for notch in (1200.0, 1300.0)]
+        return freqs, np.vstack(seats)
+
+    def test_a_rejected_boost_seed_does_not_stop_a_shared_peak_being_cut(self):
+        """Ending the fit on the first rejected boost must leave the peak unfitted."""
+        freqs, seats = self._shared_peak_with_wandering_notches()
+
+        bands, report = tunelib.fit_peq_robust(
+            freqs, seats, (60.0, 12000.0), n_bands_max=5, fit_smoothed=True)
+
+        cuts = [b for b in bands if b[2] < 0 and abs(np.log2(b[0] / 150.0)) <= 1 / 3]
+        self.assertTrue(cuts, bands)
+        self.assertTrue(report["boost_rejections"])
+        self.assertTrue(all(g < 0 for _f, _q, g in bands), bands)
+
+    def test_without_cut_seed_retry_the_wandering_notch_ends_the_fit(self):
+        """The old stopping rule is still reachable, so the regression is pinned."""
+        freqs, seats = self._shared_peak_with_wandering_notches()
+
+        bands, report = tunelib.fit_peq_robust(
+            freqs, seats, (60.0, 12000.0), n_bands_max=5, fit_smoothed=True,
+            cut_seed_retry=False)
+
+        self.assertEqual([], bands)
+        self.assertEqual([], report["boost_rejections"])
+
+
+class SingleTraceFitTests(unittest.TestCase):
+    """fit_peq on one trace (a moving-mic average): the first seed must not
+    decide everything, and boosts must not stack past the boost limit."""
+
+    def _peak_behind_a_narrow_dip(self):
+        freqs = np.geomspace(20.0, 20000.0, 961)
+        rng = np.random.default_rng(2)
+        dev = (tunelib.peaking_db(freqs, 150.0, 3.0, 4.0)
+               + tunelib.peaking_db(freqs, 3000.0, 15.0, -10.0)
+               + rng.normal(0.0, 0.2, freqs.size))
+        return freqs, dev
+
+    def test_a_rejected_dip_seed_does_not_stop_a_peak_being_cut(self):
+        """Ending on the first rejected dip seed must leave the 150 Hz peak unfitted."""
+        freqs, dev = self._peak_behind_a_narrow_dip()
+
+        bands, _ = tunelib.fit_peq(freqs, dev, (60.0, 12000.0), n_bands_max=5,
+                                   fit_smoothed=True, q_lim=(0.5, 4.0), cut_seed_retry=True)
+
+        self.assertTrue([b for b in bands if abs(np.log2(b[0] / 150.0)) <= 1 / 3], bands)
+        self.assertTrue(all(g < 0 for _f, _q, g in bands), bands)
+
+    def test_single_trace_default_keeps_the_strict_stop(self):
+        """A fixed single sweep keeps the stricter default (its peaks may be the mic spot's)."""
+        freqs, dev = self._peak_behind_a_narrow_dip()
+
+        bands, _ = tunelib.fit_peq(freqs, dev, (60.0, 12000.0), n_bands_max=5,
+                                   fit_smoothed=True, q_lim=(0.5, 4.0))
+
+        self.assertEqual([], bands)
+
+    def test_stacked_boosts_are_split_off_and_cuts_always_kept(self):
+        """Per-band limits alone let three boosts fill one notch with +7 dB."""
+        freqs = np.geomspace(20.0, 20000.0, 961)
+        bands = [(901.6, 4.37, 3.0), (149.5, 1.77, -4.75), (974.6, 3.47, 2.75),
+                 (830.0, 3.76, 2.75), (5000.0, 2.0, 2.0)]
+
+        kept, stacked = tunelib.limit_stacked_boosts(freqs, bands)
+
+        self.assertEqual([(901.6, 4.37, 3.0), (149.5, 1.77, -4.75), (5000.0, 2.0, 2.0)], kept)
+        self.assertEqual([(974.6, 3.47, 2.75), (830.0, 3.76, 2.75)], stacked)
+        self.assertLessEqual(float(np.max(tunelib.cascade_db(freqs, kept))), 3.25)
+
 
 class ConfidenceAwareScorecardTests(unittest.TestCase):
     def test_mask_and_confidence_exclude_untrusted_outliers_from_metrics(self):

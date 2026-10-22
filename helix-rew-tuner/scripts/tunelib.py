@@ -1,10 +1,9 @@
 # tunelib.py -- verified DSP + acoustic-analysis core for the Helix/REW auto-tuner skill.
-# Pure functions (no file paths, no hardware I/O). Run  to execute
-# the full synthetic self-test suite (should print ALL TESTS PASSED).
+# Pure functions (no file paths, no hardware I/O). Run `python scripts/tunelib.py`
+# to execute the full synthetic self-test suite (should print ALL TESTS PASSED).
 # Encodings verified on a Helix P SIX DSP MK2; other Helix models: round-trip-verify first.
-# _tunefit.py — joint PEQ optimizer + minimum-phase classifier + audibility score.
-# Companion to _devcalc.py (which stays the measurement/deviation workhorse).
-# Added 2026-07-02 (Fable max pass). Everything here is self-tested by `python _tunefit.py`.
+# Holds the joint PEQ optimizer, the minimum-phase classifier and the audibility
+# score (merged here 2026-07-02 from the earlier _tunefit.py / _devcalc.py helpers).
 #
 # WHY THIS EXISTS (the gap vs TuneEQ / REW's own EQ window):
 #  - TuneEQ and REW fit bands GREEDILY, one at a time, to raw magnitude error.
@@ -559,7 +558,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             null_boost_penalty=0.8, partner_target_db=None, partner_weight=0.0,
             partner_band=(700.0, 5000.0), partner_conf=None, dip_weight=1.0,
             fit_smoothed=False, seed_retries=0, objective='symmetric',
-            boost_mode='allowed', verbose=False):
+            boost_mode='allowed', cut_seed_retry=False, verbose=False):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -638,6 +637,15 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         candidate instead of stopping. Corrects more on average but mostly
         via boosts, reduces real-fault correction, and harms more unseen
         seats from a single position -- opt-in only, never a default.
+      - cut_seed_retry=True: a rejected BOOST seed blocks its region and the
+        search continues with CUT seeds only (a rejected cut still ends the
+        fit); fit_peq_robust does this by default. Without it the first seed
+        decides everything: on a moving-mic capture a 0.2 dB anchor change
+        turned the first seed from a 104 Hz peak into an 840 Hz dip, whose
+        boost failed the gate and ended the fit with no band at all. Unlike
+        seed_retries it never retries a boost. pipeline.py propose enables it
+        for MMM captures, which are spatial averages; a single fixed sweep
+        keeps the stricter default because its peaks may belong to the mic spot.
 
     Returns (bands, report) - bands as [(F, Q, G), ...] rounded to hardware
     steps (0.25 dB gain), report dict with before/after scores (plus
@@ -775,6 +783,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     # the fitter before it reaches a real, fixable one elsewhere.
     blocked = np.zeros(len(freqs), dtype=bool)
     failures = 0
+    cuts_only = False
     while len(params) // 3 < n_bands_max:
         # seed the next band at the biggest remaining weighted, smoothed bump.
         # Blends in partner mismatch (when active) so a channel that's
@@ -797,6 +806,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         if conf is not None:
             res_w *= np.clip(conf, 0.0, 1.0)
         res_w = np.where(blocked, 0.0, res_w)
+        if cuts_only:
+            res_w = np.where(res_now > 0.0, res_w, 0.0)
         i0 = int(np.argmax(res_w))
         if res_w[i0] <= 0:
             break
@@ -816,10 +827,13 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
                   (nb, cur_score, new_score, raw_gain_pct, cur_select_score, new_select_score, select_gain_pct))
         if raw_gain_pct < improve_pct or select_gain_pct < improve_pct:
             failures += 1                            # parsimony gate
-            if failures > seed_retries:
-                break
             blocked |= np.abs(np.log2(freqs / seed_F)) <= 1.0 / 3.0
-            continue
+            if failures <= seed_retries:
+                continue
+            if cut_seed_retry and res_now[i0] < 0.0:
+                cuts_only = True                     # a rejected dip seed never ends the fit
+                continue
+            break
         params, cur_score, cur_select_score = fit.x, new_score, new_select_score
 
     bands = []
@@ -871,7 +885,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                    transition_hz=1000.0, selection_tax_weight=0.25,
                    null_boost_penalty=0.8, tail_weight=0.75,
                    max_worst_loss_db=0.25, fit_smoothed=False, dig_weight=1.0,
-                   max_dig_db=6.0, verbose=False):
+                   max_dig_db=6.0, cut_seed_retry=True, verbose=False):
     """Fit one quantized PEQ cascade across multiple measured positions.
 
     ``deviations_db`` is shaped ``(positions, frequencies)``. ``mask`` and
@@ -894,6 +908,17 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
     seat. A dig rejection blocks that seed's region (+/- 1/3 octave) and the
     search moves on, so one wandering feature cannot stop a real shared fault
     elsewhere from being fitted. max_dig_db=None disables the check.
+
+    ``cut_seed_retry`` applies the same idea to a rejected BOOST. Seeds go to
+    the largest weighted residual, and a dip that moves between seats often
+    outranks a real shared peak there. With two positions (every fold of a
+    three-position held-out check) there is no spatial mask to hide it, so
+    its boost failed the worst-position or parsimony gate and ended the fit
+    before the peak was tried: a +6 dB shared peak drew no band in two of
+    three folds and was rejected as seat-specific. Now a rejected boost
+    blocks its region (+/- 1/3 octave) and the search continues with CUT
+    seeds only; a rejected cut still ends the fit. Boosts are never retried,
+    which is why this differs from fit_peq's opt-in seed_retries.
 
     That check is the backstop; the main defence is ``dig_weight``: every
     position's NEW depth below target (as eq_dig_depth measures it, per bin)
@@ -1047,12 +1072,27 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
     hi_f = np.log10(fit_band[1] * 0.98)
 
     attempts = 0
+    cuts_only = False
+    boost_rejections = []
+
+    def retry_with_cuts(i0, seed_is_boost, reason):
+        # A rejected boost seed must not end the fit (see docstring).
+        nonlocal cuts_only
+        if not (cut_seed_retry and seed_is_boost):
+            return False
+        boost_rejections.append({'seed_hz': round(float(freqs[i0]), 1), 'reason': reason})
+        blocked[np.abs(np.log2(freqs / freqs[i0])) <= 1.0 / 3.0] = True
+        cuts_only = True
+        return True
+
     while len(accepted) < n_bands_max and attempts < n_bands_max + 3:
         attempts += 1
         current_error = deviations + cascade_db(freqs, accepted)[None, :]
         median_error = erb_smooth(freqs, authoritative_median(current_error))
         seed_weight = np.median(weights, axis=0)
         seed_basis = np.where(blocked, 0.0, np.abs(median_error) * seed_weight)
+        if cuts_only:
+            seed_basis = np.where(median_error > 0.0, seed_basis, 0.0)
         i0 = int(np.argmax(seed_basis))
         if seed_basis[i0] <= 0:
             break
@@ -1081,6 +1121,8 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         if worst_loss > max_worst_loss_db + 1e-12:
             rejected_worst = True
             rejected_candidate_loss = worst_loss
+            if retry_with_cuts(i0, median_error[i0] < 0.0, 'worst_position'):
+                continue
             break
         if max_dig_db is not None:
             eq_c = cascade_db(freqs, candidate)
@@ -1092,6 +1134,8 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                 blocked |= np.abs(np.log2(freqs / freqs[i0])) <= 1.0 / 3.0
                 continue
         if raw_gain_pct < improve_pct or select_gain_pct < improve_pct:
+            if retry_with_cuts(i0, median_error[i0] < 0.0, 'parsimony'):
+                continue
             break
         accepted = candidate
         current_score = candidate_score
@@ -1112,6 +1156,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         'rejected_worst_position': rejected_worst,
         'rejected_candidate_worst_loss_db': round(rejected_candidate_loss, 3),
         'dig_rejections': dig_rejections,
+        'boost_rejections': boost_rejections,
         'selection_score_before': round(base_score, 3),
         'selection_score_after': round(selection_score(accepted), 3),
         'bands_used': len(accepted),
@@ -2609,6 +2654,39 @@ def validate_peq_band(F, Q, G):
     if not (-15.0 <= G <= 6.0):
         raise ValueError('PEQ gain out of Helix range (-15..+6): %.2f dB' % G)
     return True
+
+
+def limit_stacked_boosts(freqs, bands, cap_db=3.0, band=(20.0, 20000.0), slack_db=0.25,
+                         dev_db=None):
+    """Split a proposal into the bands to keep and the boosts that stack.
+
+    The fitters cap each band's boost (g_lim, +3 dB) but not the cascade, and
+    will put two or three boosts on one dip: +7 dB into a narrow 8 dB notch
+    from a single sweep, or three identical MMM trials. Cuts are always kept.
+    Boosts are added one at a time while the whole cascade stays within
+    cap_db (plus slack_db for 0.25 dB rounding): the one that most improves
+    audibility_score(dev_db + EQ) when dev_db is given, else in fit order.
+    Returns (kept, stacked), each in the input order."""
+    freqs = np.asarray(freqs, dtype=float)
+    f = freqs[(freqs >= band[0]) & (freqs <= band[1])]
+    bands = [tuple(b) for b in bands]
+    kept = [b for b in bands if b[2] <= 0]
+    left = [b for b in bands if b[2] > 0]
+    stacked = []
+    while left:
+        fits = [b for b in left if np.max(cascade_db(f, kept + [b])) <= cap_db + slack_db]
+        stacked.extend(b for b in left if b not in fits)    # only grows from here
+        if not fits:
+            break
+        if dev_db is None:
+            pick = fits[0]
+        else:
+            pick = min(fits, key=lambda b: audibility_score(
+                freqs, dev_db + cascade_db(freqs, kept + [b]), band=band))
+        kept.append(pick)
+        left = [b for b in fits if b != pick]
+    order = {b: i for i, b in enumerate(bands)}
+    return (sorted(kept, key=order.__getitem__), sorted(stacked, key=order.__getitem__))
 
 
 

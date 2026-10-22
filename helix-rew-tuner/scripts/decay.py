@@ -33,6 +33,7 @@
 #   python decay.py compare a.wav b.wav            # two IRs side by side
 #   python decay.py fdw ir.txt --out direct.txt     # direct-sound FR (8 cycles)
 import argparse
+import os
 import sys
 import wave
 
@@ -495,6 +496,9 @@ def _main():
     a = ap.parse_args()
 
     if a.cmd == 'fdw':
+        if os.path.exists(a.out) and os.path.samefile(a.out, a.ir):
+            sys.exit('error: --out %s is the input impulse response; choose a new file '
+                     'for the direct-sound export' % a.out)
         if a.ir.lower().endswith('.wav'):
             ir, fs = load_ir_wav(a.ir)
             t0 = 0.0

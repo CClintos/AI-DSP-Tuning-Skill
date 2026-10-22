@@ -178,7 +178,13 @@ def _main():
     elif cmd == 'decode':
         xml_bytes = decode_bytes(sys.argv[2])
         out = Path(sys.argv[2]).with_suffix('.decoded.xml')
-        out.write_bytes(xml_bytes)
+        # Never replace an existing decode: it may hold the edits for `encode`.
+        try:
+            with open(out, 'xb') as fh:
+                fh.write(xml_bytes)
+        except FileExistsError:
+            sys.exit('error: %s already exists (it may hold your edits); rename or '
+                     'remove it, then decode again' % out)
         print('decoded ->', out)
         print(repr(xml_bytes[:200]))
     elif cmd == 'encode':
