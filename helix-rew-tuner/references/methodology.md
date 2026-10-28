@@ -2433,7 +2433,7 @@ through. For every PEQ inside the channel's passband (kept 1/3 octave inside
 its crossovers) it tries removing it, halving it, and re-fitting it in place;
 where free slots and a real residual both exist it may add one band. Every
 prediction is the measurement + cascade(new bank) - cascade(old bank), so a
-measured filter is never applied twice, and each candidate is re-anchored in
+measured filter is never applied twice. The low-level API can re-anchor in
 level so removing a cut in the anchor band is not mistaken for a broadband
 error. A move is kept only when it improves the mean score across positions
 without the worst position getting worse; removal wins near-ties, because a
@@ -2593,3 +2593,11 @@ a listening decision, and one item is physical, not DSP."** A tuning session tha
 converges to "stop" has succeeded; treat refusing an unsupported filter as an
 equally good outcome as finding a good one, and say so explicitly rather than
 manufacturing a marginal candidate to have something to propose.
+
+## Evidence-constrained audible tuning
+
+For the current pipeline reference model, stereo proposals, measured clean-output
+limits, bass trial selection and actual-system voicing matches, read
+`audible_tuning.md`. Pipeline refinement now uses `fixed_anchor=True`: the baseline
+passband reference is held through every candidate and final judgement. The low-level
+legacy shape-only option is not the pipeline default.

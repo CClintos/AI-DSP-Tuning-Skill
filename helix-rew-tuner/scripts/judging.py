@@ -135,7 +135,7 @@ def distortion(freqs, fundamental_db, harmonics_db, noise_db, support, min_snr_d
 def load_spec(spec, base_dir):
     """Quality-check manifest; referenced files resolve beside the manifest."""
     allowed = {'version', 'baseline', 'candidate', 'target', 'level_steps', 'distortion',
-               'margin_db', 'compression_tolerance_db', 'stereo', 'headroom'}
+               'margin_db', 'compression_tolerance_db', 'stereo', 'headroom', 'distortion_reference'}
     if not isinstance(spec, dict) or set(spec) - allowed or type(spec.get('version')) is not int or spec.get('version') != 1:
         raise ValueError('quality spec requires version 1 and documented fields only')
     f = measure.common_grid(20, 20000, 96)
@@ -186,7 +186,7 @@ def load_spec(spec, base_dir):
         live = bs & ass & measure.support_mask(tf, f)
         if np.count_nonzero(live) < 8:
             raise ValueError('captures and target have no shared measured band')
-        anchor = tunelib.target_anchor_offset(f, before.mean(axis=0), target, confidence=live.astype(float))
+        anchor = tunelib.validated_anchor_offset(f, before.mean(axis=0), target, confidence=live.astype(float))
         margin = positive(spec.get('margin_db', 0.5), 'margin_db')
         repeated = len(before) >= 2 and len(after) >= 2
         if repeated:
@@ -231,6 +231,35 @@ def load_spec(spec, base_dir):
             harmonics[key], hs = trace(path)
             live &= hs
         evidence['distortion'] = {'status': 'measured', 'report': distortion(f, fundamental, harmonics, noise, live & ns)}
+        if 'distortion_reference' in spec:
+            ref = spec['distortion_reference']
+            if not isinstance(ref, dict) or set(ref) != {'fundamental', 'harmonics', 'noise'} or not isinstance(ref['harmonics'], dict):
+                raise ValueError('distortion_reference requires fundamental, harmonics mapping and noise')
+            rf, rs = trace(ref['fundamental'])
+            rn, rns = trace(ref['noise'])
+            rh = {}
+            for key, path in ref['harmonics'].items():
+                rh[key], hs = trace(path)
+                rs &= hs
+            rows = []
+            for name, lo, hi, sel, covered in regions(f, live & ns & rs & rns):
+                row = {'name': name, 'band_hz': [lo, hi], 'status': 'unknown'}
+                if covered:
+                    matched = float(np.percentile(np.abs(fundamental[sel] - rf[sel]), 90)) <= 1.0
+                    row['fundamental_level_matched'] = matched
+                    rises = {}
+                    for key in set(harmonics) & set(rh):
+                        good = sel & (harmonics[key] - noise >= 10) & (rh[key] - rn >= 10) & (fundamental - noise >= 10) & (rf - rn >= 10)
+                        if np.mean(good[sel]) >= 0.8:
+                            rises[key] = round(float(np.median(harmonics[key][good] - rh[key][good])), 3)
+                    row['absolute_harmonic_change_db'] = rises
+                    row['status'] = ('unmatched_level' if not matched else
+                                     'harmonic_regression' if rises and max(rises.values()) > 3.0 else
+                                     'within_margin' if rises else 'unknown')
+                rows.append(row)
+            evidence['distortion']['comparison'] = rows
+    elif 'distortion_reference' in spec:
+        raise ValueError('distortion_reference requires candidate distortion evidence')
     if 'stereo' in spec:
         st = spec['stereo']
         if not isinstance(st, dict) or set(st) != {'before_left', 'before_right', 'after_left', 'after_right'}:
@@ -267,6 +296,7 @@ def load_spec(spec, base_dir):
     if not inputs:
         raise ValueError('quality spec must contain tone, level_steps or distortion evidence')
     regressions = (evidence['tone']['status'] == 'regressed'
+                   or any(r['status'] == 'harmonic_regression' for r in evidence['distortion'].get('comparison', []))
                    or any(b['status'] == 'regressed' for b in evidence['imaging'].get('bands', []))
                    or any(b['status'] in ('compression', 'level_dependent_gain') for step in evidence['compression'].get('steps', []) for b in step['bands'])
                    or evidence['headroom'].get('spectral_margin_db', 0) < 0)

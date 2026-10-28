@@ -128,18 +128,13 @@ class KnownAnswerProposeTests(unittest.TestCase):
             for b in boosts[i + 1:]:
                 self.assertGreater(abs(np.log2(a / b)), 1 / 3, boosts)
 
-    @unittest.expectedFailure
     def test_c_known_gap_two_peaks_draw_no_compensating_boost(self):
-        """Known gap F1: the fixed level anchor sits on the peaks, so broad
-        boosts appear. Passing here means the fitter now floats the level:
-        promote this to a normal test."""
+        """Independent references must prevent peak-biased compensating boosts."""
         proposal = self.propose("c", [[(500.0, 2.0, 5.0), (2500.0, 1.5, 3.0)]] * 3)
         self.assertFalse([b for b in proposal["bands"] if b["gain_db"] > 0], proposal)
 
-    @unittest.expectedFailure
     def test_d_known_gap_two_peaks_and_notches_keep_the_500hz_cut(self):
-        """Known gap F1, as above, with per-seat notches: the 500 Hz cut is
-        rejected today because the anchor bias shrinks it."""
+        """A stable 500 Hz excess must still earn its cut with moving notches."""
         seats = [[(500.0, 2.0, 5.0), (2500.0, 1.5, 3.0), (notch, 8.0, -9.0)]
                  for notch in (900.0, 1300.0, 1800.0)]
         self.assert_one_cut_near(self.propose("d", seats), 500.0)

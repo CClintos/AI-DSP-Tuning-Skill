@@ -49,6 +49,9 @@ directory (the folder holding `SKILL.md` and `requirements.txt`).
 | `refine` | Every session after the first: keeps, relaxes, re-fits or removes the PEQ bank the measurement was taken through, and adds only where a residual is real (`--afpx --channels --dsp-rate`; guards come from the `--afpx` sidecar). Writes nothing. | §Refine the tune you have |
 | `plan` / `apply` | The only AFPX write route (step 5). | `references/tune_plan_schema.md` |
 | `session check` / `session save` | Read or record the intake sidecar (step 1). | — |
+| `stereo-propose` | Shared voicing plus limited side cuts, evaluated together from L/R captures. | `references/audible_tuning.md` |
+| `bass-trials` | Sub gain/delay/polarity trial directions from timed solos validated against the actual together capture. | `references/audible_tuning.md` |
+| `voice-match` | Level-match actual measured candidate system responses before blind preference tests. | `references/audible_tuning.md` |
 | `quality-check` | Evidence-aware candidate judging from a version-1 manifest: repeated tone captures, per-band compression, noise-qualified distortion, L/R regression and full-chain spectral headroom. Missing checks remain unknown. | `references/measurement_judging.md` |
 | `source-audit` | Is the signal entering the DSP level-independent? `--at ref.txt=0 down6.txt=-6 ...`; it names the source as the cause only with `--electrical`. | §Audit the source |
 | `imaging` | Image position against frequency from solo L/R (`--solo-l --solo-r`). `--near-side left` or `right` adds the centring options; `--bands emma` uses the EMMA instrument ranges. | §Image position is frequency-dependent |
@@ -58,7 +61,7 @@ directory (the folder holding `SKILL.md` and `requirements.txt`).
 | `mmm-compare` | Rank MMM captures of different settings over one band (default `balanced`). For a close final touch-up, add `--repeat A2.txt --candidate-repeat trial=B2.txt`: both candidate runs must beat both baseline runs, using the same anchor and the worse repeat disagreement. | §MMM-first tuning |
 | `lr-match` | Left/right tonal match from half-system captures (`--target <curve>`). Corrects only target-supported excess and never copies a dip onto the good side. | §MMM-first tuning |
 | `verify` | Did a written change land? Before vs after captures, `--dsp-rate`. | §MMM-first tuning |
-| `voice-variants` | One-shelf voicing variants of a finished tune, for a blind A/B. | §MMM-first tuning |
+| `voice-variants` | Single-filter voicing variants of a finished tune, for a blind A/B. | §MMM-first tuning |
 | `emma-volume` / `noise-check` | EMMA's 6 dB-louder balance check / system noise (off vs on, playing silence). | §Preparing for EMMA |
 | `selftest` | Synthetic self-test, including this document's section references. | — |
 
@@ -449,27 +452,22 @@ twice,).
   hardware validation — and returns each band with its predicted before/after
   deviation plus per-position scores. It writes nothing. Treat it as the
   starting proposal: you still classify each band (step 3), drop or relax any
-  you can't justify, and confirm each one with the user. Hand-roll a
-  `fit_peq` call only for something `propose` can't express (e.g. partner
-  L/R matching), and say so.
+  you can't justify, and confirm each one with the user. Use `--partner` to
+  constrain L/R matching and `--limits` to enforce measured
+  clean-output ceilings. For a joint common/side bank use `stereo-propose`.
+  Read `references/audible_tuning.md` for capture assumptions and verification.
 - With 2+ positions, `analyze` and `propose` take the tonal deviation from
   the level-aligned position average, not the first file — EQ what's common.
 - Model every candidate edit as a biquad and **predict the summed result** before
   writing (bands within an octave interact — never set gain = −deviation naively).
 - Prefer few, broad, low-Q moves. Peaks cost more than dips. Do not fill narrow
   dips. Keep L/R corrections matched unless solos prove the sides genuinely differ.
-- **A broad boost (Q ≤ 1) proposed next to large cuts is often the level
-  anchor compensating, not a real deficit.** The anchor is a median over
-  300–3000 Hz, so big peaks there lift it, and everything else then reads
-  low. The target's level floats, so lifting a wide region by 1–3 dB mostly
-  undoes what the cuts took away. Present such a band as a level question, or
-  drop it, unless `bass_balance` or the user's ears say that region really is
-  thin. The same bias moves `bass_balance` itself: when `analyze` shows large
-  peaks inside 300–3000 Hz, treat a 1–2 dB "bass light" verdict as
-  provisional, and confirm it by ear or with `mmm-compare` before changing the
-  sub level. (Known limitation. Letting the fitter float the level was tried
-  and rejected: on realistic responses it moved the level by several dB,
-  sometimes the wrong way.)
+- **Keep the reference independent of the proposed correction.** The validated
+  anchor can correct peak/over-cut bias only when separate low/high references
+  agree; it does not float during optimisation. Pipeline refinement and judging
+  freeze the same baseline reference. When the evidence is insufficient, broad
+  boosts and small bass-level conclusions remain provisional. Channel gain is a
+  separate measured decision. See `references/audible_tuning.md`.
 - Run `headroom_report` — but **`clip_risk` alone is not a finding.** It sees only
   the PEQ stage; read the channel's actual output level (`afpx.read_output_levels`)
   and report the NET number. A channel at −2.75 dB output with a +2.7 dB cascade
@@ -647,3 +645,7 @@ blocks proceeding to a write until the conflict is resolved. Use `quality-check`
 with fresh independent captures to assess measured changes. Missing compression,
 distortion, timing/image, decay, headroom or listening evidence stays unknown;
 never imply that a tonal score certifies those dimensions.
+
+For changes that should improve sound directly, use the correction paths and
+release criteria in `references/audible_tuning.md`: consistent baseline references,
+joint stereo, measured output limits, bass trials and actual-system voicing matches.

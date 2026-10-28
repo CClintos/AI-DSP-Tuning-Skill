@@ -551,6 +551,16 @@ def _quantize_peq_bands(bands, min_gain):
 
 # --------------------------------------------------------------------------
 # 3) JOINT PEQ FIT (the TuneEQ-beater)
+def validate_boost_ceiling(freqs, ceiling):
+    """Maximum ADDITIONAL gain relative to the measured preset, by frequency."""
+    if ceiling is None:
+        return None
+    ceiling = np.asarray(ceiling, float)
+    if ceiling.shape != np.asarray(freqs).shape or not np.isfinite(ceiling).all() or np.any(ceiling < 0):
+        raise ValueError('boost_ceiling_db must be a finite nonnegative frequency array')
+    return ceiling
+
+
 def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             g_lim=(-15.0, 3.0), q_lim=(0.5, 8.0), min_gain=1.0,
             improve_pct=6.0, boost_penalty=0.5, hf_q_penalty=0.4,
@@ -558,7 +568,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             null_boost_penalty=0.8, partner_target_db=None, partner_weight=0.0,
             partner_band=(700.0, 5000.0), partner_conf=None, dip_weight=1.0,
             fit_smoothed=False, seed_retries=0, objective='symmetric',
-            boost_mode='allowed', cut_seed_retry=False, verbose=False):
+            boost_mode='allowed', cut_seed_retry=False, verbose=False, boost_ceiling_db=None):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -652,6 +662,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     partner_mismatch_before/after when partner matching is active).
     """
     from scipy.optimize import least_squares
+    boost_ceiling_db = validate_boost_ceiling(freqs, boost_ceiling_db)
 
     sel = (freqs >= fit_band[0]) & (freqs <= fit_band[1])
     if mask is not None:
@@ -717,6 +728,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             if dip_weight != 1.0:
                 r = np.where(r < 0.0, dip_weight * r, r)
             parts = [r * w, penalties(bands)]
+        if boost_ceiling_db is not None:
+            parts.append(20.0 * np.maximum(eq_sel - np.asarray(boost_ceiling_db)[sel], 0.0))
         if boost_mode == 'refill':
             parts.append(20.0 * np.maximum(eq_sel, 0.0))
         if psel is not None:
@@ -737,6 +750,8 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
                                     conf=conf, dip_weight=dip_weight)
         if boost_mode == 'refill':
             cost += 20.0 * float(np.max(np.maximum(eq_full[sel], 0.0), initial=0.0))
+        if boost_ceiling_db is not None:
+            cost += 20.0 * float(np.max(np.maximum(eq_full - np.asarray(boost_ceiling_db), 0.0)))
         return cost
 
     def combined_score_of(params):
@@ -885,7 +900,8 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                    transition_hz=1000.0, selection_tax_weight=0.25,
                    null_boost_penalty=0.8, tail_weight=0.75,
                    max_worst_loss_db=0.25, fit_smoothed=False, dig_weight=1.0,
-                   max_dig_db=6.0, cut_seed_retry=True, verbose=False):
+                   max_dig_db=6.0, cut_seed_retry=True, verbose=False, boost_ceiling_db=None,
+                   partner_target_db=None, partner_weight=0.0):
     """Fit one quantized PEQ cascade across multiple measured positions.
 
     ``deviations_db`` is shaped ``(positions, frequencies)``. ``mask`` and
@@ -931,6 +947,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
     from scipy.optimize import least_squares
 
     freqs = np.asarray(freqs, dtype=float)
+    boost_ceiling_db = validate_boost_ceiling(freqs, boost_ceiling_db)
     deviations = np.asarray(deviations_db, dtype=float)
     if deviations.ndim != 2 or deviations.shape[1] != len(freqs):
         raise ValueError('deviations_db must have shape (positions, frequencies)')
@@ -1002,6 +1019,17 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
             for i in range(shape[0])
         ])
 
+    def evidence_cost(bands):
+        eq = cascade_db(freqs, bands)
+        cost = 0.0
+        if boost_ceiling_db is not None:
+            cost += 20.0 * float(np.max(np.maximum(eq - boost_ceiling_db, 0.0)))
+        if partner_target_db is not None and partner_weight > 0:
+            sel = inband & (freqs >= 700) & (freqs <= 5000) & np.any(authority, axis=0)
+            if np.any(sel):
+                cost += partner_weight * float(np.sqrt(np.mean((np.mean(deviations, axis=0)[sel] + eq[sel] - partner_target_db[sel]) ** 2)))
+        return cost
+
     def robust_score(scores):
         median = float(np.median(scores))
         tail_excess = max(0.0, smooth_upper_tail(scores) - median)
@@ -1026,7 +1054,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         tax = (float(np.sqrt(np.mean(filt_penalties ** 2)))
                if len(filt_penalties) else 0.0)
         return (robust_score(position_scores(bands))
-                + selection_tax_weight * tax + null_cost(bands))
+                + selection_tax_weight * tax + null_cost(bands) + evidence_cost(bands))
 
     def resid(params):
         bands = raw_bands(params)
@@ -1054,6 +1082,11 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                  median_error * median_weight,
                  tail_weight * tail,
                  penalties(bands)]
+        if boost_ceiling_db is not None:
+            parts.append(20.0 * np.maximum(cascade_db(freqs, bands) - boost_ceiling_db, 0.0))
+        if partner_target_db is not None and partner_weight > 0:
+            ps = inband & (freqs >= 700) & (freqs <= 5000) & np.any(authority, axis=0)
+            parts.append(partner_weight * (np.mean(errors, axis=0)[ps] - partner_target_db[ps]))
         if dig_weight:
             dug = np.maximum(np.maximum(-errors, 0.0) - depth_before, 0.0) * dig_scale
             parts.append(dig_weight * (dug * dig_w).ravel() / np.sqrt(shape[0]))
@@ -1063,7 +1096,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
     base_score = robust_score(before_scores)
     accepted = []
     current_score = base_score
-    current_selection = base_score
+    current_selection = selection_score([])
     rejected_worst = False
     rejected_candidate_loss = 0.0
     dig_rejections = []
@@ -1133,7 +1166,8 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                                        'dig_db': round(dig, 2)})
                 blocked |= np.abs(np.log2(freqs / freqs[i0])) <= 1.0 / 3.0
                 continue
-        if raw_gain_pct < improve_pct or select_gain_pct < improve_pct:
+        raw_required = 0.0 if partner_target_db is not None and partner_weight > 0 else improve_pct
+        if raw_gain_pct < raw_required or select_gain_pct < improve_pct:
             if retry_with_cuts(i0, median_error[i0] < 0.0, 'parsimony'):
                 continue
             break
@@ -1561,6 +1595,31 @@ def target_anchor_offset(freqs, measured_db, target_db, confidence=None,
 # runs several plausible anchor choices and reports the SPREAD, so that
 # sensitivity to an arbitrary choice is visible before it drives a filter,
 # instead of only ever seeing whichever one anchor happened to be used.
+def validated_anchor_offset(freqs, measured_db, target_db, confidence=None):
+    """Keep the mid-band reference unless independent LF/HF bands agree.
+
+    A bounded correction fixes peak/over-cut contamination, without allowing
+    shelves, missing passbands or an optimiser to freely move the reference.
+    """
+    f = np.asarray(freqs, float)
+    dev = np.asarray(measured_db, float) - np.asarray(target_db, float)
+    conf = np.ones_like(f) if confidence is None else np.asarray(confidence, float)
+    anchor = target_anchor_offset(f, measured_db, target_db, confidence=conf)
+    levels = []
+    for lo, hi in ((100, 250), (4000, 10000)):
+        sel = (conf > 0.3) & (f >= lo) & (f <= hi) & np.isfinite(dev)
+        if np.count_nonzero(sel) < 24:
+            return anchor
+        values = dev[sel]
+        if np.percentile(values, 90) - np.percentile(values, 10) > 1.5:
+            return anchor
+        levels.append(float(np.median(values)))
+    reference = float(np.mean(levels))
+    if abs(levels[0] - levels[1]) <= .75 and .5 < abs(anchor - reference) <= 3:
+        return reference
+    return anchor
+
+
 def anchor_sensitivity_report(freqs, measured_db, target_db, candidate_band,
                               confidence=None, anchor_bands_list=None,
                               sensitive_range_db=1.0):
@@ -4270,7 +4329,8 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
                 f_move_oct=1.0 / 3.0, min_gain_db=0.03, min_gain_pct=2.0,
                 remove_tolerance_db=0.02, worst_tolerance_db=0.05, min_add_gain=1.0,
                 removal_credit_db=0.05, local_check=None,
-                boost_check=None):
+                boost_check=None, fixed_anchor=False, boost_ceiling_db=None,
+                partner_target_db=None, partner_weight=0.0):
     """Greedy, deterministic refinement of an existing PEQ bank.
 
     deviations: list of per-position deviation-from-target arrays measured
@@ -4294,13 +4354,17 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
     adds or raises a boost (pass None when phase is unavailable; boosts are
     then reported as unchecked).
 
-    Every candidate is re-anchored in level before scoring (overall level is
+    By default candidates are re-anchored in level before scoring (overall level is
     a separate decision from the shape the bank corrects), and the anchor is
     taken over `band` itself. A single driver's solo is mostly stopband: the
     session's 300-3000 Hz anchor lies wholly outside a tweeter or a sub, so
     anchoring there reads the whole passband as one big level error
     (measured on a real car: a tweeter baseline of 14.7 dB and a sub of 35.8
     dB, "fixed" by -15 dB Q0.5 cuts).
+
+    fixed_anchor=True preserves the supplied baseline deviations through every
+    candidate; the pipeline uses this so its fitter and judge share one reference.
+    boost_ceiling_db constrains additional transfer, including removed cuts.
 
     Returns {'baseline': {...}, 'final': {...}, 'edits': [...], 'bank': [...],
     'unchanged': bool}. Edit rows: action ('remove', 'relax', 'refit', 'add'),
@@ -4309,6 +4373,7 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
     from scipy.optimize import minimize
 
     f = np.asarray(freqs, dtype=float)
+    boost_ceiling_db = validate_boost_ceiling(f, boost_ceiling_db)
     old = [tuple(float(x) for x in b) for b in old_bank]
     old_db = cascade_db(f, old, fs=fs)
 
@@ -4323,7 +4388,8 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
     # The add path fits the mean deviation directly, so the inputs are put on
     # the same in-band anchor the scores use.
     devs = [np.asarray(d, dtype=float) for d in deviations]
-    devs = [d - level(d) for d in devs]
+    if not fixed_anchor:
+        devs = [d - level(d) for d in devs]
 
     def scores(bank):
         # Overall level is not the bank's job: each candidate is re-anchored
@@ -4334,8 +4400,18 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
         out = []
         for d in devs:
             dd = d + T
-            dd = dd - level(dd)
-            out.append(audibility_score(f, dd, band=band, mask=mask, conf=conf))
+            if not fixed_anchor:
+                dd = dd - level(dd)
+            cost = audibility_score(f, dd, band=band, mask=mask, conf=conf)
+            if boost_ceiling_db is not None:
+                cost += 20.0 * float(np.max(np.maximum(T - boost_ceiling_db, 0.0)))
+            if partner_target_db is not None and partner_weight > 0:
+                ps = (f >= max(700, band[0])) & (f <= min(5000, band[1]))
+                if mask is not None:
+                    ps &= np.asarray(mask, bool)
+                if np.any(ps):
+                    cost += partner_weight * float(np.sqrt(np.mean((dd[ps] - partner_target_db[ps]) ** 2)))
+            out.append(cost)
         return out
 
     def summary(s):
@@ -4399,6 +4475,9 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
 
         best = None
         for action, i, new, trial in moves:
+            transfer = cascade_db(f, [b for b in trial if b is not None], fs=fs) - old_db
+            if boost_ceiling_db is not None and np.any(transfer > boost_ceiling_db + 0.1):
+                continue
             s = scores(trial)
             d_mean = float(np.mean(s)) - mean_now
             d_worst = float(np.max(s)) - worst_now
@@ -4674,7 +4753,8 @@ def mmm_change_support(freqs, transfer_db, region, profile, factor=2.0, floor_db
     Returns {'status': 'supported' | 'below_repeatability' | 'unverifiable',
     'local_change_db' (peak ERB-smoothed |change| in the region),
     'local_resolution_db'}. 'unverifiable' means no repeat runs cover the
-    region: nothing can confirm the change after it is written."""
+    region: no measured repeatability currently covers the region. Fresh repeats
+    or fixed-mic verification can establish the change later."""
     f = np.asarray(freqs, dtype=float)
     sel = (f >= region[0]) & (f <= region[1])
     change = float(np.max(np.abs(erb_smooth(f, np.asarray(transfer_db, dtype=float))[sel]))) \
@@ -5165,7 +5245,10 @@ def lr_match_cuts(freqs, left_db, right_db, band=(300.0, 6000.0), flag_db=1.5,
                                  flag_db=flag_db)['regions']
     if unresolved:
         notes.append('remaining mismatch needs diagnosis/listening; do not cut a target-correct side to copy a dip')
-    return {'level_offset_db': round(offset, 2), 'trim': trim,
+    return {'raw_wrms_before_db': round(error(L-R), 2),
+            'trimmed_wrms_before_db': round(error(original['left']-original['right']), 2),
+            'wrms_before_scope': 'legacy wrms_before_db is after the proposed trim; raw_wrms_before_db is measured',
+            'level_offset_db': round(offset, 2), 'trim': trim,
             'regions': before['regions'], 'unresolved_regions': unresolved,
             'cuts': cuts, 'rejected': rejected, 'notes': notes,
             'target_anchor_db': anchor,

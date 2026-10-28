@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.17.0`) so you can tell whether an already-installed copy is current — open
+`1.18.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -709,3 +709,14 @@ stays unknown; regional losses veto average-score wins. Analyze, propose and ref
 also expose tonal judging scorecards. See
 [measurement judging](helix-rew-tuner/references/measurement_judging.md) for the
 manifest, capture protocol, decision margins and limitations.
+
+## Audible tuning paths
+
+Version 1.18.0 corrects the two known level-anchor cases and holds one reference
+through refinement and judging. `--partner` and `--limits` connect L/R and measured
+compression/distortion evidence to filter choices. `stereo-propose` builds shared
+and side-specific cuts; `bass-trials` checks small sub gain/delay/polarity trials
+against the actual measured sum; `voice-match` calculates blind A/B trims from
+actual candidate system captures. Voicing variants include a broad presence option.
+See [audible tuning](helix-rew-tuner/references/audible_tuning.md) for commands,
+capture requirements and what counts as a confirmed improvement.

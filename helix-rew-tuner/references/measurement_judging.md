@@ -117,3 +117,8 @@ unknown: magnitude files cannot establish them. `overall` remains `incomplete`
 when no veto is found, or `hold_for_review` for tonal/stereo regression, level
 tracking problems or negative modelled headroom. It never awards an all-round pass
 from a subset of measurements.
+
+Measured compression and matched-level harmonic comparisons can now constrain
+propose/refine via `--limits`. The optional `distortion_reference` manifest field
+uses the same schema as `distortion`. See [audible tuning](audible_tuning.md) for
+thresholds, required context, joint stereo and measured bass/voicing workflows.

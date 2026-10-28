@@ -65,6 +65,7 @@ import afpx
 import measure
 import tunelib
 import judging
+import audible
 
 ASSETS_DEFAULT_TARGET = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'default_incar_target.txt')
@@ -811,6 +812,10 @@ def _load_session(args, freqs):
     mask = authority['mask'] & support if authority else (None if np.all(support) else support)
     anchor_conf = conf if conf is not None else support.astype(float)
     anchor = tunelib.target_anchor_offset(freqs, basis_db, target_db, confidence=anchor_conf)
+    validated = tunelib.validated_anchor_offset(freqs, basis_db, target_db, confidence=anchor_conf)
+    if validated != anchor:
+        notes.append('mid-band anchor adjusted %+.2f dB: independent low/high reference bands agree' % (validated - anchor))
+        anchor = validated
     return {
         'positions_db': positions_db, 'kept_index': kept_index, 'primary_db': primary_db,
         'measurement_phase': measurement_phase, 'meas_axis': meas_axis,
@@ -1192,6 +1197,8 @@ def propose(args):
         sess['anchor'] = anchor
         sess['dev_db'] = sess['basis_db'] - (sess['target_db'] + anchor)
     mask, conf, dev_db = sess['mask'], sess['conf'], sess['dev_db']
+    evidence_kw, evidence = audible.fitting_evidence(args, freqs, sess)
+    partner_db = evidence.pop('partner_db', None)
 
     tilt = None
     if not solo_band:
@@ -1204,6 +1211,7 @@ def propose(args):
         qkw = {'q_lim': (0.5, MMM_SINGLE_RUN_Q_MAX)}
         notes.append('one MMM run: filters are kept broad (Q <= %g) -- a narrower feature '
                      'needs a repeat run to show it is real' % MMM_SINGLE_RUN_Q_MAX)
+    qkw.update(evidence_kw)
     held_out = None
     band_validation = {}
     groups = _sitting_groups(args, sess, notes)
@@ -1251,6 +1259,7 @@ def propose(args):
                          'a seat-specific one, and held-out validation needs 3+ '
                          'positions -- capture them (or MMM) before trusting narrow bands')
     bands, stacked = tunelib.limit_stacked_boosts(freqs, bands, band=band, dev_db=dev_db)
+    bands, limited = audible.enforce_ceiling(freqs, bands, evidence_kw.get('boost_ceiling_db'))
 
     gate = {}
     has_boost = any(g > 0 for _f, _q, g in bands)
@@ -1341,6 +1350,8 @@ def propose(args):
         rejected.append({'f_hz': F, 'q': Q, 'gain_db': G, 'kind': 'boost', 'boost_gate': None,
                          'reason': 'stacks on another boost past the +3 dB boost limit: the fit '
                                    'was filling one dip with several bands'})
+    for F, Q, G in limited:
+        rejected.append({'f_hz': F, 'q': Q, 'gain_db': G, 'reason': 'exceeds measured additional-gain ceiling'})
     final = [(r['f_hz'], r['q'], r['gain_db']) for r in kept]
 
     eq = tunelib.cascade_db(freqs, final)
@@ -1387,6 +1398,14 @@ def propose(args):
     margin = max(0.5, 2 * (sess['repeatability'] or {}).get('noise_db', 0.0))
     judgement = judging.scorecard(freqs, dev_db, dev_db + eq,
                                  sess['support'] & (freqs >= band[0]) & (freqs <= band[1]), margin)
+    if partner_db is not None:
+        judgement['partner_balance'] = audible.partner_guard(freqs, dev_db, partner_db, eq, sess['support'])
+        if judgement['partner_balance']['status'] == 'regressed':
+            judgement['verdict'] = 'regressed'
+    judgement['junction_guard'] = audible.junction_guard(args, final, probe)
+    if judgement['junction_guard']['status'] == 'hold_for_review':
+        judgement['verdict'] = 'regressed'
+    judgement['evidence'] = evidence
     judgement['predicted_not_measured'] = True
     judgement['additional_peq_peak_gain_db'] = round(float(np.max(eq)), 3)
     judgement['headroom_status'] = 'unknown: full existing chain, routing and levels required'
@@ -1717,11 +1736,15 @@ def refine(args):
                          accept=getattr(args, 'accept_tilt', False))
     # Level is anchored inside the judged band, never the session's 300-3000 Hz
     # default: that lies in a tweeter's or a sub's stopband (tunelib.refine_bank).
-    anchor = _band_anchor(freqs, sess, band)
+    anchor = _band_anchor(freqs, sess, band) if _outside_anchor(band) else sess['anchor']
     if abs(anchor - sess['anchor']) > 1.0:
         notes.append('level anchored inside the judged band (%+.1f dB vs the %.0f-%.0f Hz '
                      'session anchor) -- this solo is band-limited' % (
                          anchor - sess['anchor'], 300, 3000))
+    sess['anchor'] = anchor
+    sess['dev_db'] = sess['basis_db'] - (sess['target_db'] + anchor)
+    evidence_kw, evidence = audible.fitting_evidence(args, freqs, sess)
+    partner_db = evidence.pop('partner_db', None)
     if sess['aligned'] is not None:
         devs = list(sess['aligned'] - (sess['target_db'] + anchor))
     else:
@@ -1786,7 +1809,7 @@ def refine(args):
     result = tunelib.refine_bank(
         freqs, devs, old_bank, band, mask=sess['mask'], conf=sess['conf'], fs=fs,
         max_edits=args.max_edits, free_slots=min(len(v) for v in free.values()),
-        boost_check=boost_check, local_check=local_check,
+        boost_check=boost_check, local_check=local_check, fixed_anchor=True, **evidence_kw,
         q_lim=((0.5, MMM_SINGLE_RUN_Q_MAX) if mmm and sess['repeatability'] is None
                else (0.5, 8.0)))
     if result['vetoed']:
@@ -1842,6 +1865,14 @@ def refine(args):
     margin = max(0.5, 2 * (sess['repeatability'] or {}).get('noise_db', 0.0))
     judgement = judging.scorecard(freqs, sess['dev_db'], sess['dev_db'] + transfer,
                                  support & (freqs >= band[0]) & (freqs <= band[1]), margin)
+    if partner_db is not None:
+        judgement['partner_balance'] = audible.partner_guard(freqs, sess['dev_db'], partner_db, transfer, support)
+        if judgement['partner_balance']['status'] == 'regressed':
+            judgement['verdict'] = 'regressed'
+    judgement['junction_guard'] = audible.junction_guard(args, [tuple(b) for b in result['bank']], probe, old_bands=old_bank)
+    if judgement['junction_guard']['status'] == 'hold_for_review':
+        judgement['verdict'] = 'regressed'
+    judgement['evidence'] = evidence
     judgement['predicted_not_measured'] = True
     judgement['headroom_status'] = 'unknown: full chain and routing required'
     judgement['apply_recommendation'] = ('hold_for_review' if judgement['verdict'] == 'regressed' else 'review_edits')
@@ -2114,7 +2145,8 @@ def voice_variants(args):
     xml = afpx.decode(args.afpx)
     chans = afpx.channels(xml)
     variants = [('bass', d) for d in (args.bass_db or [])] + \
-               [('treble', d) for d in (args.treble_db or [])]
+               [('treble', d) for d in (args.treble_db or [])] + \
+               [('presence', d) for d in (getattr(args, 'presence_db', None) or [])]
     if not variants:
         raise ValueError('give --bass-db and/or --treble-db values, e.g. --bass-db -1 1')
     freqs = measure.common_grid(20.0, 20000.0, 96)
@@ -2126,16 +2158,17 @@ def voice_variants(args):
         step = round(float(delta) * 4.0) / 4.0
         if step == 0.0:
             raise ValueError('%s variant %+g dB rounds to 0 at the 0.25 dB shelf step' % (kind, delta))
-        channels = args.bass_channels if kind == 'bass' else args.treble_channels
+        channels = (args.bass_channels if kind == 'bass' else
+                    getattr(args, 'presence_channels', None) if kind == 'presence' else args.treble_channels)
         if not channels:
             raise ValueError('--%s-channels is required for a %s variant' % (kind, kind))
-        end, code = ('25', '3') if kind == 'bass' else ('20000', '4')
-        hz = args.bass_hz if kind == 'bass' else args.treble_hz
+        end, code = ('25', '3') if kind == 'bass' else ('presence', '17') if kind == 'presence' else ('20000', '4')
+        hz = args.bass_hz if kind == 'bass' else args.presence_hz if kind == 'presence' else args.treble_hz
         edits, curve_spec = [], None
         for c in channels:
             if not 0 <= c < len(chans):
                 raise ValueError('channel %d does not exist' % c)
-            slot = next((sl for sl in chans[c]['slots'] if sl['dF'] == end), None)
+            slot = next((sl for sl in chans[c]['slots'] if (sl['free'] and sl['dF'] not in ('25', '20000') if kind == 'presence' else sl['dF'] == end)), None)
             if slot is None:
                 raise ValueError('channel %d has no %s shelf slot (dF=%s)' % (c, kind, end))
             edit = {'id': 'voice-%s%+.2f-ch%d' % (kind, step, c), 'kind': 'filter_slot',
@@ -2143,7 +2176,7 @@ def voice_variants(args):
             if slot['type_code'] == code and slot['G']:
                 G = float(np.clip(slot['G'] + step, -15.0, 6.0))
                 edit['G'] = G
-                spec = (slot['F'], slot['Q'], step)
+                spec = (slot['F'], slot['Q'], G - slot['G'])
             elif slot['free'] or slot['type_code'] == code:
                 edit.update({'type_code': code, 'F': float(hz), 'Q': float(args.q), 'G': step})
                 spec = (float(hz), float(args.q), step)
@@ -2152,12 +2185,14 @@ def voice_variants(args):
             curve_spec = curve_spec or spec
             edits.append(edit)
         F, Q, G = curve_spec
-        shelf = (tunelib.low_shelf_db(freqs, F, Q, G) if kind == 'bass'
-                 else tunelib.high_shelf_db(freqs, F, Q, G))
+        shelf = (tunelib.low_shelf_db(freqs, F, Q, G) if kind == 'bass' else
+                 tunelib.peaking_db(freqs, F, Q, G) if kind == 'presence' else
+                 tunelib.high_shelf_db(freqs, F, Q, G))
         loud = tunelib.loudness_change_db(freqs, program, program + shelf)
         name = '%s%+.2fdB' % (kind, step)
         path = os.path.join(out_dir, name + '.afpx')
         row = {'variant': name, 'file': path, 'edits': edits,
+               'loudness_status': 'provisional: use voice-match on actual candidate system captures',
                'predicted_loudness_change_db': round(loud, 2),
                'ab_make': ('pipeline.py ab-make --a %s --b %s --loudness-db %.2f --out-dir '
                            '<dir> --confirm-trim' % (args.afpx, path, loud))}
@@ -2597,6 +2632,31 @@ def main():
     qc.add_argument('--spec', required=True, help='version-1 quality manifest; paths relative to this file')
     qc.add_argument('--out', help='write JSON report')
 
+    sp = sub.add_parser('stereo-propose', help='shared voicing and limited side-specific cuts, judged together')
+    sp.add_argument('--left', nargs='+', required=True)
+    sp.add_argument('--right', nargs='+', required=True)
+    sp.add_argument('--target', default='default')
+    sp.add_argument('--band', nargs=2, type=float, default=(300, 6000))
+    sp.add_argument('--max-bands', type=int, default=3)
+    sp.add_argument('--out')
+
+    bt = sub.add_parser('bass-trials', help='predict sub gain/delay/polarity trials, validated against the actual sum')
+    bt.add_argument('--sub', required=True)
+    bt.add_argument('--front', required=True)
+    bt.add_argument('--together', required=True)
+    bt.add_argument('--target', default='default')
+    bt.add_argument('--band', nargs=2, type=float, default=(40, 200))
+    bt.add_argument('--delays-ms', nargs='+', type=float, default=(-0.5, 0, 0.5))
+    bt.add_argument('--gains-db', nargs='+', type=float, default=(-1, 0, 1))
+    bt.add_argument('--try-invert', action='store_true')
+    bt.add_argument('--limits')
+    bt.add_argument('--out')
+
+    vm = sub.add_parser('voice-match', help='estimate blind A/B level trims from actual measured system responses')
+    vm.add_argument('--baseline', required=True)
+    vm.add_argument('--candidates', nargs='+', required=True, metavar='LABEL=PATH')
+    vm.add_argument('--out')
+
     pl = sub.add_parser('plan', help='create a versioned AFPX tune-plan draft')
     pl.add_argument('--source', required=True, help='source .afpx tune')
     pl.add_argument('--output', required=True, help='new .afpx output path')
@@ -2644,6 +2704,9 @@ def main():
     pr.add_argument('--gate-ms', type=float,
                     help='the capture was time-gated: never fit below its trust floor')
     pr.add_argument('--out')
+    pr.add_argument('--junction-spec', help='timed neighbour probe spec plus apply_to; veto tonal edits that worsen a supplied junction')
+    pr.add_argument('--partner', help='other side capture on the SAME level scale; constrain target-supported L/R matching')
+    pr.add_argument('--limits', help='quality-check report from this driver/preset/level; constrain additional gain')
     _capture_args(pr)
 
     rf = sub.add_parser('refine',
@@ -2664,6 +2727,9 @@ def main():
     rf.add_argument('--gate-ms', type=float)
     rf.add_argument('--max-edits', type=int, default=4)
     rf.add_argument('--out')
+    rf.add_argument('--junction-spec', help='timed neighbour probe spec plus apply_to; veto tonal edits that worsen a supplied junction')
+    rf.add_argument('--partner', help='other side capture on the SAME level scale; constrain target-supported L/R matching')
+    rf.add_argument('--limits', help='quality-check report from this driver/preset/level; constrain additional gain')
     _capture_args(rf)
 
     mc = sub.add_parser('mmm-compare',
@@ -2701,13 +2767,16 @@ def main():
     vf.add_argument('--capture-profile', metavar='JSON')
     vf.add_argument('--out')
 
-    vv = sub.add_parser('voice-variants', help='shelf-only voicing variants for a blind A/B')
+    vv = sub.add_parser('voice-variants', help='single-filter voicing variants for a blind A/B')
     vv.add_argument('--afpx', required=True)
     vv.add_argument('--out-dir', required=True)
     vv.add_argument('--bass-channels', nargs='+', type=int)
     vv.add_argument('--treble-channels', nargs='+', type=int)
     vv.add_argument('--bass-db', nargs='+', type=float, help='e.g. -1 1')
     vv.add_argument('--treble-db', nargs='+', type=float, help='e.g. -1 1')
+    vv.add_argument('--presence-db', nargs='+', type=float)
+    vv.add_argument('--presence-channels', nargs='+', type=int)
+    vv.add_argument('--presence-hz', type=float, default=2200.0)
     vv.add_argument('--bass-hz', type=float, default=120.0)
     vv.add_argument('--treble-hz', type=float, default=6000.0)
     vv.add_argument('--q', type=float, default=0.7)
@@ -2876,7 +2945,7 @@ def _dispatch(args):
         print(json.dumps(apply_plan(args.plan), indent=2))
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
                       'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match',
-                      'verify', 'voice-variants', 'emma-volume', 'noise-check'):
+                      'verify', 'voice-variants', 'emma-volume', 'noise-check', 'bass-trials', 'voice-match', 'stereo-propose'):
         _check_report_out(args)
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
@@ -2884,7 +2953,8 @@ def _dispatch(args):
                   'ab-result': ab_result, 'mmm-compare': mmm_compare,
                   'lr-match': lr_match, 'verify': verify,
                   'voice-variants': voice_variants, 'emma-volume': emma_volume,
-                  'noise-check': noise_check}[args.cmd](args)
+                  'noise-check': noise_check, 'bass-trials': audible.bass_trials,
+                  'voice-match': audible.measured_voice_match, 'stereo-propose': audible.stereo_propose}[args.cmd](args)
         text = json.dumps(report, indent=2)
         if args.out:
             with open(args.out, 'w', encoding='utf-8') as fh:
