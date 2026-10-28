@@ -64,6 +64,7 @@ import numpy as np
 import afpx
 import measure
 import tunelib
+import judging
 
 ASSETS_DEFAULT_TARGET = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'default_incar_target.txt')
@@ -989,6 +990,8 @@ def analyze(args):
     measurement_phase, target_db = sess['measurement_phase'], sess['target_db']
     anchor, dev_db = sess['anchor'], sess['dev_db']
     support = sess['support']
+    report['judging'] = judging.scorecard(freqs, dev_db, dev_db, support)
+    report['judging']['unassessed'] = ['distortion', 'compression', 'imaging', 'decay', 'headroom', 'listening']
     if sess['voice_knobs']:
         report['voicing_applied'] = sess['voice_knobs']
 
@@ -1381,7 +1384,17 @@ def propose(args):
         prediction['loudness_change_db'] = round(tunelib.loudness_change_db(
             freqs[support], sess['basis_db'][support], (sess['basis_db'] + eq)[support]), 2)
 
+    margin = max(0.5, 2 * (sess['repeatability'] or {}).get('noise_db', 0.0))
+    judgement = judging.scorecard(freqs, dev_db, dev_db + eq,
+                                 sess['support'] & (freqs >= band[0]) & (freqs <= band[1]), margin)
+    judgement['predicted_not_measured'] = True
+    judgement['additional_peq_peak_gain_db'] = round(float(np.max(eq)), 3)
+    judgement['headroom_status'] = 'unknown: full existing chain, routing and levels required'
+    judgement['apply_recommendation'] = ('hold_for_review' if judgement['verdict'] == 'regressed' else 'review_bands')
+    if judgement['verdict'] == 'regressed':
+        notes.append('judging regression veto: hold this proposal; a regional or score-component loss exceeds the margin')
     return {
+        'judging': judgement,
         'meta': {'measurement_file': args.measurement,
                  'positions_used': len(sess['positions_db']),
                  'sittings_used': None if groups is None else len(set(groups)),
@@ -1826,7 +1839,17 @@ def refine(args):
     else:
         notes.append('the current bank already earns its place -- no edit beats it at the '
                      'measured positions. Leaving it alone is the result')
+    margin = max(0.5, 2 * (sess['repeatability'] or {}).get('noise_db', 0.0))
+    judgement = judging.scorecard(freqs, sess['dev_db'], sess['dev_db'] + transfer,
+                                 support & (freqs >= band[0]) & (freqs <= band[1]), margin)
+    judgement['predicted_not_measured'] = True
+    judgement['headroom_status'] = 'unknown: full chain and routing required'
+    judgement['apply_recommendation'] = ('hold_for_review' if judgement['verdict'] == 'regressed' else 'review_edits')
+    if judgement['verdict'] == 'regressed':
+        notes.append('judging regression veto: hold this refinement for review')
+        plan_edits = []
     return {
+        'judging': judgement,
         'meta': {'afpx': args.afpx, 'channels': args.channels, 'dsp_sample_rate_hz': fs,
                  'judged_band_hz': [round(band[0], 1), round(band[1], 1)],
                  'positions_used': len(sess['positions_db']) or 1,
@@ -2570,6 +2593,10 @@ def main():
 
     sub.add_parser('selftest', help='run the self-contained synthetic-fixture self-test')
 
+    qc = sub.add_parser('quality-check', help='evidence-aware tone, compression and distortion judging')
+    qc.add_argument('--spec', required=True, help='version-1 quality manifest; paths relative to this file')
+    qc.add_argument('--out', help='write JSON report')
+
     pl = sub.add_parser('plan', help='create a versioned AFPX tune-plan draft')
     pl.add_argument('--source', required=True, help='source .afpx tune')
     pl.add_argument('--output', required=True, help='new .afpx output path')
@@ -2815,6 +2842,20 @@ def _check_report_out(args):
 def _dispatch(args):
     if args.cmd == 'selftest':
         _selftest()
+    elif args.cmd == 'quality-check':
+        _check_report_out(args)
+        with open(args.spec, encoding='utf-8-sig') as fh:
+            spec = json.load(fh)
+        report = judging.load_spec(spec, os.path.dirname(os.path.abspath(args.spec)))
+        if args.out:
+            for source in report['input_files']:
+                if os.path.exists(args.out) and os.path.samefile(source, args.out):
+                    raise ValueError('--out is a manifest input; refusing to overwrite it')
+            with open(args.out, 'w', encoding='utf-8') as fh:
+                json.dump(report, fh, indent=2, allow_nan=False)
+            print('wrote %s' % args.out)
+        else:
+            print(json.dumps(report, indent=2, allow_nan=False))
     elif args.cmd == 'session':
         if args.session_cmd == 'check':
             print(json.dumps(session_check(args.tune), indent=2))

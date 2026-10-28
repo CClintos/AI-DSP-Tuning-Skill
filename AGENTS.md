@@ -61,6 +61,7 @@ directory (the folder holding `SKILL.md` and `requirements.txt`).
 | `refine` | Every session after the first: keeps, relaxes, re-fits or removes the PEQ bank the measurement was taken through, and adds only where a residual is real (`--afpx --channels --dsp-rate`; guards come from the `--afpx` sidecar). Writes nothing. | §Refine the tune you have |
 | `plan` / `apply` | The only AFPX write route (step 5). | `references/tune_plan_schema.md` |
 | `session check` / `session save` | Read or record the intake sidecar (step 1). | — |
+| `quality-check` | Evidence-aware candidate judging from a version-1 manifest: repeated tone captures, per-band compression, noise-qualified distortion, L/R regression and full-chain spectral headroom. Missing checks remain unknown. | `references/measurement_judging.md` |
 | `source-audit` | Is the signal entering the DSP level-independent? `--at ref.txt=0 down6.txt=-6 ...`; it names the source as the cause only with `--electrical`. | §Audit the source |
 | `imaging` | Image position against frequency from solo L/R (`--solo-l --solo-r`). `--near-side left` or `right` adds the centring options; `--bands emma` uses the EMMA instrument ranges. | §Image position is frequency-dependent |
 | `junction` | One crossover's phase score, sum loss and four-estimator delay consensus: `--lower --upper --crossover HZ [--direct-sound]`. | §Reading a junction |
@@ -648,3 +649,13 @@ reverted band without telling the user why.
 11. **State every proposed change directly in the response** — frequency, gain, Q,
     and (for delays) both milliseconds and samples — not just "I wrote the file, go
     check it." The user should be able to act on your message alone.
+
+## Candidate judging beyond the target curve
+
+Read `references/measurement_judging.md` when comparing candidate tunes or checking clean output.
+Use the `judging` block in analyze/propose/refine: a regional regression must not
+be hidden by an average-score improvement. A `hold_for_review` recommendation
+blocks proceeding to a write until the conflict is resolved. Use `quality-check`
+with fresh independent captures to assess measured changes. Missing compression,
+distortion, timing/image, decay, headroom or listening evidence stays unknown;
+never imply that a tonal score certifies those dimensions.

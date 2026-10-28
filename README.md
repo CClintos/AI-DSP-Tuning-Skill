@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.16.0`) so you can tell whether an already-installed copy is current — open
+`1.17.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -698,3 +698,14 @@ adopted and what is still open, is in
 ## License
 
 [MIT](LICENSE).
+
+## Evidence-aware measurement judging
+
+`pipeline.py quality-check --spec quality.json --out quality-report.json` compares
+fresh repeated captures with one fixed target anchor, reports per-band compression
+and noise-qualified harmonic distortion, checks L/R magnitude regressions, and
+estimates spectral headroom from a supplied full-chain transfer. Missing evidence
+stays unknown; regional losses veto average-score wins. Analyze, propose and refine
+also expose tonal judging scorecards. See
+[measurement judging](helix-rew-tuner/references/measurement_judging.md) for the
+manifest, capture protocol, decision margins and limitations.
