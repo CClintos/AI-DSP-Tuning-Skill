@@ -144,7 +144,12 @@ def bass_trials(args):
         target_path = os.path.join(os.path.dirname(__file__), '..', 'assets', 'default_incar_target.txt')
     target = measure.load_target(target_path, f)
     anchor = float(np.median((measured - target)[ref]))
-    before = tunelib.audibility_score(f, measured - target - anchor, band=band, mask=sel)
+    measured_before = tunelib.audibility_score(f, measured - target - anchor, band=band, mask=sel)
+    # Every trial is compared with the model's OWN unchanged prediction, never
+    # with the measured capture: otherwise the model error (allowed up to 1.5 dB
+    # RMS) is counted as part of every change, and the zero-change trial itself
+    # fails the reference-band and local-regression guards.
+    before = tunelib.audibility_score(f, predicted - target - anchor, band=band, mask=sel)
     ceiling, limits = (load_limits(args.limits, f) if args.limits else (None, []))
     delays, gains = list(args.delays_ms), list(args.gains_db)
     if not delays or not gains or len(delays) * len(gains) * (2 if args.try_invert else 1) > 100:
@@ -152,7 +157,7 @@ def bass_trials(args):
     if not np.isfinite(delays + gains).all() or max(map(abs, delays)) > 10 or max(map(abs, gains)) > 6:
         raise ValueError('bass trials are limited to +/-10 ms and +/-6 dB relative changes')
     rows = []
-    base_error = np.abs(tunelib.masked_erb_smooth(f, measured - target - anchor, sel))
+    base_error = np.abs(tunelib.masked_erb_smooth(f, predicted - target - anchor, sel))
     for delay in delays:
         for gain in gains:
             for invert in ([False, True] if args.try_invert else [False]):
@@ -165,7 +170,7 @@ def bass_trials(args):
                     veto.append('new local tonal regression exceeds 2 dB')
                 if ceiling is not None and np.any(gain > ceiling[sel] + 0.1):
                     veto.append('gain exceeds measured clean-output limit')
-                if abs(float(np.median((db - measured)[ref]))) > 0.25:
+                if abs(float(np.median((db - predicted)[ref]))) > 0.25:
                     veto.append('reference band changed; bass-only assumption is invalid')
                 rows.append({'delay_change_ms': float(delay), 'gain_change_db': float(gain),
                              'invert_sub': invert, 'score_db': round(after, 4),
@@ -173,10 +178,13 @@ def bass_trials(args):
     rows.sort(key=lambda x: x['score_db'])
     candidates = [r for r in rows if not r['rejection_reasons'] and r['improvement_db'] > 0.25]
     return {'predicted_not_measured': True, 'baseline_score_db': round(before, 4),
+            'measured_baseline_score_db': round(measured_before, 4),
             'model_rms_error_db': round(rms, 3), 'band_hz': list(band), 'limits': limits,
             'candidate': candidates[0] if candidates else None, 'trials': rows,
             'next_step': 'Confirm the specific delay/gain trial, load it separately, then measure fronts+sub with repeated MMM and compare via mmm-compare; polarity remains a manual PC-Tool trial.',
-            'notes': ['Relative delay can only be applied if the existing delay allocation permits it.',
+            'notes': ['Trials are scored against the unchanged model prediction (baseline_score_db), '
+                      'so model error is not counted as part of any change.',
+                      'Relative delay can only be applied if the existing delay allocation permits it.',
                       'Single-point predictions are trial directions, never proof of tonal improvement.']}
 
 

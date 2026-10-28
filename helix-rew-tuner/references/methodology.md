@@ -2309,7 +2309,11 @@ setups are not compared by accident.
   octave RTA rises ~3 dB/oct, and voicing toward the target would tilt the
   tune the opposite way. With a valid capture profile recorded the refusal
   becomes a check-the-car note; otherwise `--accept-tilt` only if it really is
-  the car.
+  the car. A single-driver capture is never refused: `refine` on a channel
+  with a crossover inside 120 Hz–10 kHz, or `propose` with a narrow
+  `--fit-band`, only notes that the check belongs on the full-system capture
+  (a midbass solo low-passed at 2.6 kHz reads about −5 dB/oct on a correctly
+  set RTA).
 - *EQ policy.* With `--capture mmm`, every proposed band (propose) and every
   edit (refine) must change the response by more than the repeat-capture
   variation where it acts — max(0.5 dB, 2 x the local repeatability) — or it
@@ -2494,8 +2498,12 @@ force after a tune edit.
 
 A guard blocks a BOOST whose own response rises more than 0.25 dB anywhere in
 a zone on a listed channel (`channels: null` = every channel), and any boost
-above `max_boost_q`. Cuts are never blocked: relaxing or deepening a cut cannot
-fill a null. Blocked bands land in `propose`'s `rejected` with the guard's
+above `max_boost_q`. A new or deepened cut is never blocked. `refine` also
+judges every edit to an EXISTING filter by its net transfer (new minus old):
+relaxing, re-centring, narrowing or removing a cut can lift a zone as surely
+as a boost, and narrowing a kept boost can pass the Q cap. On a real car a
+tweeter-cut refit that was *deeper* still lifted that tweeter's physical
+4.4–4.9 kHz notch by 0.45 dB; it is refused now. Blocked bands land in `propose`'s `rejected` with the guard's
 reason; `refine` drops the move and names it in `notes`. Every zone needs a
 reason — the physical fact it protects — so a later session can tell a guard
 from a habit. Add one only from evidence: an MMM-vs-fixed-mic disagreement, a

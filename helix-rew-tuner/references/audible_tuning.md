@@ -201,7 +201,10 @@ alignment. Otherwise the search refuses to invent a precise recommendation.
 
 A fixed baseline reference ranks target error, vetoes newly worsened local
 features greater than 2 dB, and rejects a reference-band shift greater than
-0.25 dB. A trial must improve the score by more than 0.25 dB to be offered.
+0.25 dB. Every trial is compared with the model's own UNCHANGED prediction
+(`baseline_score_db`), not with the measured capture
+(`measured_baseline_score_db`): otherwise the permitted model error is counted
+as part of every change, and even the zero-change trial fails the guards. A trial must improve the score by more than 0.25 dB to be offered.
 These margins are engineering heuristics; no candidate is called measured proof.
 Search is bounded to 100 candidates, relative +/-10 ms and +/-6 dB. Negative
 relative delay is only feasible where the existing allocation permits it.

@@ -294,7 +294,7 @@ def load_spec(spec, base_dir):
                                 'internal_clipping': 'unknown',
                                 'note': 'Transfer must be full-chain gain in dB, including routing and trims, not acoustic SPL. This spectral estimate cannot certify transient peaks, internal stages or amplifier limits.'}
     if not inputs:
-        raise ValueError('quality spec must contain tone, level_steps or distortion evidence')
+        raise ValueError('quality spec must contain tone, level_steps, distortion, stereo or headroom evidence')
     regressions = (evidence['tone']['status'] == 'regressed'
                    or any(r['status'] == 'harmonic_regression' for r in evidence['distortion'].get('comparison', []))
                    or any(b['status'] == 'regressed' for b in evidence['imaging'].get('bands', []))

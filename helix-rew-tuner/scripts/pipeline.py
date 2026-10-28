@@ -601,8 +601,9 @@ def guard_check(guards, channels=None, freqs=None):
     """(F, Q, G) -> None, or the reason a BOOST breaks a vehicle guard.
 
     A zone applies when its channels are null, the caller names no channels,
-    or the two share one. Cuts are never blocked: relaxing or deepening a cut
-    cannot fill a null."""
+    or the two share one. A new cut is never blocked. Edits to EXISTING
+    filters (relaxing, moving or removing a cut) can raise a zone too; refine
+    checks those with guard_move_check."""
     if not guards:
         return None
     f = measure.common_grid(20.0, 20000.0, 96) if freqs is None else np.asarray(freqs)
@@ -621,6 +622,40 @@ def guard_check(guards, channels=None, freqs=None):
             sel = (f >= z['lo_hz']) & (f <= z['hi_hz'])
             if np.any(sel) and float(np.max(rise[sel])) > GUARD_TOLERANCE_DB:
                 return ('raises %.0f-%.0f Hz by %.1f dB: %s'
+                        % (z['lo_hz'], z['hi_hz'], float(np.max(rise[sel])), z['reason']))
+        return None
+    return check
+
+
+def guard_move_check(guards, channels=None, freqs=None, fs=96000.0):
+    """(old, new) -> None, or why replacing filter `old` with `new` breaks a guard.
+
+    Judged on the move's net transfer, cascade(new) - cascade(old), so it sees
+    what a per-band boost check cannot: relaxing, re-centring, narrowing or
+    removing an existing cut raises the response where the old cut used to
+    act. On a real car a refit of a left-tweeter cut (3677 Hz Q2.1 -6 ->
+    3775 Hz Q3.3 -7.5) deepened the filter yet lifted the tweeter's physical
+    4.4-4.9 kHz notch by 0.45 dB, and a boost kept at its gain but narrowed to
+    Q4 slipped past a Q3 cap. Either is refused here."""
+    if not guards:
+        return None
+    f = measure.common_grid(20.0, 20000.0, 96) if freqs is None else np.asarray(freqs)
+    qmax = guards.get('max_boost_q')
+    zones = [z for z in guards.get('no_boost') or []
+             if z.get('channels') is None or channels is None
+             or set(z['channels']) & set(channels)]
+
+    def check(old, new):
+        if qmax is not None and new is not None and new[2] > 0 and new[1] > qmax + 1e-9 and (
+                old is None or old[2] <= 0 or new[1] > old[1] + 1e-9 or new[2] > old[2]):
+            return 'boost Q %.2f exceeds the max_boost_q %g set for this car' % (new[1], qmax)
+        olds = [tuple(old)] if old is not None else []
+        news = [tuple(new)] if new is not None else []
+        rise = tunelib.cascade_db(f, news, fs=fs) - tunelib.cascade_db(f, olds, fs=fs)
+        for z in zones:
+            sel = (f >= z['lo_hz']) & (f <= z['hi_hz'])
+            if np.any(sel) and float(np.max(rise[sel])) > GUARD_TOLERANCE_DB:
+                return ('raises %.0f-%.0f Hz by %.2f dB: %s'
                         % (z['lo_hz'], z['hi_hz'], float(np.max(rise[sel])), z['reason']))
         return None
     return check
@@ -858,12 +893,27 @@ def _mask_runs(freqs, mask):
     return runs
 
 
-def _rta_tilt(freqs, sess, notes, refuse, accept=False):
+TILT_BAND_HZ = (120.0, 10000.0)    # tunelib.measure_tilt's default fit band
+
+
+def _narrow_band(band):
+    """True when a fit band misses much of the tilt band: one driver's range."""
+    return band[0] > 2 * TILT_BAND_HZ[0] or band[1] < TILT_BAND_HZ[1] / 2
+
+
+def _rta_tilt(freqs, sess, notes, refuse, accept=False, solo=False):
     """MMM only: catch an RTA in the wrong mode before it tilts the tune.
     refuse=True for a full-system proposal; analyze only notes it (it may be
-    looking at a solo)."""
+    looking at a solo). solo=True (a band-limited driver capture) never
+    refuses: a single driver's broadband tilt says nothing about the RTA mode
+    (a midbass solo low-passed at 2.6 kHz measures about -5 dB/oct on a
+    correctly set RTA)."""
     if sess['capture'] != 'mmm':
         return None
+    if solo:
+        notes.append('single-driver capture: the RTA-mode tilt check needs a full-system '
+                     'capture, so it was not applied here -- run analyze on the System Sum')
+        return {'tilt_db_per_oct': None, 'problem': None, 'skipped': 'single-driver capture'}
     live = sess['support']
     tilt = tunelib.measure_tilt(freqs[live], sess['basis_db'][live])['tilt_db_per_oct']
     problem = tunelib.rta_tilt_check(tilt)
@@ -1203,7 +1253,8 @@ def propose(args):
     tilt = None
     if not solo_band:
         tilt = _rta_tilt(freqs, sess, notes, refuse=True,
-                         accept=getattr(args, 'accept_tilt', False))
+                         accept=getattr(args, 'accept_tilt', False),
+                         solo=bool(args.fit_band) and _narrow_band(band))
     mmm = sess['capture'] == 'mmm'
     unit = 'run' if mmm else 'position'
     qkw = {}
@@ -1733,7 +1784,8 @@ def refine(args):
     tilt = None
     if not _outside_anchor(band):
         tilt = _rta_tilt(freqs, sess, notes, refuse=True,
-                         accept=getattr(args, 'accept_tilt', False))
+                         accept=getattr(args, 'accept_tilt', False),
+                         solo=hp > TILT_BAND_HZ[0] or lp < TILT_BAND_HZ[1])
     # Level is anchored inside the judged band, never the session's 300-3000 Hz
     # default: that lies in a tweeter's or a sub's stopband (tunelib.refine_bank).
     anchor = _band_anchor(freqs, sess, band) if _outside_anchor(band) else sess['anchor']
@@ -1794,8 +1846,19 @@ def refine(args):
                         'where it acts' % (v['local_change_db'], v['local_resolution_db']))
             return None
 
-    gcheck = guard_check(load_guards(args.afpx, notes), args.channels, freqs)
-    guard_blocks = {}
+    guards = load_guards(args.afpx, notes)
+    gcheck = guard_check(guards, args.channels, freqs)
+    mcheck = guard_move_check(guards, args.channels, freqs, fs)
+    guard_blocks, move_blocks = {}, {}
+    if mcheck:
+        repeat_check = local_check
+
+        def local_check(action, old, new):
+            why = mcheck(old, new)
+            if why:
+                move_blocks.setdefault(why, (action, old, new))
+                return 'vehicle guard: ' + why
+            return repeat_check(action, old, new) if repeat_check else None
     if gcheck:
         phase_check = boost_check
 
@@ -1812,9 +1875,16 @@ def refine(args):
         boost_check=boost_check, local_check=local_check, fixed_anchor=True, **evidence_kw,
         q_lim=((0.5, MMM_SINGLE_RUN_Q_MAX) if mmm and sess['repeatability'] is None
                else (0.5, 8.0)))
-    if result['vetoed']:
+    small = [v for v in result['vetoed'] if not v['reason'].startswith('vehicle guard:')]
+    if small:
         notes.append('%d candidate edit(s) were smaller than the repeat-capture variation where '
-                     'they act and were not proposed' % len(result['vetoed']))
+                     'they act and were not proposed' % len(small))
+    for why, (action, old, new) in list(move_blocks.items())[:3]:
+        notes.append('vehicle guard blocked a candidate %s (%s -> %s): %s' % (
+            action, 'new band' if old is None else '%.0f Hz Q%.2f %+.2f dB' % tuple(old),
+            'removed' if new is None else '%.0f Hz Q%.2f %+.2f dB' % tuple(new), why))
+    if len(move_blocks) > 3:
+        notes.append('vehicle guards blocked %d more candidate edits' % (len(move_blocks) - 3))
     if mmm and sess['repeatability'] is None:
         notes.append('one MMM run: edits are kept broad (Q <= %g) and none can be checked '
                      'against repeatability -- capture the tune twice' % MMM_SINGLE_RUN_Q_MAX)

@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.19.0`) so you can tell whether an already-installed copy is current — open
+`1.20.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -327,6 +327,7 @@ tests/
 ├── test_probe.py                    what-if probe engine
 ├── test_propose.py                  deterministic EQ proposal and position averaging
 ├── test_rew_api.py                  read-only REW HTTP API bridge (stubbed)
+├── test_review_fixes.py              bass-trial model baseline, solo tilt, move-level vehicle guards, headroom-only check
 ├── test_registered_average_and_excursion.py  registered multi-position averaging; Fs-only excursion never clears
 ├── test_session_file.py              intake session sidecar check/save
 ├── test_source_and_imaging.py        source-audit and frequency-dependent imaging tests
@@ -711,6 +712,14 @@ also expose tonal judging scorecards. See
 manifest, capture protocol, decision margins and limitations.
 
 ## Audible tuning paths
+
+Version 1.20.0 fixes four things found re-running the skill on a real car:
+`bass-trials` now scores each trial against its own unchanged model (before,
+model error made even the zero-change trial fail and every trial was rejected);
+the RTA-mode tilt guard no longer refuses single-driver MMM captures; vehicle
+guards veto any `refine` edit whose net transfer lifts a protected zone or
+narrows a boost past the Q cap; and the `quality-check` message now lists every
+accepted evidence group, headroom included.
 
 Version 1.19.0 adds `audible-study`, a measured finalist review covering acoustic
 crossover choices, multitone workload, sustained output, bass across the driver's
