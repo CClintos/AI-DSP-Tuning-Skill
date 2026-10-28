@@ -2632,6 +2632,10 @@ def main():
     qc.add_argument('--spec', required=True, help='version-1 quality manifest; paths relative to this file')
     qc.add_argument('--out', help='write JSON report')
 
+    ast = sub.add_parser('audible-study', help='compare measured crossover, bass, workload and listening finalists')
+    ast.add_argument('--spec', required=True, help='version-1 audible study manifest; paths relative to this file')
+    ast.add_argument('--out')
+
     sp = sub.add_parser('stereo-propose', help='shared voicing and limited side-specific cuts, judged together')
     sp.add_argument('--left', nargs='+', required=True)
     sp.add_argument('--right', nargs='+', required=True)
@@ -2911,6 +2915,20 @@ def _check_report_out(args):
 def _dispatch(args):
     if args.cmd == 'selftest':
         _selftest()
+    elif args.cmd == 'audible-study':
+        import audible_study
+        _check_report_out(args)
+        with open(args.spec, encoding='utf-8-sig') as fh:
+            spec = json.load(fh)
+        audible_study.protect_output(spec, os.path.dirname(os.path.abspath(args.spec)), args.out)
+        report = audible_study.study(spec, os.path.dirname(os.path.abspath(args.spec)))
+        text = json.dumps(report, indent=2, allow_nan=False)
+        if args.out:
+            with open(args.out, 'w', encoding='utf-8') as fh:
+                fh.write(text)
+            print('wrote %s' % args.out)
+        else:
+            print(text)
     elif args.cmd == 'quality-check':
         _check_report_out(args)
         with open(args.spec, encoding='utf-8-sig') as fh:

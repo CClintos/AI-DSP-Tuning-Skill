@@ -1,5 +1,84 @@
 # Tuning changes with an audible purpose
 
+## Measured finalist study
+
+`pipeline.py audible-study --spec study.json --out study-report.json` joins the
+next set of audible decisions in one version-1 manifest. It reads files beside
+the manifest, reports JSON only, and never writes a tune. Supply only the
+sections you have measured. A missing section is unknown, not a passing test.
+
+```json
+{
+  "version": 1,
+  "workload": {"trials": [{"name": "xo-a", "baseline": "base-multitone.txt",
+    "candidate": "xo-a-multitone.txt", "unexcited_hz": [400, 410, 420, 430, 440, 450, 460, 470],
+    "baseline_fundamental": "base-output.txt", "candidate_fundamental": "xo-a-output.txt",
+    "noise_floor_db": -80, "band_hz": [400, 470]}]},
+  "stability": {"trials": [{"name": "xo-a", "cold": "cold.txt",
+    "warm": "warm.txt", "recovered": "recovered.txt", "band_hz": [40, 10000]}]},
+  "crossovers": {"baseline": "base-system.txt", "target": "default",
+    "candidates": [{"name": "xo-a", "measurement": "xo-a-system.txt",
+      "probe_report": "probe.json", "variant": "xo-a",
+      "quality_report": "xo-a-quality.json"}]},
+  "bass_area": {"positions": [
+    {"sub": "sub-centre.txt", "front": "front-centre.txt", "together": "sum-centre.txt"},
+    {"sub": "sub-offset.txt", "front": "front-offset.txt", "together": "sum-offset.txt"}]},
+  "stage": {"trials": [
+    {"track": "vocal-a", "preferred": "candidate", "level_difference_db": 0.1},
+    {"track": "vocal-b", "preferred": "candidate", "level_difference_db": 0.1},
+    {"track": "vocal-a", "preferred": "baseline", "level_difference_db": 0.1},
+    {"track": "vocal-b", "preferred": "candidate", "level_difference_db": 0.1}]},
+  "volume": {"levels": [{"name": "quiet", "trials": []},
+                         {"name": "normal", "trials": []}]},
+  "rattles": {"events": [{"excitation_hz": 80, "repeat_confirmed": true,
+    "suspected_location": "left door"}]}
+}
+```
+
+The multitone captures must use **identical native frequency bins**, and
+`unexcited_hz` must name real, unexcited bins in both exports. Keep the source,
+stimulus spectrum, crest factor, mic, route and output level fixed. The
+two fundamental/output captures provide the level difference over the common
+100-1000 Hz portion and must be within 1 dB; compare residuals only after
+that level correction. At least 80% of bins must
+resolve 10 dB above it. A 3 dB median residual change is a conservative
+engineering decision margin, not a universal distortion audibility threshold.
+REW's dual-tone/multitone RTA exports can supply the spectra.
+
+For `stability`, measure cold, after an explicitly recorded playback duration,
+and recovered at the **same input and fixed mic**. The report flags a median
+loss greater than 0.5 dB as a time-dependent change. Check source/DSP limiting
+before attributing it to voice-coil heat. Do not assume a single sweep proves
+sustained output stability.
+
+For `crossovers`, first make bounded variants in `probe` with all affected
+junctions and local head positions. Manually load each candidate crossover in
+PC-Tool and capture the actual full-system response; this skill never writes
+crossovers. Provide a matching `quality-check` report with measured compression
+or distortion evidence. The candidate is held when any probe position trades
+off/rejects, measured clean-output evidence is missing or holds it, the measured
+tone gain is below 0.25 dB, or a supplied multitone/warm-output trial with
+the same name regresses. The 0.25 dB is a ranking margin, not proof of
+audibility. Confirm the survivor by blind, matched-level listening.
+
+`bass_area` runs the existing timed sub/front/together prediction at each
+listed point around the *same driver's head*, with identical trial settings.
+It selects by the worst position's score gain; every position must improve by
+more than 0.25 dB with no veto. Repeat MMM after loading the trial. Do not
+average solo phase or imply the predicted sum is a measurement.
+
+`stage` records at least four blinded, matched-level preferences across at
+least two tracks; `volume` repeats that protocol at named listening levels.
+Use `voice-match` on actual system captures for each preset/level before trials
+and verify the match by ear. A 3-of-4 result is a practical repeat check,
+not statistical proof. The report does not calculate a binaural image angle.
+
+`rattles` triages **repeat-confirmed** excitation frequencies to a physical
+inspection and repeat recording/listening after one reversible intervention.
+The event can be a trim buzz, enclosure leak or driver problem. No ordinary
+THD export is represented as specialist rub-and-buzz detection. A mechanical
+symptom takes priority over another EQ filter.
+
 ## Choose the correction path
 
 - **An existing tune:** start with `refine`. Add `--partner other_side.txt` for

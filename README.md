@@ -132,7 +132,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.18.0`) so you can tell whether an already-installed copy is current — open
+`1.19.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -711,6 +711,11 @@ also expose tonal judging scorecards. See
 manifest, capture protocol, decision margins and limitations.
 
 ## Audible tuning paths
+
+Version 1.19.0 adds `audible-study`, a measured finalist review covering acoustic
+crossover choices, multitone workload, sustained output, bass across the driver's
+head area, stage/volume preference trials and physical noise triage. See
+`helix-rew-tuner/references/audible_tuning.md` for its manifest and limits.
 
 Version 1.18.0 corrects the two known level-anchor cases and holds one reference
 through refinement and judging. `--partner` and `--limits` connect L/R and measured

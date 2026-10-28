@@ -52,6 +52,7 @@ directory (the folder holding `SKILL.md` and `requirements.txt`).
 | `stereo-propose` | Shared voicing plus limited side cuts, evaluated together from L/R captures. | `references/audible_tuning.md` |
 | `bass-trials` | Sub gain/delay/polarity trial directions from timed solos validated against the actual together capture. | `references/audible_tuning.md` |
 | `voice-match` | Level-match actual measured candidate system responses before blind preference tests. | `references/audible_tuning.md` |
+| `audible-study` | Compare measured crossover finalists, multitone workload, warm output, bass across the driver's head area, stage/volume listening, and repeatable physical noise symptoms. | `references/audible_tuning.md` |
 | `quality-check` | Evidence-aware candidate judging from a version-1 manifest: repeated tone captures, per-band compression, noise-qualified distortion, L/R regression and full-chain spectral headroom. Missing checks remain unknown. | `references/measurement_judging.md` |
 | `source-audit` | Is the signal entering the DSP level-independent? `--at ref.txt=0 down6.txt=-6 ...`; it names the source as the cause only with `--electrical`. | §Audit the source |
 | `imaging` | Image position against frequency from solo L/R (`--solo-l --solo-r`). `--near-side left` or `right` adds the centring options; `--bands emma` uses the EMMA instrument ranges. | §Image position is frequency-dependent |
