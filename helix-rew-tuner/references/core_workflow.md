@@ -72,6 +72,7 @@ settings and limits. Both only read.
 | `verify` | Did a written change land? Before vs after captures, `--dsp-rate`. | §MMM-first tuning |
 | `voice-variants` | Single-filter voicing variants of a finished tune, for a blind A/B. | §MMM-first tuning |
 | `emma-volume` / `noise-check` | EMMA's 6 dB-louder balance check / system noise (off vs on, playing silence). | §Preparing for EMMA |
+| `finish` | After the sum is on target: residual broad peaks (cut these, not dips), each EMMA instrument band imaging in one place (centre and focus), overlapping passbands between drivers at different heights (`--low`/`--high`), sub leakage and harmonics, bass decay (`--ir`). Writes nothing; each finding names its fix. | §Finishing touches after the curve |
 | `capture-audit` | Per-capture and whole-set checks from the files' own headers (length, movement noise, mic headroom, infrasound, triple playback level, stopbands, mixed settings, twin floors) and what each file can feed. `next` runs it. | §Capture audit |
 | `coherence` | Summation coherence per band from an A, B, A+B triple: coherent, power sum (alignment cannot change the tone) or cancelling. | §Summation coherence |
 | `mmm-align` | Junction delay/polarity predicted from four MMM captures (A, B, both, both with a known extra delay on B; or the flip form). Confirm a `candidate` with an `mmm-compare` capture, then plan it as a phase-only edit. | §Four-capture MMM alignment |
@@ -572,6 +573,11 @@ false, check the new tune was actually loaded before judging any band. Treat
 predicted change did not show up, the same "phase is eating this" signature
 `reaches_target_after_boost` flags before a write. Report the verdicts
 plainly; never re-tune around a reverted band without telling the user why.
+
+Once the bands are confirmed and the sum sits on the target, run `pipeline.py
+finish` on the new captures: it lists what still decides the sound, imaging
+per instrument, the last broad peaks, height and the sub (§Finishing touches
+after the curve,).
 
 ## Non-negotiables
 

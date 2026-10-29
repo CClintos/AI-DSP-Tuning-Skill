@@ -398,6 +398,28 @@ def next_steps(paths, afpx_path=None, target='default'):
             'per-block statistics of that pass: its own repeatability, robust mean and peak trace')
     for lg in logs:
         add('prefs --log %s' % _q(lg), 'your voicing preference from the logged blind A/Bs')
+    # finishing touches after the curve, from whatever this set holds
+    lefts = [c for c in solos if c['role']['side'] == 'left' and c['role']['stage'] in (None, 'EQ')]
+    rights = [c for c in solos if c['role']['side'] == 'right' and c['role']['stage'] in (None, 'EQ')]
+    sub_solo = next((c for c in plain if c['role']['driver'] == 'sub' and c['role']['side'] in (None, 'both')
+                     and c['role']['stage'] in (None, 'EQ') and not _T1.search(c['name'])), None)
+    bass_irs = [c for c in sweeps if c['role']['driver'] in ('sub', 'midbass')][:4]
+    parts = []
+    if full:
+        parts.append('--system %s' % p(full[0]))
+    if lefts and rights:
+        parts.append('--left %s --right %s' % (' '.join(p(c) for c in lefts), ' '.join(p(c) for c in rights)))
+    if sub_solo:
+        parts.append('--sub %s' % p(sub_solo))
+    if bass_irs:
+        parts.append('--ir %s' % ' '.join(p(c) for c in bass_irs))
+    if afpx_path:
+        parts.append('--afpx %s' % _q(afpx_path))
+    if parts:
+        floor_part = (' --floor ' + ' '.join(p(c) for c in solos)) if solos else ''
+        add('finish %s%s' % (' '.join(parts), floor_part),
+            'after the curve: residual low-Q peaks, each instrument band imaging in one place, '
+            'height overlaps, the sub and bass decay')
     if not triple_rows:
         missing.append('a cancel-check set (left, right, both): summation coherence and boost evidence')
     if not ambient and not solos:

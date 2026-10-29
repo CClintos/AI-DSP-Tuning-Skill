@@ -3071,6 +3071,23 @@ def main():
     cp.add_argument('--junction-hz', type=float, help='sub/midbass crossover when there is no --afpx')
     cp.add_argument('--out')
 
+    fi = sub.add_parser('finish', help='after the curve: residual peaks, image focus per instrument, '
+                                       'height overlaps, sub and bass decay (writes nothing)')
+    fi.add_argument('--system', help='full-system capture (MMM or sweep): residual low-Q peaks')
+    fi.add_argument('--left', nargs='+', help='left-side solo capture(s), power-summed')
+    fi.add_argument('--right', nargs='+', help='right-side solo capture(s), power-summed')
+    fi.add_argument('--floor', nargs='+', help='band-limited solos and/or a moving ambient capture')
+    fi.add_argument('--sub', help='sub-only capture; a .mdat sweep adds its harmonics')
+    fi.add_argument('--ir', nargs='+', help='impulse responses (file.mdat::sweep, .wav or text) for bass decay')
+    fi.add_argument('--afpx', help='the tune: overlapping passbands between driver pairs')
+    fi.add_argument('--low', nargs='+', type=int, help='channels mounted low (doors, kicks)')
+    fi.add_argument('--high', nargs='+', type=int, help='channels mounted high (dash, pillars)')
+    fi.add_argument('--target', default='default')
+    fi.add_argument('--voice', nargs='+')
+    fi.add_argument('--noise-db', type=float, default=0.3, help='capture repeatability for the peak floor')
+    fi.add_argument('--max-peaks', type=int, default=6)
+    fi.add_argument('--out')
+
     nx = sub.add_parser('next', help='audit what was captured and list the commands that apply')
     nx.add_argument('--captures', nargs='+', required=True,
                     help='files, folders or .mdat files (WAV recordings and ab_log.json are picked up too)')
@@ -3309,7 +3326,7 @@ def _dispatch(args):
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
                       'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match',
                       'verify', 'voice-variants', 'emma-volume', 'noise-check', 'bass-trials', 'voice-match', 'stereo-propose',
-                      'capture-plan', 'next', 'capture-audit', 'coherence', 'mmm-align', 'stability', 'xo-check',
+                      'capture-plan', 'next', 'finish', 'capture-audit', 'coherence', 'mmm-align', 'stability', 'xo-check',
                       'listening-level', 'road-noise', 'prefs', 'frames', 'test-signal',
                       'signal-analyze'):
         _check_report_out(args)
@@ -3317,6 +3334,7 @@ def _dispatch(args):
         import frames as frames_mod
         import signals as signals_mod
         import planner
+        import finish as finish_mod
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,
@@ -3326,6 +3344,7 @@ def _dispatch(args):
                   'noise-check': noise_check, 'bass-trials': audible.bass_trials,
                   'voice-match': audible.measured_voice_match, 'stereo-propose': audible.stereo_propose,
                   'capture-plan': planner.capture_plan_cmd, 'next': planner.next_cmd,
+                  'finish': finish_mod.finish_cmd,
                   'capture-audit': capture_audit.cli, 'coherence': mmm.coherence_cmd,
                   'mmm-align': mmm.align4_cmd, 'stability': mmm.stability_cmd,
                   'xo-check': mmm.xo_check_cmd, 'listening-level': mmm.listening_level_cmd,

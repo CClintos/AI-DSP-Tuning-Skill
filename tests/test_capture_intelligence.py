@@ -245,6 +245,18 @@ class MdatReader(_Tmp):
         self.assertAlmostEqual(rew["levels"]["below_22_db"], 67.3, places=1)
         self.assertEqual(rew["version"], "5.40 beta 127")
 
+    def test_distortion_arrays_put_the_fundamental_second(self):
+        # REW's harmData: an unidentified first array, then the fundamental,
+        # then H2, H3 ... (checked against the measured SPL on real files)
+        dist = mdat.JObject("roomeqwizard.DistortionData")
+        fund, h2, h3 = np.full(4, 100.0), np.full(4, 68.0), np.full(4, 63.0)
+        dist.fields["harmData"] = [np.full(4, -42.0), fund, h2, h3]
+        h = mdat._harmonics(dist)
+        np.testing.assert_array_equal(h["fundamental"], fund)
+        np.testing.assert_array_equal(h[2], h2)
+        np.testing.assert_array_equal(h[3], h3)
+        self.assertEqual(sorted(k for k in h if k != "fundamental"), [2, 3])
+
     def test_not_an_mdat_and_truncated_files_fail_in_one_line(self):
         bad = self.root / "x.mdat"
         bad.write_bytes(b"not java at all")

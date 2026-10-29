@@ -70,6 +70,7 @@ before correcting, and prefer doing less.**
   - [Learning the listener's voicing](#learning-the-listeners-voicing-from-blind-abs)
   - [Frame-level MMM](#frame-level-mmm-one-run-that-measures-its-own-repeatability)
   - [The skill's own test signals](#the-skills-own-test-signals-experimental)
+- [Finishing touches after the curve](#finishing-touches-after-the-curve)
 - [Refine the tune you have](#refine-the-tune-you-have-before-adding-to-it)
 - [Matched-loudness blind A/B](#judge-by-ear-only-at-matched-loudness-blind)
 - [Crossover what-ifs](#crossover-what-ifs-modelled-never-written)
@@ -1537,7 +1538,8 @@ reads it **by structure**: one `roomeqwizard.MeasData` object per
 measurement, each stating its own axis (`startFreq`, `logStep` or `freqStep`,
 `dataLength`), its unsmoothed `rawValues`, the RTA settings and level notes,
 the mic serial and cal curve, and for sweeps the impulse response, timing
-reference and delay, SNR, harmonics (`distortionData.harmData`, H2 up) and a
+reference and delay, SNR, the fundamental and harmonics (`distortionData.harmData`:
+its second array is the fundamental, then H2 up) and a
 per-frequency noise floor. Address a measurement as `file.mdat::Name` or
 `file.mdat::#3` anywhere a capture path is taken.
 
@@ -2286,6 +2288,61 @@ Limits: mic motion Doppler-shifts tones into neighbouring bins, a quarter bin
 near 210 Hz at 0.3 m/s; above `doppler_limit_hz` empty-bin readings are
 reported as leakage, never as distortion. Everything here is checked in
 simulation only, and none of it replaces a timed sweep for delays.
+
+## Finishing touches after the curve
+
+A target curve is a long-term average. Once the system sum sits on it, what
+listeners and judges respond to is imaging, the last broad peaks, how the bass
+joins the stage, and taste. `pipeline.py finish` reports each of these from the
+captures it is given and writes nothing; every finding names its fix and its
+evidence level.
+
+- **Cut residual broad peaks, not dips.** A peak is detected where an equal dip
+  goes unnoticed (Bücklein 1981), and low-Q resonances are audible at small
+  amplitudes (Toole & Olive 1988). `finish` lists peaks of the 1/6-octave
+  deviation above its two-octave trend, each with a fit band for `propose` or
+  `refine`, which validate the cut. Dips stay listed to leave alone until the
+  cancel check or the boost gate says they can be filled.
+- **One instrument, one place.** EMMA scores an instrument heard in two places
+  as zero. `finish` finds the image position (pull: +1 fully left, −1 fully
+  right; 16 dB or 1 ms is a full shift) in third-octave slices of each EMMA
+  instrument band: the mean is the centre, and the spread is the focus (up to
+  0.25 focused, up to 0.5 loose, above that smeared). A band can be centred on
+  average while its instrument is smeared. MMM gives the level cue only; timed
+  sweeps add time. Correct the hot side at the widest-swing slice only
+  (`stereo-propose`, `lr-match`), then confirm by ear.
+- **Keep the two sides phase-symmetric.** A low-frequency phase difference
+  between the sides moves the image (Møller et al. 2007: from about 30-35 µs);
+  the same phase on both sides is much less audible. A one-sided all-pass or
+  delay in the imaging band is an image decision, never a tonal one.
+- **Height is set by the crossover, not delay.** There is no precedence effect
+  in the vertical plane, and vertically separated drivers sharing the 1-4 kHz
+  octaves make height erratic (Wallis & Lee 2015). Low frequencies image near
+  ear height wherever the speaker is; high ones near the speaker that plays
+  them. So the high-mounted driver should own everything from a few hundred
+  hertz up: `finish --afpx --low <door channels> --high <dash/pillar channels>`
+  flags the overlap, `probe` models a new low-pass, and the user sets it in
+  PC-Tool. A broad +1-2 dB near 8 kHz (the band heard "above") is a blind A/B
+  height variant, not a correction.
+- **Focus or spaciousness, chosen on purpose.** Reflections (windshield, side
+  windows, a glass roof) and decorrelation widen and brighten the sound but
+  blur the image; absorption focuses it (Kaplanis et al. 2017). Competition
+  scoring rewards focus.
+- **Keep the sub hidden.** A sub is detected from about 80-120 Hz depending on
+  placement. What gives it away is output above that, rattles and harmonics:
+  `finish --sub` checks output above 120 Hz, and a `.mdat` sweep adds the
+  harmonics against Fielder & Benjamin's pure-tone limits (H2 about 3%, H3 about
+  1%, higher about 0.3%, at the level measured). Its timing is `mmm-align`,
+  `junction` or `bass-trials`.
+- **Bass ringing rarely limits a car, but check it when sweeps exist.**
+  Fazenda, Stephenson & Goldberg 2015 put the audible modal decay with music at
+  0.51 s at 63 Hz falling to 0.12 s at 250 Hz; `finish --ir` compares each
+  third-octave against it, and calls a band whose decay is no longer than the
+  analysis filter's own unresolvable (and far under the limit).
+- **Voice to the listener.** Preferred bass and treble differ by many dB between
+  listeners (trained listeners choose less of both), so the last tonal word
+  belongs to a blind, level-matched A/B (`voice-variants`, `ab-make`, `prefs`,
+  `listening-level`).
 
 ## Refine the tune you have before adding to it
 

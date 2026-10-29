@@ -133,7 +133,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.22.0`) so you can tell whether an already-installed copy is current — open
+`1.23.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -195,7 +195,9 @@ for real tuning sessions; a lighter model is fine for quick mechanical edits.
 (`pipeline.py capture-plan --goal tone lr bass --afpx yourtune.afpx`): the exact
 captures to make and how to name them, the REW settings, how many averages make
 each capture long enough, the level your mic can take, and the safety limits.
-Afterwards, point the agent at the files or the session `.mdat`
+Once the tune sits on the target, `pipeline.py finish` lists what still
+decides the sound: the last broad peaks, whether each instrument images in one
+place, stage height and the sub. Afterwards, point the agent at the files or the session `.mdat`
 (`pipeline.py next --captures <folder>`): it audits them and runs what they
 support. Short captures, mic-handling noise and mixed settings were the commonest
 problems in real sessions, and the plan prevents them.

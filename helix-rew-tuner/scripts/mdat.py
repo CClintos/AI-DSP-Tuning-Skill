@@ -348,14 +348,23 @@ def _date(ms):
 
 
 def _harmonics(dist):
+    """{'fundamental': dB, 2: H2 dB, 3: H3 dB, ...} on distortionData.freqs.
+
+    harmData's second array is the fundamental: it matches the measurement's
+    own SPL on every file checked (REW 5.31.3 and 5.40, Windows and macOS).
+    The arrays after it fall off as H2, H3 and up. The first array is not
+    identified (its values fit neither THD nor THD+N), so it is left out."""
     harm = dist.get('harmData') if isinstance(dist, JObject) else None
-    if not isinstance(harm, list):
+    if not isinstance(harm, list) or len(harm) < 3:
         return None
-    out = {}
-    for i, a in enumerate(harm):
-        if isinstance(a, np.ndarray) and a.size:
-            out[i + 2] = a
-    return out or None
+    arrays = [a if isinstance(a, np.ndarray) and a.size else None for a in harm]
+    if arrays[1] is None:
+        return None
+    out = {'fundamental': arrays[1]}
+    for order, a in enumerate(arrays[2:], start=2):
+        if a is not None:
+            out[order] = a
+    return out
 
 
 def _measurement(m, index):

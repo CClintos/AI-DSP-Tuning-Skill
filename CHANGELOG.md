@@ -2,6 +2,19 @@
 
 Newest first. Version numbers match `metadata.version` in `helix-rew-tuner/SKILL.md`.
 
+## 1.23.0
+
+`pipeline.py finish`: what still decides the sound once the system sum is on
+the target, from published psychoacoustics and the EMMA judging rules
+(`docs/research/2026-10-29-beyond-the-target-curve.md`). It lists residual
+broad peaks to cut (not dips), checks that each EMMA instrument band images in
+one place (centre and focus, from level and, with timed sweeps, time), flags
+overlapping passbands between drivers mounted at different heights, checks
+the sub for leakage above 120 Hz and harmonics against Fielder & Benjamin's
+limits, and compares bass decay with Fazenda et al.'s audibility thresholds.
+`next` suggests it. Also fixed: the `.mdat` reader labelled REW's distortion
+arrays off by one (the second array is the fundamental).
+
 ## 1.22.0
 
 Leaner where an agent reads, and two commands that prevent bad captures and

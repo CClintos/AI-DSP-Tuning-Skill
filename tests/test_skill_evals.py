@@ -449,6 +449,11 @@ class DoctrinePreservationTests(unittest.TestCase):
         "a fixed mic answers \"did a known dsp change land?\"",
         "run a predicted transfer through the same smoothing",
         "rear fill should arrive behind the front stage",
+        "cut residual broad peaks, not dips",
+        "one instrument, one place",
+        "keep the two sides phase-symmetric",
+        "height is set by the crossover, not delay",
+        "keep the sub hidden",
     )
 
     def test_core_workflow_carries_every_hard_rule(self):
