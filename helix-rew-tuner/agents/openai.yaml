@@ -1,4 +1,4 @@
-version: "1.20.0"
+version: "1.21.0"
 interface:
   display_name: "Helix REW Tuner"
   short_description: "Diagnose and tune car DSPs from REW data"

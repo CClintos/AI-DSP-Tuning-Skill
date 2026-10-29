@@ -59,6 +59,17 @@ before correcting, and prefer doing less.**
 - [Rear-fill / ambience measurement discipline](#rear-fill-ambience-channels-need-their-own-measurement-discipline)
 - [Preparing for EMMA judging](#preparing-for-emma-sound-quality-judging)
 - [MMM-first tuning](#mmm-first-tuning-the-short-path-for-tone-bass-level-and-lr-balance)
+- [Single-run MMM intelligence](#single-run-mmm-intelligence-what-one-capture-set-can-still-tell-you)
+  - [Capture audit](#capture-audit-read-what-every-capture-already-says)
+  - [The moving-mic noise floor](#the-moving-mic-noise-floor)
+  - [Summation coherence](#summation-coherence-from-the-cancel-check-triple)
+  - [Four-capture MMM alignment](#four-capture-mmm-alignment)
+  - [Bass stability from the peak trace](#bass-stability-from-the-peak-trace)
+  - [What the DSP actually applied](#what-the-dsp-actually-applied-raw-xo-eq)
+  - [Voicing for the listening level and the road](#voicing-for-the-listening-level-and-the-road)
+  - [Learning the listener's voicing](#learning-the-listeners-voicing-from-blind-abs)
+  - [Frame-level MMM](#frame-level-mmm-one-run-that-measures-its-own-repeatability)
+  - [The skill's own test signals](#the-skills-own-test-signals-experimental)
 - [Refine the tune you have](#refine-the-tune-you-have-before-adding-to-it)
 - [Matched-loudness blind A/B](#judge-by-ear-only-at-matched-loudness-blind)
 - [Crossover what-ifs](#crossover-what-ifs-modelled-never-written)
@@ -1792,24 +1803,25 @@ tonal correctness, not of balance.**
 
 ## Extracting distortion/coherence from a REW `.mdat` when only text exports were expected
 
-REW's SPL & Phase text export (what `measure.py` parses) carries magnitude and
-phase only. If a distortion, coherence, or raw-IR question comes up and only
-text exports exist, the answer may already be sitting in a `.mdat` the user
-also has — REW's binary Java-serialized measurement file (magic bytes
-`\xac\xed\x00\x05` + "REW Measurement Data File V2") carries all of that, per
-measurement, that the text export drops.
+REW's SPL & Phase text export carries magnitude and phase only. A `.mdat` —
+REW's Java object stream (magic `\xac\xed\x00\x05`, then "REW Measurement
+Data File V2") — carries everything per measurement, and `scripts/mdat.py`
+reads it **by structure**: one `roomeqwizard.MeasData` object per
+measurement, each stating its own axis (`startFreq`, `logStep` or `freqStep`,
+`dataLength`), its unsmoothed `rawValues`, the RTA settings and level notes,
+the mic serial and cal curve, and for sweeps the impulse response, timing
+reference and delay, SNR, harmonics (`distortionData.harmData`, H2 up) and a
+per-frequency noise floor. Address a measurement as `file.mdat::Name` or
+`file.mdat::#3` anywhere a capture path is taken.
 
-Rough layout, observed directly on a real file (not from REW documentation —
-treat as version/config-dependent and validate before trusting it on a
-different REW version): distortion is stored as one `1053`-point float32
-block per measurement = an explicit ascending frequency axis (`10 → ~19900`
-Hz), followed by ~10 more `1053`-point blocks = the fundamental and
-successive harmonics, in descending mean-level order (fundamental strongest).
-**Blocks for different measurements are NOT necessarily in the file in the
-same order the captures were taken** — match a block to its measurement by
-correlating its fundamental trace against that measurement's already-known
-SPL curve (from a paired text export, if one exists), not by position in the
-file.
+**Never pick float arrays out of the bytes by pattern.** The byte scanner
+this replaced took whichever large array came first: on an RTA file the
+615-point mic calibration curve, on a sweep file a 956-point distortion array
+on an axis 21% wrong — and its one-third-octave axis check passed both. The
+field meanings come from real files (REW 5.31.3 and 5.40 beta 127, Windows
+and macOS), not REW documentation: `mdat.py` refuses a file whose stated axis
+does not end where REW says (`endFreq`), and the user's own `.mdat` files hold
+local paths (cal files, user names) — scrub them before sharing one.
 
 **Listening-position THD from RTA/MMM-style captures is frequently an
 artifact, not driver stress — two specific traps:**
@@ -2422,6 +2434,230 @@ An identical re-export cannot count as an independent repeat. A
 are not a statistical confidence interval or proof that a judge will prefer
 the change. If results disagree, retain A and investigate. This is optional
 confirmation for small changes, not a new prerequisite for ordinary MMM.
+
+## Single-run MMM intelligence: what one capture set can still tell you
+
+An MMM capture is a power average over the head area, so it was treated as
+able to say only "the average level per band". It says more. Its header
+records how it was captured; its stopbands record the noise the moving mic
+made; three captures the cancel check already asks for hold the head-area
+cross term; REW's peak trace holds the spread; and a recording of the pass
+holds every block. The commands below read those. None of them writes a tune.
+
+### Capture audit: read what every capture already says
+
+Run `pipeline.py capture-audit --captures <files or a whole .mdat>` before
+analysing an MMM set. REW writes into every export and `.mdat`: the RTA
+resolution, FFT length, window and number of averages; the mic, its gain
+setting, input channel and input volume; the capture time; and calibrated
+levels (Input RMS, dB A, dB C, 22 Hz-22 kHz unweighted, above 22 kHz). The
+audit turns those into checks per capture and across the set:
+
+- **Settings.** Same mic serial and cal file, RTA resolution, FFT, window and
+  export smoothing across anything compared. A set that mixes them is
+  compared like with like or re-exported; smoothing one file of a cancel-check
+  triple changes its cancellation map. (Real set: one tweeter exported at
+  1/48 among eight unsmoothed files.)
+- **Length.** First FFT plus one hop per further average, at REW's overlap
+  for that FFT (87.5% at 64k): 32 averages is under 7 s. Under about 20 s the
+  pass has not covered the head area evenly.
+- **Movement noise.** Input RMS minus the 22 Hz-22 kHz and >22 kHz parts is the
+  energy below 22 Hz. In an MMM capture it is mic handling, cable and air
+  movement, and its tail fills the lowest bass bands. As loud as the signal
+  is a problem; then the bass of that capture is not evidence.
+- **Mic headroom.** Input RMS plus pink noise's ~12 dB crest against the
+  mic's clip point (forum-reported for the UMIK-1: about 115 dB SPL at 18 dB
+  gain, 121 dB at 12 dB). A sub at 108 dB SPL RMS clips the mic's peaks.
+- **Infrasound.** A sub capture with as much energy below 22 Hz as in band is
+  reproducing infrasound: check for a subsonic high-pass.
+- **Playback level in a triple.** The "both" capture sits near the power sum
+  of its halves in dB A (dB C too, unless movement noise dominates it).
+  Otherwise the volume moved and the triple is not a cancellation map.
+- **Stopbands.** Two octaves past a solo's passband edge the capture should
+  be floor. Within 20 dB of the passband there means another driver still
+  playing (below a high-pass) or rattle, distortion or interference (above a
+  low-pass). A low-passed solo whose level rises towards 20 kHz, or sits well
+  above the set's other low-passed solos there, carries interference or
+  system noise in the chain.
+- **Order and sittings** from the capture times (a gap over 20 minutes starts
+  a new sitting).
+
+The report ends with a table of what each file can feed (tone EQ above a
+measured noise limit, bass decisions, comparisons, the cancel check, absolute
+SPL) and why. `analyze`, `propose` and `refine` record the same automatic
+capture profile (`capture.auto_profile`) and add a note when the captures
+they were given differ in any of those settings; only what the files cannot
+say is left to ask: the noise type, mic aim, engine state, seat and path.
+
+### The moving-mic noise floor
+
+A static ambient capture measures the cabin with the mic still. Handling and
+air noise exist only while the mic moves, so they are missing from it. A
+band-limited solo's stopband is measured during real movement: the tweeter
+solo two octaves below its high-pass is the moving-mic floor for the bass.
+Pass the session's solos as `--noise-floor` (analyze, propose, refine; also
+`coherence --floor` and `xo-check --floor`). The highest floor per frequency
+gates the data, combined with `--ambient` when both are given. When two
+twins' floors differ by many dB (11-14 dB at 20-100 Hz between two tweeter
+solos of one real set), a left/right difference there is noise, not the
+speakers: the audit says so.
+
+### Summation coherence from the cancel-check triple
+
+From A, B and A+B at one playback level,
+
+    rho(f) = (P_AB - P_A - P_B) / (2 sqrt(P_A P_B))
+
+is the head-area average of the cosine of their phase difference (`pipeline.py
+coherence`; `analyze` adds it to each `--cancel-check`). Near +1 the parts add
+coherently wherever the mic went: delay and polarity change the tone there.
+Near 0 they add as a power sum: alignment cannot change the tone (it can
+still move the image), so the tonal fix is EQ or level. Below 0 they cancel
+on average: polarity or delay before any EQ, and never a boost. It is
+reported only where the parts are within 10 dB of each other and, with a
+floor, 10 dB above it; |rho| above 1.1 is impossible at one level and marks
+captures that do not share a level, or noise.
+
+### Four-capture MMM alignment
+
+With B delayed by tau, `P(tau) = P_A + P_B + 2 Re(C e^{j w tau})`, where
+`C = <a b*>` is the head-area cross-spectrum. The triple gives Re(C); one
+more capture with a known extra delay tau1 on B gives Im(C). With C,
+`pipeline.py mmm-align` predicts the head-area result of every delay, polarity
+and (with solos) gain on B, and ranks them.
+
+1. Capture A alone, B alone, both, and both again with tau1 added to B's
+   delay in PC-Tool (a quarter period at the band centre: about 3 ms for an
+   80 Hz junction). Undo tau1 afterwards. The flip form needs no solos: both,
+   both with B inverted, and those two again with tau1 (`--sum --diff
+   --sum-delayed --diff-delayed`).
+2. `mmm-align ... --tau1-ms 3 --band 50 130 [--dsp-rate HZ]` gives the best
+   change, how much it gains over the current setting, the worst bin, and
+   the head-area coherence.
+3. A `candidate` must be confirmed by one capture of it against a repeat of
+   the current setting (`mmm-compare --repeat`) before it is planned, and then
+   it goes through the normal phase-only plan: the user sees it in ms and in
+   samples at the confirmed rate, and no EQ joins it.
+
+Simulated on an image-source cabin (10 random cabins, each capture on its own
+random path, 0.15 dB RTA noise): at an 80 Hz sub/midbass junction the best
+setting was worth about 2.1 dB in the handover band and the four captures
+landed within 0.07 dB of it on average (flip form 0.05 dB). Above a few
+hundred Hz the field decorrelates across the head (coherence about 0.3 for
+L/R mono at 300-1200 Hz, 0.2 at a 2.5 kHz mid/tweeter junction) and the
+method honestly finds little to gain: alignment there is an imaging decision,
+judged by ear and by timed sweeps, not a tonal one. Real-car confirmation is
+still to come.
+
+### Bass stability from the peak trace
+
+REW's RTA keeps a peak trace, and "Save both" saves it beside the average.
+From one run, peak minus average per frequency tracks how much that frequency
+changes across the head area below 250 Hz (simulated r about 0.8 against the
+true spread, 0.7 against run-to-run change; about 0.1-0.2 above 250 Hz, so it
+is not used there). `pipeline.py stability --average AVG --peak PEAK` maps
+it; `--peak-trace PEAK` on a single-run `propose` or `refine` uses it as the
+confidence weight, so a stable modal peak can be cut with confidence and a
+null that moves with the head is left alone. The scale is relative within the
+run (the gap grows with the number of averages). Set peak hold to hold for the
+whole capture with no decay, and audit the capture first: a door thump lifts
+the peak.
+
+### What the DSP actually applied: RAW, XO, EQ
+
+Captures of one driver at one seat, path and level with its crossover and EQ
+bypassed (RAW), crossover on (XO) and both on (EQ) cancel the cabin in their
+differences: XO minus RAW is the crossover the DSP applied, EQ minus XO the
+PEQ. `pipeline.py xo-check --raw --xo [--eq] --afpx T --channel N --dsp-rate
+HZ` fits each section (Linkwitz-Riley or Butterworth, slope, corner) and
+compares it with the tune (or with `--hp/--lp/--peq` for a DSP this skill
+cannot read). Corners are compared at their -6 dB points, because a
+Butterworth corner is its -3 dB point and a Linkwitz-Riley corner -6 dB. A
+section showing no attenuation where the stated filter is already 3-12 dB
+down is `not_applied`. Pass `--floor`: movement noise in an XO capture's
+stopband otherwise reads as a shallower slope. The report records the
+PC-Tool characteristic index beside the measured family, which is how the
+unverified HPi/LPi codes get confirmed. It never writes a crossover; a
+section that differs is set by hand in PC-Tool.
+
+### Voicing for the listening level and the road
+
+**Listening level.** The ear loses bass faster than midrange as the level
+drops. `pipeline.py listening-level --capture SYSTEM [--volume-offset-db X]`
+takes the capture's calibrated dB C (or `--listening-db`) as the loudness
+level and returns the ISO 226:2003 contour difference against the level the
+target is assumed voiced at (`--reference-phon`, default 83), the low shelf
+that matches it, and its half-strength version. It also lists the
+third-octaves the capture itself played below the hearing threshold: one real
+full-system capture at 64 dBA put 20-31.5 Hz below it, so bass decisions
+from it covered sound nobody heard. The shelf is a taste option for a blind,
+level-matched A/B (`voice-variants`, `ab-make`), never a correction. Measure
+near the listening level too: it also beats the movement noise.
+
+**Road noise.** A capture at the seat while cruising, system off, **mic held
+by a passenger**, is the masking spectrum. Bands where music at the listening
+level sits near or under it lose loudness. `pipeline.py road-noise --noise
+ROAD --music SYSTEM` estimates the loss per band from the noise's share of
+the band power (a simplification of partial loudness) and fits a broad low
+shelf, capped at +4 dB. Write it with `voice-variants` as a separate file for
+a second preset and choose between the presets blind, on the road, switched
+by a passenger or the DSP remote at a stop — never by the driver while
+moving. It rebalances what the noise masks; it is not a reason to play louder.
+
+### Learning the listener's voicing from blind A/Bs
+
+`voice-variants --confirm` records each variant's knob values in
+`voice_variants.json`; `ab-result` logs each blind choice. `pipeline.py prefs
+--log ab_log.json --base TUNE` fits a paired-comparison (Bradley-Terry)
+model with a concave quadratic preference per knob (bass, treble, presence)
+and returns the preferred value with an 80% interval, and the next variant
+pair to test (around the least certain knob). Values outside the tested range
+are extrapolations; fewer than about 20 decided choices give wide intervals.
+The preferred values feed `--voice` as the taste layer on the target.
+
+### Frame-level MMM: one run that measures its own repeatability
+
+REW shows the mean of a capture's FFT blocks and discards them. Kept, the
+blocks of one run give the spread across the path, split-half repeatability
+(first half of the path against the second), a robust mean without handling
+bumps, the peak trace and the capture length. Two read-only sources:
+
+- a WAV recording of the mic during the pass, from any recorder:
+  `pipeline.py frames --wav PASS.wav --cal MIC_CAL.txt --out-dir D` (REW's RTA
+  can process the same WAV with Open WAV as a cross-check of the average);
+- REW itself: `rew_api.py rta-frames --seconds 30 --out frames.json` with RTA
+  averaging set to None polls the captured data by GET (each new sample count
+  is one block; no subscription is registered), then `frames --api-frames`.
+
+It writes mean, robust, peak and half-path text exports. `--positions HALF1
+HALF2 --capture mmm` then turns on the repeatability-gated paths from one
+capture: verify thresholds, `mmm-compare` resolution, Q above the single-run
+cap where the response is stable. Each half covers half the path, so the
+figure is conservative by about sqrt(2). Without `--spl-offset-db` levels are
+dBFS; the mic cal file's response correction is applied, its sensitivity not.
+
+### The skill's own test signals (experimental)
+
+`pipeline.py test-signal --kind ... --wav-out SIG.wav` writes a periodic
+signal with a known spectrum and a silent lead-in; play it from the car's
+USB source and record the mic through the whole file; `signal-analyze --wav
+REC.wav --spec SIG.wav.json` corrects the clock difference between player and
+recorder (to a fraction of a ppm in simulation), takes each period as one
+rectangular-window FFT, and reads every tone as a complex transfer value.
+
+- `multitone-empty` leaves every third bin empty: the empty bins measure
+  noise plus intermodulation at the playback level during the capture, and
+  the lead-in measures the noise alone with the same movement. In simulation,
+  1% cubic distortion lifted the empty bins 23-36 dB over the floor.
+- `lr-interleaved` puts left and right on alternate bins: one capture gives
+  both sides, their level difference per band, and the L+R sum predicted with
+  phase at the same positions (within 0.1 dB of the true comb in simulation).
+- Coherent averaging gives each band's field coherence across the path.
+
+Limits: mic motion Doppler-shifts tones into neighbouring bins, a quarter bin
+near 210 Hz at 0.3 m/s; above `doppler_limit_hz` empty-bin readings are
+reported as leakage, never as distortion. Everything here is checked in
+simulation only, and none of it replaces a timed sweep for delays.
 
 ## Refine the tune you have before adding to it
 

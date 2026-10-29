@@ -27,6 +27,19 @@
 # python pipeline.py voice-variants --afpx T --out-dir D --bass-channels .. --bass-db -1 1 [--confirm]
 # python pipeline.py emma-volume --normal judge.txt --loud judge_plus6.txt
 # python pipeline.py noise-check --off system_off.txt --on zero_bit.txt
+# python pipeline.py capture-audit --captures session.mdat [more files ...]
+# python pipeline.py coherence --a L.txt --b R.txt --together BOTH.txt [--floor solos...]
+# python pipeline.py mmm-align --a SUB --b MIDBASS --together BOTH --together-delayed BOTH_T1 --tau1-ms 3 --band 50 130
+# python pipeline.py stability --average AVG.txt --peak PEAK.txt
+# python pipeline.py xo-check --raw RAW --xo XO [--eq EQ] --afpx T --channel N --dsp-rate HZ
+# python pipeline.py listening-level --capture SYSTEM.txt [--volume-offset-db X]
+# python pipeline.py road-noise --noise ROAD.txt --music SYSTEM.txt
+# python pipeline.py prefs --log ab_log.json [--base current.afpx]
+# python pipeline.py frames --wav pass.wav [--cal mic.txt] --out-dir D
+# python pipeline.py test-signal --kind multitone-empty --out sig.wav
+# python pipeline.py signal-analyze --wav recording.wav --spec sig.wav.json
+#   any capture path may be a REW .mdat measurement: "session.mdat::LF Mid XO"
+#   or "session.mdat::#3"
 #   analyze/propose/refine also take: --capture mmm (each --positions file is a
 #   repeat MMM run, not a seat), --ambient noise.txt, --cancel-check A B BOTH,
 #   --accept-tilt
@@ -66,6 +79,7 @@ import measure
 import tunelib
 import judging
 import audible
+import capture_audit
 
 ASSETS_DEFAULT_TARGET = os.path.join(
     os.path.dirname(os.path.abspath(__file__)), '..', 'assets', 'default_incar_target.txt')
@@ -790,22 +804,44 @@ def _load_session(args, freqs):
         raise ValueError('need --measurement or --positions')
 
     ambient = None
-    if getattr(args, 'ambient', None):
-        fa, sa, _pa, _ca = measure.load_text_export(args.ambient)
-        amb_db = measure.resample_log(fa, sa, freqs)
+    floor_files = getattr(args, 'noise_floor', None) or []
+    if getattr(args, 'ambient', None) or floor_files:
+        # Static ambient and the moving-mic floor (band-limited solos' stopbands,
+        # measured while the mic moved): the higher one per bin gates the data.
+        amb_db = np.full_like(freqs, -np.inf)
+        amb_ok = np.zeros_like(freqs, dtype=bool)
+        if getattr(args, 'ambient', None):
+            fa, sa, _pa, _ca = measure.load_text_export(args.ambient)
+            amb_db = measure.resample_log(fa, sa, freqs)
+            amb_ok = measure.support_mask(fa, freqs)
+        moving = None
+        if floor_files:
+            import mmm
+            moving = mmm._floor(floor_files, freqs)
+            have = np.isfinite(moving)
+            amb_db = np.where(have, np.maximum(amb_db, np.where(have, moving, -np.inf)), amb_db)
+            amb_ok |= have
         raw = positions_db + ([primary_db] if args.measurement else [])
         ok, snr = tunelib.snr_support(np.min(np.vstack(raw), axis=0), amb_db,
                                       getattr(args, 'min_snr_db', 10.0))
-        ok &= measure.support_mask(fa, freqs)
+        ok = (ok & amb_ok) | ~amb_ok if not getattr(args, 'ambient', None) else ok & amb_ok
         lost = _mask_runs(freqs, support & ~ok)
-        live = support & ok
-        ambient = {'file': args.ambient, 'min_snr_db': getattr(args, 'min_snr_db', 10.0),
+        live = support & ok & amb_ok
+        ambient = {'file': getattr(args, 'ambient', None), 'moving_floor_files': floor_files or None,
+                   'min_snr_db': getattr(args, 'min_snr_db', 10.0),
                    'excluded_hz': lost,
                    'median_snr_db': round(float(np.median(snr[live])), 1) if np.any(live) else None}
         if lost:
-            notes.append('excluded where the capture is less than %.0f dB above the ambient '
-                         'capture (an RTA adds the noise in, so a dip there can be noise-filled): '
-                         '%s' % (ambient['min_snr_db'], ', '.join(lost)))
+            notes.append('excluded where the capture is less than %.0f dB above the %s '
+                         '(an RTA adds the noise in, so a dip there can be noise-filled): %s'
+                         % (ambient['min_snr_db'],
+                            'ambient capture' if not floor_files else
+                            'moving-mic noise floor' if not getattr(args, 'ambient', None) else
+                            'higher of the ambient and moving-mic floors', ', '.join(lost)))
+        if not floor_files and capture == 'mmm':
+            notes.append('the ambient capture is static: mic-movement noise exists only while the '
+                         'mic moves -- add --noise-floor <band-limited solos> (their stopbands are '
+                         'a moving-mic floor), or capture the ambient with the same movement')
         support &= ok
 
     if not np.all(support) and np.any(support):
@@ -845,6 +881,24 @@ def _load_session(args, freqs):
     authority = sc if len(positions_db) >= 3 else None
     conf = authority['conf'] * support if authority else None
     mask = authority['mask'] & support if authority else (None if np.all(support) else support)
+    stability = None
+    peak_trace = getattr(args, 'peak_trace', None)
+    if peak_trace:
+        if capture != 'mmm':
+            raise ValueError('--peak-trace is the RTA peak of an MMM capture: pass --capture mmm')
+        if conf is not None:
+            notes.append('--peak-trace ignored: 3+ runs already give a measured spatial confidence')
+        else:
+            import mmm
+            base_path = args.measurement or args.positions[0]
+            conf = mmm.stability_conf(freqs, base_path, peak_trace, support)
+            moving = (freqs <= 250.0) & support & (conf <= 0.5)
+            stability = {'peak_trace': peak_trace, 'average': base_path,
+                         'moving_hz': _mask_runs(freqs, moving)}
+            notes.append('bass below 250 Hz weighted by the peak trace\'s stability%s'
+                         % (': moves with head position at ' + ', '.join(stability['moving_hz'])
+                            if stability['moving_hz'] else ' (nothing moves much)'))
+    auto = _auto_profile(args, notes)
     anchor_conf = conf if conf is not None else support.astype(float)
     anchor = tunelib.target_anchor_offset(freqs, basis_db, target_db, confidence=anchor_conf)
     validated = tunelib.validated_anchor_offset(freqs, basis_db, target_db, confidence=anchor_conf)
@@ -861,8 +915,45 @@ def _load_session(args, freqs):
         'duplicates': duplicates, 'notes': notes,
         'anchor': anchor, 'dev_db': basis_db - (target_db + anchor),
         'capture': capture, 'repeatability': repeatability, 'ambient': ambient,
-        'profile': profile,
+        'profile': profile, 'auto_profile': auto, 'stability': stability,
     }
+
+
+def _session_paths(args):
+    paths = list(args.positions or [])
+    if getattr(args, 'measurement', None):
+        paths.append(args.measurement)
+    for files in getattr(args, 'cancel_check', None) or []:
+        paths.extend(files)
+    return list(dict.fromkeys(paths))
+
+
+def _auto_profile(args, notes):
+    """The capture setup the files' own headers state (capture_audit), and
+    notes where the captures being compared were made differently."""
+    paths = _session_paths(args)
+    if not paths:
+        return None
+    caps = []
+    for p in paths:
+        try:
+            caps.append(capture_audit.load_capture(p))
+        except (ValueError, OSError):
+            continue
+    if not caps:
+        return None
+    auto = capture_audit.auto_profile(caps)
+    for key, vals in auto['differs'].items():
+        if key in ('rta', 'export_smoothing', 'mic_serial', 'mic_cal_file', 'fft_length', 'window',
+                   'input_volume'):
+            notes.append('the captures differ in %s (%s): compare like with like -- run '
+                         'capture-audit' % (key.replace('_', ' '), '; '.join(
+                             '%s: %d file(s)' % (v, len(n)) for v, n in vals.items())))
+    for cap in caps:
+        for flag in capture_audit.check_capture(cap)[0]:
+            if flag['level'] == 'problem':
+                notes.append('%s: %s' % (cap['name'], flag['text']))
+    return auto
 
 
 def _load_capture_profile(args, notes):
@@ -947,6 +1038,18 @@ def _cancel_checks(args, freqs):
     return checks
 
 
+def _triple_coherence(files, args):
+    """Summation coherence per third-octave from a cancel-check triple, gated
+    by the parts' shared passband and the session's noise floor."""
+    import mmm
+    floor = list(getattr(args, 'noise_floor', None) or [])
+    if getattr(args, 'ambient', None):
+        floor.append(args.ambient)
+    rows, _floor, _band = mmm.triple_rows(list(files), floor or None,
+                                          getattr(args, 'min_snr_db', 10.0))
+    return [r for r in rows if r['verdict'] != 'not_reported']
+
+
 def _cancel_verdict(freqs, checks, F, Q):
     order = {'ALLOW': 0, 'WARN': 1, 'BLOCK': 2}
     verdict = 'ALLOW'
@@ -963,7 +1066,8 @@ def _capture_report(sess, tilt):
             'repeatability': public,
             'verification_noise_db': (public or {}).get('noise_db'),
             'rta_tilt': tilt, 'ambient': sess['ambient'],
-            'profile': sess.get('profile')}
+            'profile': sess.get('profile'), 'auto_profile': sess.get('auto_profile'),
+            'stability': sess.get('stability')}
 
 
 MMM_SINGLE_RUN_Q_MAX = 4.0
@@ -1054,7 +1158,8 @@ def analyze(args):
     report['capture'] = _capture_report(sess, tilt)
     cancel = _cancel_checks(args, freqs)
     if cancel:
-        report['cancellation'] = [{'files': c['files'], 'cancellation_hz': c['cancellation_hz']}
+        report['cancellation'] = [{'files': c['files'], 'cancellation_hz': c['cancellation_hz'],
+                                   'coherence': _triple_coherence(c['files'], args)}
                                   for c in cancel]
     report['meta'] = {
         'measurement_file': args.measurement,
@@ -2261,7 +2366,7 @@ def voice_variants(args):
         loud = tunelib.loudness_change_db(freqs, program, program + shelf)
         name = '%s%+.2fdB' % (kind, step)
         path = os.path.join(out_dir, name + '.afpx')
-        row = {'variant': name, 'file': path, 'edits': edits,
+        row = {'variant': name, 'file': path, 'edits': edits, 'knobs': {kind: step},
                'loudness_status': 'provisional: use voice-match on actual candidate system captures',
                'predicted_loudness_change_db': round(loud, 2),
                'ab_make': ('pipeline.py ab-make --a %s --b %s --loudness-db %.2f --out-dir '
@@ -2278,6 +2383,17 @@ def voice_variants(args):
                     json.dump(plan, fh)
                 row['manifest_output_sha256'] = apply_plan(plan_path)['output_sha256']
         rows.append(row)
+    if args.confirm:
+        # The knob values let `prefs` learn from the blind A/Bs these files go into.
+        manifest = os.path.join(out_dir, 'voice_variants.json')
+        known = {'version': 1, 'variants': []}
+        if os.path.exists(manifest):
+            with open(manifest, encoding='utf-8') as fh:
+                known = json.load(fh)
+        known['variants'].extend({'file': r['file'], 'base': os.path.abspath(args.afpx),
+                                  'knobs': r['knobs']} for r in rows)
+        with open(manifest, 'w', encoding='utf-8') as fh:
+            json.dump(known, fh, indent=2)
     return {'meta': {'afpx': args.afpx, 'out_dir': out_dir, 'written': bool(args.confirm)},
             'variants': rows,
             'notes': ['each variant changes one shelf; the original tune is untouched',
@@ -2690,6 +2806,12 @@ def _capture_args(parser):
     parser.add_argument('--capture-profile', metavar='JSON',
                         help='the recorded REW setup (analyzer, noise, FFT, playback route, '
                              'mic cal/aim ...), checked against REW\'s rules')
+    parser.add_argument('--noise-floor', nargs='+', metavar='FILE',
+                        help='band-limited solo captures (their stopbands give the moving-mic '
+                             'noise floor) and/or an ambient capture made with the same movement')
+    parser.add_argument('--peak-trace', metavar='FILE',
+                        help='REW RTA peak trace of the same single MMM run ("Save both"): '
+                             'weights bass below 250 Hz by how much it moves')
 
 
 def main():
@@ -2929,6 +3051,129 @@ def main():
                     help='the exports are direct-sound (decay.py fdw) responses')
     jn.add_argument('--out')
 
+    ca = sub.add_parser('capture-audit', help='what each capture can feed, read from its own header')
+    ca.add_argument('--captures', nargs='+', required=True,
+                    help='text exports, file.mdat::name, or whole .mdat files')
+    ca.add_argument('--labels', nargs='+', help='names to use instead of the files\' own')
+    ca.add_argument('--band', nargs='+', metavar='NAME=LO,HI',
+                    help='passband of a solo whose name does not say which driver it is')
+    ca.add_argument('--triple', nargs=3, action='append', metavar=('A', 'B', 'BOTH'),
+                    help='a cancel-check set by capture name (default: found from the names)')
+    ca.add_argument('--overlap', type=float, help='RTA overlap if not REW\'s maximum (0-1)')
+    ca.add_argument('--min-length-s', type=float, default=capture_audit.MIN_CAPTURE_S)
+    ca.add_argument('--out')
+
+    co = sub.add_parser('coherence', help='summation coherence from an A, B, A+B triple')
+    co.add_argument('--a', required=True)
+    co.add_argument('--b', required=True)
+    co.add_argument('--together', required=True)
+    co.add_argument('--floor', nargs='+', help='band-limited solos and/or a moving ambient capture')
+    co.add_argument('--min-snr-db', type=float, default=10.0)
+    co.add_argument('--out')
+
+    a4 = sub.add_parser('mmm-align', help='junction delay/polarity from four MMM captures (writes nothing)')
+    a4.add_argument('--a', help='part A alone (e.g. the sub)')
+    a4.add_argument('--b', help='part B alone (e.g. the midbass): the side that gets delayed')
+    a4.add_argument('--together', help='A and B together')
+    a4.add_argument('--together-delayed', help='A and B together with --tau1-ms added to B')
+    a4.add_argument('--sum', help='flip form: A and B together')
+    a4.add_argument('--diff', help='flip form: A and B together with B inverted')
+    a4.add_argument('--sum-delayed', help='flip form: together, B delayed by --tau1-ms')
+    a4.add_argument('--diff-delayed', help='flip form: B inverted and delayed by --tau1-ms')
+    a4.add_argument('--tau1-ms', type=float, required=True,
+                    help='the extra delay added to B for the delayed capture(s)')
+    a4.add_argument('--band', nargs=2, type=float, required=True, metavar=('LO_HZ', 'HI_HZ'))
+    a4.add_argument('--max-delay-ms', type=float)
+    a4.add_argument('--step-ms', type=float, default=0.05)
+    a4.add_argument('--gains-db', nargs='+', type=float, default=[0.0])
+    a4.add_argument('--no-invert', action='store_true')
+    a4.add_argument('--noise-db', type=float, default=0.3,
+                    help='capture repeatability (default 0.3 dB)')
+    a4.add_argument('--smooth', type=float, default=12.0,
+                    help='power smoothing, 1/N octave (default 12; 0 = none)')
+    a4.add_argument('--dsp-rate', type=float, help='CONFIRMED DSP rate, to show samples')
+    a4.add_argument('--out')
+
+    st = sub.add_parser('stability', help='bass stability from one run\'s RTA peak trace')
+    st.add_argument('--average', required=True)
+    st.add_argument('--peak', required=True)
+    st.add_argument('--band', nargs=2, type=float, default=(20.0, 250.0))
+    st.add_argument('--out')
+
+    xc = sub.add_parser('xo-check', help='the crossover and PEQ the DSP applied, from RAW/XO/EQ captures')
+    xc.add_argument('--raw', required=True, help='driver with crossover and EQ bypassed')
+    xc.add_argument('--xo', required=True, help='crossover on, EQ bypassed')
+    xc.add_argument('--eq', help='crossover and EQ on')
+    xc.add_argument('--afpx', help='the tune the captures were made through')
+    xc.add_argument('--channel', type=int, help='channel index in --afpx')
+    xc.add_argument('--hp', metavar='HZ,SLOPE', help='stated high-pass, without an .afpx')
+    xc.add_argument('--lp', metavar='HZ,SLOPE', help='stated low-pass, without an .afpx')
+    xc.add_argument('--peq', nargs='+', metavar='F,Q,G', help='stated PEQ bank, without an .afpx')
+    xc.add_argument('--dsp-rate', type=float, required=True,
+                    help='the CONFIRMED DSP sample rate in Hz')
+    xc.add_argument('--floor', nargs='+', help='band-limited solos and/or a moving ambient capture')
+    xc.add_argument('--noise-db', type=float, default=0.3)
+    xc.add_argument('--out')
+
+    ll = sub.add_parser('listening-level', help='ISO 226 voicing option for your listening level')
+    ll.add_argument('--capture', help='calibrated full-system RTA capture (its header levels)')
+    ll.add_argument('--volume-offset-db', type=float, default=0.0,
+                    help='your listening volume minus the capture volume, dB')
+    ll.add_argument('--listening-db', type=float, help='or: your listening level directly (dB C)')
+    ll.add_argument('--reference-phon', type=float, default=83.0,
+                    help='level the target is assumed voiced at (default 83)')
+    ll.add_argument('--max-db', type=float, default=6.0)
+    ll.add_argument('--out')
+
+    rn = sub.add_parser('road-noise', help='a driving voicing option from a road-noise capture')
+    rn.add_argument('--noise', required=True, help='RTA while cruising, system off (passenger holds the mic)')
+    rn.add_argument('--music', required=True, help='full-system pink-noise capture')
+    rn.add_argument('--listening-offset-db', type=float, default=0.0,
+                    help='your listening volume minus the --music capture volume, dB')
+    rn.add_argument('--max-db', type=float, default=4.0)
+    rn.add_argument('--out')
+
+    pf = sub.add_parser('prefs', help='your voicing preferences from logged blind A/Bs')
+    pf.add_argument('--log', nargs='+', required=True, help='ab_log.json file(s)')
+    pf.add_argument('--base', help='the base tune the variants were made from (knobs 0)')
+    pf.add_argument('--knobs', nargs='+', metavar='PATH=bass:X,treble:Y',
+                    help='knob values for tunes the manifest/name does not describe')
+    pf.add_argument('--out')
+
+    fr = sub.add_parser('frames', help='per-block statistics of one MMM run (WAV or REW frames)')
+    fr.add_argument('--wav', help='mic recording made during the MMM pass')
+    fr.add_argument('--api-frames', help='rew_api.py rta-frames output')
+    fr.add_argument('--cal', help='mic calibration file (applied to the WAV)')
+    fr.add_argument('--fft', type=int, default=65536)
+    fr.add_argument('--overlap', type=float)
+    fr.add_argument('--rta-fraction', type=int, default=48)
+    fr.add_argument('--spl-offset-db', type=float, help='dBFS to dB SPL, if known')
+    fr.add_argument('--channel', type=int)
+    fr.add_argument('--name', help='file name stem for the outputs')
+    fr.add_argument('--out-dir', required=True)
+    fr.add_argument('--out')
+
+    ts = sub.add_parser('test-signal', help='EXPERIMENTAL: write a periodic test-signal WAV')
+    ts.add_argument('--kind', choices=('pink-periodic', 'multitone-empty', 'lr-interleaved'),
+                    required=True)
+    ts.add_argument('--wav-out', required=True, help='new .wav path (a .json description goes beside it)')
+    ts.add_argument('--rate', type=int, default=48000)
+    ts.add_argument('--fft', type=int, default=65536)
+    ts.add_argument('--seconds', type=float, default=45.0)
+    ts.add_argument('--level-dbfs', type=float, default=-15.0)
+    ts.add_argument('--seed', type=int, default=1)
+    ts.add_argument('--lo', type=float, default=15.0)
+    ts.add_argument('--hi', type=float, default=20000.0)
+    ts.add_argument('--empty-every', type=int, default=3)
+    ts.add_argument('--lead-in', type=float, default=3.0)
+
+    sga = sub.add_parser('signal-analyze', help='EXPERIMENTAL: analyse a recording of a test signal')
+    sga.add_argument('--wav', required=True)
+    sga.add_argument('--spec', required=True, help='the .json written beside the test signal')
+    sga.add_argument('--channel', type=int)
+    sga.add_argument('--hand-speed', type=float, default=0.3, help='mic speed, m/s')
+    sga.add_argument('--out')
+
     se = sub.add_parser('session', help='read or record the intake session sidecar')
     se_sub = se.add_subparsers(dest='session_cmd', required=True)
     se_check = se_sub.add_parser('check', help='compare the sidecar against the tune hash')
@@ -3033,8 +3278,14 @@ def _dispatch(args):
         print(json.dumps(apply_plan(args.plan), indent=2))
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
                       'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match',
-                      'verify', 'voice-variants', 'emma-volume', 'noise-check', 'bass-trials', 'voice-match', 'stereo-propose'):
+                      'verify', 'voice-variants', 'emma-volume', 'noise-check', 'bass-trials', 'voice-match', 'stereo-propose',
+                      'capture-audit', 'coherence', 'mmm-align', 'stability', 'xo-check',
+                      'listening-level', 'road-noise', 'prefs', 'frames', 'test-signal',
+                      'signal-analyze'):
         _check_report_out(args)
+        import mmm
+        import frames as frames_mod
+        import signals as signals_mod
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,
@@ -3042,14 +3293,28 @@ def _dispatch(args):
                   'lr-match': lr_match, 'verify': verify,
                   'voice-variants': voice_variants, 'emma-volume': emma_volume,
                   'noise-check': noise_check, 'bass-trials': audible.bass_trials,
-                  'voice-match': audible.measured_voice_match, 'stereo-propose': audible.stereo_propose}[args.cmd](args)
-        text = json.dumps(report, indent=2)
-        if args.out:
+                  'voice-match': audible.measured_voice_match, 'stereo-propose': audible.stereo_propose,
+                  'capture-audit': capture_audit.cli, 'coherence': mmm.coherence_cmd,
+                  'mmm-align': mmm.align4_cmd, 'stability': mmm.stability_cmd,
+                  'xo-check': mmm.xo_check_cmd, 'listening-level': mmm.listening_level_cmd,
+                  'road-noise': mmm.road_noise_cmd, 'prefs': mmm.prefs_cmd,
+                  'frames': frames_mod.run, 'test-signal': signals_mod.make_cmd,
+                  'signal-analyze': signals_mod.analyze_cmd}[args.cmd](args)
+        text = json.dumps(report, indent=2, default=_json_default)
+        if getattr(args, 'out', None):
             with open(args.out, 'w', encoding='utf-8') as fh:
                 fh.write(text)
             print('wrote %s' % args.out)
         else:
             print(text)
+
+
+def _json_default(value):
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    raise TypeError('%r is not JSON serialisable' % type(value).__name__)
 
 
 if __name__ == '__main__':

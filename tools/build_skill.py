@@ -17,7 +17,7 @@ ARCHIVE_NAME = f"{SKILL_DIR_NAME}.skill"
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 TEXT_SUFFIXES = {".json", ".md", ".py", ".toml", ".txt", ".yaml", ".yml"}
 
-SKILL_VERSION = "1.20.0"
+SKILL_VERSION = "1.21.0"
 
 SKILL_WRAPPER = f"""\
 ---
@@ -51,6 +51,7 @@ not confirmed edit by edit.
 | Anything with an Alpine `.jssh` | `references/alpine_jssh_format.md` in full, then core_workflow | Beta: run its real-file preflight before any write. |
 | Only to read a tune (channel map, filters, delays) | this file | `scripts/afpx.py inspect <file>`. Roles are inferred from crossovers, so ask the user to confirm them. |
 | Only to look at REW files, no tune file yet | core_workflow steps 1-3b | Analysis only; nothing is written. |
+| To check MMM captures, or read a `.mdat` | core_workflow step 2 | `pipeline.py capture-audit --captures <files or session.mdat>`. |
 | The reason behind a rule, or how to judge an unusual case | the methodology.md section core_workflow names | Open that section, not the whole file (about 170 KB). |
 
 ## Running the scripts

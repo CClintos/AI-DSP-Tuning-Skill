@@ -206,6 +206,10 @@ def channel_summary(block):
     return {
         'slots': slots,
         'hp_hz': hp_f, 'lp_hz': lp_f, 'inferred_role': role,
+        # Slope in dB/oct: a crossover filter's G holds it (VERIFIED 2026-07-07,
+        # see above). None when the section is not engaged.
+        'hp_slope_db_oct': abs(float(hp['G'])) if hp_engaged else None,
+        'lp_slope_db_oct': abs(float(lp['G'])) if lp_engaged else None,
         # Alignment/characteristic index -- AUTHORITATIVE, unlike the Q below.
         'hp_char_idx': hp_char_idx, 'lp_char_idx': lp_char_idx,
         # Stored crossover Q. Only live when Characteristic == "Self-define"

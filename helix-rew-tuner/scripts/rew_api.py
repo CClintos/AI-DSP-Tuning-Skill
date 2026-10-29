@@ -29,13 +29,33 @@
 # Enable the API in REW: Preferences -> API (or start REW with -api); default
 # address http://127.0.0.1:4735.
 #
+# RTA and metadata reads (GET only, documented in REW's API help; the exact
+# JSON field names of the RTA structures are not documented, so they are
+# looked up defensively and the raw objects are kept in the output):
+#   GET /rta/configuration             mode, FFT, window, overlap, averaging
+#   GET /rta/status, /rta/levels       running state; nanosecond timestamp and the
+#                                      running sample count (exact capture length)
+#   GET /rta/captured-data, /rta/captured-peak-data
+#                                      the RTA average and its peak trace
+#   GET /measurements/{id}             notes, cal paths, offsets
+#   GET /measurements/{id}/distortion  harmonic distortion table
+#   GET /eq/house-curve                path of REW's house curve (usable as --target)
+# `rta-frames` polls captured-data with RTA averaging set to None, so each new
+# sample count is one block: per-block data from GETs, with no subscription
+# (a subscription would register a callback in REW, which this bridge never does).
+#
 # CLI:
 #   python rew_api.py list
 #   python rew_api.py export "FL tweeter" --out fl_tw.txt
 #   python rew_api.py export "FL tweeter" --out fl_tw_direct.txt --direct-sound
+#   python rew_api.py rta-config | rta-status | house-curve | info "FL tweeter"
+#   python rew_api.py rta-capture --out avg.txt [--peak-out peak.txt]
+#   python rew_api.py rta-frames --seconds 30 --out frames.json
+#   python rew_api.py distortion "FL tweeter" --out fl_tw_dist.json
 import argparse
 import base64
 import json
+import os
 import re
 import sys
 import urllib.error
@@ -155,6 +175,114 @@ class RewClient:
             'signal_to_noise_db': m.get('signal_to_noise_db')}
 
 
+def _pick(d, *names):
+    """First present key among `names`, case-insensitively (REW's RTA field
+    names are not documented)."""
+    if not isinstance(d, dict):
+        return None
+    low = {str(k).lower(): v for k, v in d.items()}
+    for n in names:
+        if n.lower() in low and low[n.lower()] is not None:
+            return low[n.lower()]
+    return None
+
+
+def response_arrays(d, what):
+    """(freqs, magnitude) of a REW FrequencyResponse object."""
+    if not isinstance(d, dict) or not isinstance(_pick(d, 'magnitude'), str):
+        raise RewError('%s returned no frequency response -- is the RTA running and has it '
+                       'captured data? (%s)' % (what, str(d)[:160]))
+    mag = decode_floats(_pick(d, 'magnitude'))
+    start = _pick(d, 'startFreq')
+    ppo, step = _pick(d, 'ppo'), _pick(d, 'freqStep')
+    if start is None or not (ppo or step):
+        raise RewError('%s has no startFreq with ppo or freqStep' % what)
+    n = np.arange(len(mag))
+    f = float(start) * 2 ** (n / float(ppo)) if ppo else float(start) + n * float(step)
+    return f, mag
+
+
+def find_setting(obj, fragment):
+    """(key path, value) pairs whose key contains `fragment`, anywhere in obj."""
+    out = []
+
+    def walk(o, path):
+        if isinstance(o, dict):
+            for k, v in o.items():
+                p = '%s.%s' % (path, k) if path else str(k)
+                if fragment.lower() in str(k).lower() and not isinstance(v, (dict, list)):
+                    out.append((p, v))
+                walk(v, p)
+        elif isinstance(o, list):
+            for i, v in enumerate(o):
+                walk(v, '%s[%d]' % (path, i))
+    walk(obj, '')
+    return out
+
+
+class RtaReader:
+    """GET-only reads of REW's RTA and measurement metadata."""
+
+    def __init__(self, client):
+        self.c = client
+
+    def configuration(self):
+        return self.c._get('/rta/configuration')
+
+    def status(self):
+        return self.c._get('/rta/status')
+
+    def levels(self, unit=None):
+        return self.c._get('/rta/levels', {'unit': unit})
+
+    def captured(self, peak=False, unit=None):
+        path = '/rta/captured-peak-data' if peak else '/rta/captured-data'
+        d = self.c._get(path, {'unit': unit})
+        f, mag = response_arrays(d, path)
+        return f, mag, {'timestamp_ns': _pick(d, 'timestamp', 'timeStamp', 'timestampNs'),
+                        'sample_count': _pick(d, 'sampleCount', 'samples', 'count'),
+                        'smoothing': _pick(d, 'smoothing'), 'unit': _pick(d, 'unit') or unit or 'SPL'}
+
+    def measurement(self, ref):
+        m = self.c.resolve(ref)
+        return self.c._get('/measurements/%s' % urllib.parse.quote(m['uuid'], safe=''))
+
+    def distortion(self, ref, ppo=None, unit=None):
+        m = self.c.resolve(ref)
+        return self.c._get('/measurements/%s/distortion' % urllib.parse.quote(m['uuid'], safe=''),
+                           {'ppo': ppo, 'unit': unit})
+
+    def house_curve(self):
+        return self.c._get('/eq/house-curve')
+
+
+def poll_frames(reader, seconds, interval=0.1, sleep=None, clock=None):
+    """Successive captured-data snapshots with distinct sample counts. With RTA
+    averaging set to None each one is a single block."""
+    import time
+    sleep = sleep or time.sleep
+    clock = clock or time.monotonic
+    frames, last, f0 = [], None, None
+    end = clock() + seconds
+    while clock() < end:
+        f, mag, meta = reader.captured()
+        key = meta['sample_count'] if meta['sample_count'] is not None else meta['timestamp_ns']
+        if key is None or key != last:
+            if f0 is None:
+                f0 = f
+            if len(f) == len(f0):
+                frames.append({'sample_count': meta['sample_count'], 'timestamp_ns': meta['timestamp_ns'],
+                               'db': [round(float(x), 3) for x in mag]})
+            last = key
+        sleep(interval)
+    return f0, frames
+
+
+def _refuse_existing(path):
+    if os.path.exists(path):
+        raise RewError('%s already exists -- choose a new file name' % path)
+
+
 def _write_text(path, f, spl, phase, header_lines):
     with open(path, 'w', encoding='utf-8') as fh:
         for line in header_lines:
@@ -180,9 +308,73 @@ def _main(argv=None):
     ex.add_argument('--direct-sound', action='store_true',
                     help='frequency-dependent window from the IR (decay.fdw_response)')
     ex.add_argument('--cycles', type=float, default=8.0)
+    for name, why in (('rta-config', 'the RTA setup (FFT, window, overlap, averaging)'),
+                      ('rta-status', 'whether the RTA is enabled and running'),
+                      ('house-curve', 'the house curve file REW is using')):
+        sub.add_parser(name, help=why)
+    inf = sub.add_parser('info', help="one measurement's notes, cal paths and offsets")
+    inf.add_argument('measurement')
+    rc = sub.add_parser('rta-capture', help='the RTA average (and peak) as text exports')
+    rc.add_argument('--out', required=True)
+    rc.add_argument('--peak-out')
+    rf = sub.add_parser('rta-frames', help='per-block RTA data by polling (averaging None)')
+    rf.add_argument('--seconds', type=float, default=30.0)
+    rf.add_argument('--interval', type=float, default=0.1)
+    rf.add_argument('--sample-rate', type=float, help='the RTA input rate, for capture length')
+    rf.add_argument('--out', required=True)
+    di = sub.add_parser('distortion', help="a measurement's distortion table as JSON")
+    di.add_argument('measurement')
+    di.add_argument('--out', required=True)
+    di.add_argument('--ppo', type=int)
     a = ap.parse_args(argv)
     client = RewClient(a.url)
+    rta = RtaReader(client)
     try:
+        if a.cmd in ('rta-config', 'rta-status', 'house-curve', 'info'):
+            data = {'rta-config': rta.configuration, 'rta-status': rta.status,
+                    'house-curve': rta.house_curve}.get(a.cmd)
+            print(json.dumps(data() if data else rta.measurement(a.measurement), indent=2))
+            return 0
+        if a.cmd == 'distortion':
+            _refuse_existing(a.out)
+            table = rta.distortion(a.measurement, a.ppo)
+            with open(a.out, 'x', encoding='utf-8') as fh:
+                json.dump(table, fh, indent=2)
+            print('wrote %s' % a.out)
+            return 0
+        if a.cmd == 'rta-capture':
+            config = rta.configuration()
+            for out, peak in ((a.out, False), (a.peak_out, True)):
+                if not out:
+                    continue
+                _refuse_existing(out)
+                f, mag, meta = rta.captured(peak)
+                header = ['REW API RTA %s (GET /rta/captured-%sdata)' % (
+                              'peak' if peak else 'average', 'peak-' if peak else ''),
+                          'Smoothing: %s' % (meta['smoothing'] or 'None'),
+                          'unit %s, sample count %s, timestamp %s ns' % (
+                              meta['unit'], meta['sample_count'], meta['timestamp_ns'])]
+                for key, value in (find_setting(config, 'averag') + find_setting(config, 'overlap')
+                                   + find_setting(config, 'fft') + find_setting(config, 'window')):
+                    header.append('rta %s: %s' % (key, value))
+                _write_text(out, f, mag, None, header)
+                print('wrote %s (%d points)' % (out, len(f)))
+            return 0
+        if a.cmd == 'rta-frames':
+            _refuse_existing(a.out)
+            averaging = find_setting(rta.configuration(), 'averag')
+            f, frames = poll_frames(rta, a.seconds, a.interval)
+            if f is None:
+                raise RewError('the RTA returned no data: start it in REW first')
+            doc = {'format': 'rew-rta-frames-v1', 'freqs': [float(x) for x in f], 'frames': frames,
+                   'averaging': averaging, 'sample_rate_hz': a.sample_rate, 'unit': 'SPL'}
+            with open(a.out, 'x', encoding='utf-8') as fh:
+                json.dump(doc, fh)
+            print('wrote %s (%d frames)' % (a.out, len(frames)))
+            if not any('none' in str(v).lower() for _k, v in averaging):
+                print('note: RTA averaging does not read as None (%s): these frames are running '
+                      'averages, not single blocks' % (averaging or 'not reported'))
+            return 0
         if a.cmd == 'list':
             items = client.list_measurements()
             if a.json:

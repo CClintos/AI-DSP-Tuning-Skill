@@ -118,7 +118,8 @@ The full Helix filter set, each used for what it's good at:
 - A **Helix / Audiotec Fischer DSP** and its `.afpx` tune file (from DSP PC-Tool).
   Newer `.pct6` files (DSP PC-Tool 6) have basic beta support — see below.
 - **REW** ([Room EQ Wizard](https://www.roomeqwizard.com/)) measurements — a text
-  export (`Freq  SPL  Phase`) is preferred; `.mdat` also works (with axis validation).
+  export (`Freq  SPL  Phase`) or the `.mdat` itself (`session.mdat::Front L Tweeter`),
+  which the skill reads by structure, axis and all.
 - A **target curve** (`frequency  level` text file). One is bundled as a default;
   bring your own (ResoNix, Harman in-car, a house curve, flat) any time.
 - **Python 3.10+ with NumPy and SciPy** on whatever machine/container your agent
@@ -132,7 +133,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.20.0`) so you can tell whether an already-installed copy is current — open
+`1.21.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -192,9 +193,12 @@ for real tuning sessions; a lighter model is fine for quick mechanical edits.
 
 ## Exporting your measurements from REW
 
-Text export is preferred over `.mdat` — the frequency axis is explicit rather than
-reconstructed, and phase comes along with it (which the phase/crossover analysis
-needs). Getting all your measurements out as text is one step:
+You can hand over the `.mdat` itself: the skill reads it by structure (REW's own
+frequency axis, the unsmoothed values, the mic, the RTA settings and the
+calibrated levels) and takes `session.mdat::LF Mid XO` or `session.mdat::#3`
+anywhere it takes a file. A `.mdat` contains local paths (your user name, cal
+file locations), so check before sharing one publicly. Text exports work
+just as well, and getting all your measurements out as text is one step:
 
 1. Take your measurements in REW and give them clear names as you go (e.g. `Front L
    High`, `Front R High`, `Front L Low`, `Front R Low`, `Sub`, `System Sum`,
@@ -283,7 +287,14 @@ helix-rew-tuner/
 ├── scripts/
 │   ├── tunelib.py                    verified DSP + acoustic-analysis core (self-tests)
 │   ├── afpx.py                       decode / inspect / internal write verification
-│   ├── measure.py                    load REW exports & .mdat, validate axis, targets
+│   ├── measure.py                    load REW exports & .mdat, full REW header, targets
+│   ├── mdat.py                       read REW .mdat files by structure (Java object stream)
+│   ├── capture_audit.py              capture audit, automatic capture profile, moving-mic floor
+│   ├── mmm.py                        coherence, four-capture alignment, peak stability,
+│   │                                 crossover check, listening-level/road voicing, preferences
+│   ├── loudness.py                   ISO 226:2003 equal-loudness contours
+│   ├── frames.py                     per-block MMM statistics from a WAV or REW frames
+│   ├── signals.py                    EXPERIMENTAL test signals and their analysis
 │   ├── pipeline.py                   analysis, EQ proposal, and required AFPX plan/apply boundary
 │   ├── pct6.py                       BETA source-bound .pct6 decode/encode
 │   ├── alpine_jssh.py                BETA source-bound Alpine .jssh decode/encode
@@ -611,7 +622,32 @@ switched off rather than run on data that has none. In their place:
 - `voice-variants` builds bass/treble shelf variants of a finished tune for a
   blind, level-matched listening test.
 
-The capture checklist is in `references/methodology.md` (MMM-first tuning).
+From 1.21.0, a single MMM capture set says more:
+- `capture-audit` reads every capture's own header and `.mdat` record (RTA
+  settings, mic, gain, input volume, time, calibrated levels) and flags short
+  captures, mic-movement noise below 22 Hz, mic clipping, infrasound, mixed
+  smoothing/resolution/mics, cancel-check triples played at different levels,
+  unmuted drivers and HF interference -- then says what each file can feed;
+- `--noise-floor <solos>` uses band-limited solos' stopbands as a noise floor
+  measured while the mic moved (a static ambient capture misses that noise);
+- `coherence` turns the cancel-check triple into summation coherence per band:
+  where alignment can change the tone, and where only EQ or level can;
+- `mmm-align` chooses a sub/midbass delay and polarity from four MMM captures
+  (A, B, both, both with a known extra delay), within ~0.1 dB of the best in
+  simulation, for confirmation and the normal phase-only plan;
+- `stability` / `--peak-trace` read REW's peak trace ("Save both") as a bass
+  stability map from one run;
+- `xo-check` measures the crossover and PEQ your DSP actually applied from
+  RAW/XO/EQ captures;
+- `listening-level`, `road-noise` and `prefs` voice for the level you listen
+  at (ISO 226), for road noise (a separate driving preset), and from what your
+  blind A/Bs say you like;
+- `frames` gives one run its own repeatability from a WAV recording or REW's
+  per-block data, and `test-signal` / `signal-analyze` (experimental) add the
+  skill's own periodic signals.
+
+The capture checklist is in `references/methodology.md` (MMM-first tuning,
+and Single-run MMM intelligence for the commands above).
 
 ### Preparing for an EMMA Sound Quality event
 
@@ -712,6 +748,17 @@ also expose tonal judging scorecards. See
 manifest, capture protocol, decision margins and limitations.
 
 ## Audible tuning paths
+
+Version 1.21.0 reads everything a single MMM capture carries. `.mdat` files
+are read by structure (the old byte scanner picked the mic calibration curve on
+RTA files and a distortion array on an axis 21% wrong on sweep files); the
+whole REW header is parsed (and REW's Format line is no longer misread as the
+export's smoothing); `capture-audit`, the moving-mic noise floor, summation
+coherence, four-capture alignment, peak-trace stability, the RAW/XO/EQ
+crossover check, listening-level and road-noise voicing, learned preferences,
+frame-level statistics, read-only REW RTA endpoints and experimental test
+signals are new. See "Single-run MMM intelligence" in
+`helix-rew-tuner/references/methodology.md`.
 
 Version 1.20.0 fixes four things found re-running the skill on a real car:
 `bass-trials` now scores each trial against its own unchanged model (before,

@@ -64,12 +64,24 @@ directory (the folder holding `SKILL.md` and `requirements.txt`).
 | `verify` | Did a written change land? Before vs after captures, `--dsp-rate`. | §MMM-first tuning |
 | `voice-variants` | Single-filter voicing variants of a finished tune, for a blind A/B. | §MMM-first tuning |
 | `emma-volume` / `noise-check` | EMMA's 6 dB-louder balance check / system noise (off vs on, playing silence). | §Preparing for EMMA |
+| `capture-audit` | Before analysing MMM captures: reads every header (RTA settings, mic, gain, input volume, time, levels) and checks length, movement noise, mic headroom, infrasound, triple playback level, solo stopbands, mixed settings and twin floors. Ends with what each file can feed. Takes text exports, `file.mdat::name` or a whole `.mdat`. | §Capture audit |
+| `coherence` | Summation coherence rho per band from an A, B, A+B triple: coherent, power sum (alignment cannot change the tone) or cancelling. `--floor` gates noisy bands. | §Summation coherence |
+| `mmm-align` | Junction delay/polarity (and gain) predicted from four MMM captures: A, B, both, both with a known extra delay on B (or the flip form). A `candidate` is confirmed by an `mmm-compare` capture against a repeat of the current setting, then planned as a phase-only edit. | §Four-capture MMM alignment |
+| `stability` | Bass stability below 250 Hz from one run's RTA peak trace (REW "Save both"). Give the same peak file to propose or refine as their peak trace to weight the fit by it. | §Bass stability from the peak trace |
+| `xo-check` | The crossover and PEQ the DSP actually applied, from RAW/XO/EQ captures of one driver, against the `.afpx` (or `--hp/--lp/--peq`). Reads only. | §What the DSP actually applied |
+| `listening-level` / `road-noise` | ISO 226 voicing option for the level you listen at; a driving-preset option from a road-noise capture made by a passenger. Taste options for a blind A/B, never corrections. | §Voicing for the listening level and the road |
+| `prefs` | Preferred voicing (with uncertainty) and the next A/B pair, learned from `ab_log.json`. | §Learning the listener's voicing |
+| `frames` | Per-block statistics of one MMM run from a WAV recording or `rew_api.py rta-frames`: mean, robust mean, peak, half-path exports and split-half repeatability. | §Frame-level MMM |
+| `test-signal` / `signal-analyze` | EXPERIMENTAL: the skill's own periodic test signals (empty-bin multitone, interleaved L/R) and their analysis. Simulation-checked only. | §The skill's own test signals |
 | `selftest` | Synthetic self-test, including this document's section references. | — |
 
 MMM captures take `--capture mmm` on analyze, propose and refine, plus
-`--ambient` (noise capture), `--cancel-check LEFT RIGHT BOTH` (boost evidence
-from magnitude alone), `--capture-profile` (recorded REW setup) and, rarely,
-`--accept-tilt`. A short volume step in `emma-volume` is
+`--ambient` (noise capture), `--noise-floor` (band-limited solos: their
+stopbands are the moving-mic floor), `--cancel-check LEFT RIGHT BOTH` (boost
+evidence from magnitude alone), `--peak-trace` (one run's RTA peak, for bass
+stability), `--capture-profile` (recorded REW setup) and, rarely,
+`--accept-tilt`. Every capture path may be a REW `.mdat` measurement,
+`"session.mdat::LF Mid XO"` or `"session.mdat::#3"`. A short volume step in `emma-volume` is
 `step_not_demonstrated`, not proof that the system has reached maximum output.
 
 **Every AFPX write must use this same CLI:** first run `pipeline.py plan` and
@@ -96,14 +108,25 @@ shelves). Direct `afpx.py` write helpers are implementation/reference only.
   `afpx_format.md` for the fewer-Vol-tags-than-channels gotcha). Reading it is
   mandatory before reporting any `headroom_report` clip risk.
 - **`measure.py`**: loads REW text exports (any common encoding, decimal
-  comma, quoted CSV) or `.mdat` (validate the axis first), resamples to a
-  common grid, and loads target curves.
+  comma, quoted CSV) or `.mdat` measurements (`file.mdat::name`, read by
+  `mdat.py`), parses the whole REW header (`measure.py header <file>`),
+  resamples to a common grid, and loads target curves.
+- **`mdat.py`**: reads REW `.mdat` files by structure (Java object stream):
+  REW's own axis, the unsmoothed values, RTA settings, mic serial and cal,
+  levels, and for sweeps the IR, timing, SNR and harmonics. `mdat.py list
+  <file>`, `mdat.py export "<file>::<name>" --out x.txt`. A `.mdat` holds local
+  paths: scrub it before sharing.
 - **`rew_api.py`**: READ-ONLY bridge to a running REW 5.40+ (Preferences →
   API, default `127.0.0.1:4735`). `rew_api.py list` shows measurements with
   timing reference and SNR. `rew_api.py export "FL tweeter" --out fl_tw.txt`
   writes a text export every tool reads, and `--direct-sound` builds the
   8-cycle direct-sound response on the shared timing-reference axis. It never
   triggers sweeps or changes anything in REW. Prefer it when REW is open.
+  GET-only RTA reads: `rta-config` (FFT, window, overlap, averaging),
+  `rta-capture --out avg.txt --peak-out peak.txt` (the average and its peak
+  trace, with the sample count), `rta-frames` (per-block data by polling with
+  averaging None, for `pipeline.py frames`), `info`, `distortion`,
+  `house-curve`.
 - **`decay.py`**: `fdw <ir.txt> --out DRIVER_direct.txt` builds the
   direct-sound response for imaging and junction TIMING above ~500 Hz (keep
   full-window or spatial-average data for tone; prefer REW *text* IR exports,
@@ -293,7 +316,9 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   ask for the capture set listed there (ONE run of each: full system, the L/R
   and sub/midbass halves, an ambient capture) and pass `--capture mmm`. A
   repeat run is optional, never a prerequisite: it adds repeatability checks
-  for small changes.
+  for small changes. Run `pipeline.py capture-audit` on the set first and
+  show the user what it found (§Capture audit,); a whole `.mdat` session can
+  be passed as it is.
 - **Otherwise, ask for 3+ mic positions before any EQ proposal** — it
   is the single biggest lever on how good the tune ends up. From one sweep the
   fitter cannot tell a real response fault from a reflection comb at that mic
@@ -326,10 +351,15 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
 
 ### 2. Validate the data before trusting it
 
-- Prefer **REW text exports** (explicit axis + phase). If given a `.mdat`, rebuild
-  the axis with `measure.reconstruct_axis` and **validate it** against a known
-  crossover corner (`measure.validate_axis`) before using it. A wrong axis silently
-  ruins everything.
+- **REW text exports and `.mdat` measurements are both axis-explicit.** Address
+  a `.mdat` measurement as `file.mdat::Name` (or `::#3`); `mdat.py` reads REW's
+  stated axis and the unsmoothed values, and refuses a measurement whose axis
+  does not end where REW says. Never pick arrays out of a `.mdat` by byte
+  pattern or reconstruct an axis by assumption: that once read the mic cal
+  curve as the measurement, and a distortion array on an axis 21% wrong.
+- For MMM sets, run `capture-audit` before trusting the captures: mixed
+  smoothing, RTA resolution or mics, movement noise, short captures, a clipped
+  mic or a triple played at different levels each limit what the data can say.
 - If solos + a measured "together" trace exist, run `prediction_confidence`: the
   solo model must reproduce the measured sum, or the complex data is misaligned and
   phase decisions must be blocked (re-measure).
@@ -606,7 +636,8 @@ reverted band without telling the user why.
 ## Non-negotiables
 
 1. **Confirm the channel map and seat before analyzing.** Nothing is assumed.
-2. **Validate the measurement axis** before trusting a `.mdat`.
+2. **Use the axis the measurement states.** Read `.mdat` files only through
+   `mdat.py`; never reconstruct or guess an axis.
 3. **Respect hardware limits**: gain per band within the model's range (P SIX:
    −15…+6 dB), PEQ Q 0.5–15, shelf Q 0.1–2. APF Q is NOT capped at 2 — that old
    claim was disproven 2026-07-11 (see `helix_hardware.md`); high Q is often
