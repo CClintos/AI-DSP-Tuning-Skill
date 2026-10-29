@@ -1,0 +1,3 @@
+# Real REW files used as regression fixtures: keep them byte for byte,
+# including the trailing spaces REW writes in its headers.
+tests/fixtures/real/** -text -whitespace

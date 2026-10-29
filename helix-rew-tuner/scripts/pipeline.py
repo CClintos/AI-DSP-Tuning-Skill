@@ -2601,6 +2601,13 @@ def check_doc_refs(core_path=None, methodology_path=None):
         headings = [ln.lstrip('#').strip() for ln in fh if ln.startswith('#')]
     with open(core, encoding='utf-8') as fh:
         core_text = fh.read()
+    if core_path is None:
+        # the ad-hoc function table moved out of core_workflow; its section
+        # references are checked the same way
+        api = os.path.join(here, '..', 'references', 'tunelib_api.md')
+        if os.path.isfile(api):
+            with open(api, encoding='utf-8') as fh:
+                core_text += '\n' + fh.read()
     refs = sorted(set(_re.findall(r'§([^|,\n]+)', core_text)))
     linked_anchors = sorted(set(_re.findall(
         r'\]\((?:[^)\s]*/)?methodology\.md#([^)]+)\)', core_text,
@@ -3051,6 +3058,26 @@ def main():
                     help='the exports are direct-sound (decay.py fdw) responses')
     jn.add_argument('--out')
 
+    cp = sub.add_parser('capture-plan', help='what to capture, named, with REW settings and limits')
+    cp.add_argument('--goal', nargs='+', default=['tone', 'lr', 'bass'],
+                    help='tone lr bass xo stability repeat frames validate, or all (default: tone lr bass)')
+    cp.add_argument('--afpx', help='the tune: bass junctions and per-driver crossover checks from it')
+    cp.add_argument('--sample-rate', type=float, default=48000.0, help='REW input rate')
+    cp.add_argument('--fft', type=int, default=65536)
+    cp.add_argument('--seconds', type=float, default=25.0, help='capture length to plan for')
+    cp.add_argument('--mic', default='UMIK-1')
+    cp.add_argument('--mic-gain-db', type=float, default=18.0)
+    cp.add_argument('--dsp-rate', type=float, help='CONFIRMED DSP rate, to show delays in samples')
+    cp.add_argument('--junction-hz', type=float, help='sub/midbass crossover when there is no --afpx')
+    cp.add_argument('--out')
+
+    nx = sub.add_parser('next', help='audit what was captured and list the commands that apply')
+    nx.add_argument('--captures', nargs='+', required=True,
+                    help='files, folders or .mdat files (WAV recordings and ab_log.json are picked up too)')
+    nx.add_argument('--afpx', help='the tune the captures were made through')
+    nx.add_argument('--target', default='default')
+    nx.add_argument('--out')
+
     ca = sub.add_parser('capture-audit', help='what each capture can feed, read from its own header')
     ca.add_argument('--captures', nargs='+', required=True,
                     help='text exports, file.mdat::name, or whole .mdat files')
@@ -3101,7 +3128,10 @@ def main():
     st.add_argument('--out')
 
     xc = sub.add_parser('xo-check', help='the crossover and PEQ the DSP applied, from RAW/XO/EQ captures')
-    xc.add_argument('--raw', required=True, help='driver with crossover and EQ bypassed')
+    xc.add_argument('--raw', help='driver with the checked crossover section and EQ bypassed '
+                                  '(omit for a PEQ-only check, e.g. a tweeter)')
+    xc.add_argument('--section', choices=('both', 'hp', 'lp'), default='both',
+                    help='which section RAW bypassed (a RAW capture keeps a protective high-pass)')
     xc.add_argument('--xo', required=True, help='crossover on, EQ bypassed')
     xc.add_argument('--eq', help='crossover and EQ on')
     xc.add_argument('--afpx', help='the tune the captures were made through')
@@ -3279,13 +3309,14 @@ def _dispatch(args):
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
                       'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match',
                       'verify', 'voice-variants', 'emma-volume', 'noise-check', 'bass-trials', 'voice-match', 'stereo-propose',
-                      'capture-audit', 'coherence', 'mmm-align', 'stability', 'xo-check',
+                      'capture-plan', 'next', 'capture-audit', 'coherence', 'mmm-align', 'stability', 'xo-check',
                       'listening-level', 'road-noise', 'prefs', 'frames', 'test-signal',
                       'signal-analyze'):
         _check_report_out(args)
         import mmm
         import frames as frames_mod
         import signals as signals_mod
+        import planner
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,
@@ -3294,6 +3325,7 @@ def _dispatch(args):
                   'voice-variants': voice_variants, 'emma-volume': emma_volume,
                   'noise-check': noise_check, 'bass-trials': audible.bass_trials,
                   'voice-match': audible.measured_voice_match, 'stereo-propose': audible.stereo_propose,
+                  'capture-plan': planner.capture_plan_cmd, 'next': planner.next_cmd,
                   'capture-audit': capture_audit.cli, 'coherence': mmm.coherence_cmd,
                   'mmm-align': mmm.align4_cmd, 'stability': mmm.stability_cmd,
                   'xo-check': mmm.xo_check_cmd, 'listening-level': mmm.listening_level_cmd,

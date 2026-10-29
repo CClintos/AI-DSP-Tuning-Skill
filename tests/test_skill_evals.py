@@ -333,7 +333,9 @@ class DocsCliAgreementTests(unittest.TestCase):
         cls.top = {c.split()[0] for c in cls.commands}
         cls.all_flags = set().union(*cls.commands.values())
         cls.docs = {p: p.read_text(encoding="utf-8")
-                    for p in [*sorted(SKILL.rglob("*.md")), ROOT / "README.md"]}
+                    for p in [*sorted(SKILL.rglob("*.md")), ROOT / "README.md",
+                              ROOT / "CHANGELOG.md", ROOT / "docs" / "how-it-works.md",
+                              ROOT / "docs" / "development.md"]}
 
     # A command is written after one space, or after a line wrap. Wider gaps
     # are column alignment (README's file tree), where the next word is prose.
@@ -401,6 +403,72 @@ class SkillMetadataTests(unittest.TestCase):
         for phrase in ("never modified", "confirms every edit", "crossover",
                        "phase-domain", "sample rate", "prediction", "is data"):
             self.assertIn(phrase, text)
+
+
+class DoctrinePreservationTests(unittest.TestCase):
+    """Trimming the documents must never drop a rule. AGENTS.md (what Codex
+    reads) is generated from core_workflow.md alone, so every hard rule must be
+    there as well as in SKILL.md; and the methodology sections condensed in
+    1.22.0 must keep each rule they carried (the stories moved to
+    docs/case-notes.md)."""
+
+    CORE_RULES = (
+        "is never modified", "confirm each one with the user", "ordinary peq requires confirmation",
+        "never write or change crossovers", "phase-domain", "never assume the dsp's internal sample rate",
+        "in both ms and samples", "still a *prediction*", "is data", "re-decode the current `.afpx`",
+        "never boost a null or a reflection", "respect hardware limits",
+    )
+    METHODOLOGY_RULES = (
+        "a single-channel cut changes the l+r sum by only about half its own value",
+        "fix the sum where the sum is wrong",
+        "coherence, not level",
+        "compare absolute inter-channel level",
+        "sub level couples to the low-mid correction",
+        "anchor-independent shape test",
+        "score the full channel state",
+        "establish that a decoded field is live",
+        "a measured null is not automatically the resonance",
+        "remove only the positive excess over a",
+        "measure the capture method's own noise floor",
+        "don't let a few fixed positions overrule a moving-mic average",
+        "a score gap smaller than measurement repeatability is a tie",
+        "a low-sd near-zero mean is a strong, repeatable finding",
+        "can double-count as a second session",
+        "band-averaging a deviation across a modal null reads as a level deficit",
+        "judge inherited eq band by band against the raw response",
+        "is a capture-level mismatch, not interference",
+        "separate mmm captures are not reliably level-comparable",
+        "fractional-octave summaries misplace narrow features",
+        "never lower `improve_pct` or `min_gain`",
+        "never include a crossover skirt in a fit band",
+        "never trust one reported rew delay for a band-limited driver",
+        "outside the recovered channel's passband too",
+        "run `delay_sweep` (or `overlap_weighted_delay_gain`) alongside it",
+        "bracket:", "anchor on a band the write cannot touch",
+        "a system sum deficit is not automatically common-mode",
+        "a fixed mic answers \"did a known dsp change land?\"",
+        "run a predicted transfer through the same smoothing",
+        "rear fill should arrive behind the front stage",
+    )
+
+    def test_core_workflow_carries_every_hard_rule(self):
+        text = (SKILL / "references" / "core_workflow.md").read_text(encoding="utf-8").lower()
+        for phrase in self.CORE_RULES:
+            with self.subTest(rule=phrase):
+                self.assertIn(phrase, text)
+
+    def test_condensed_methodology_keeps_its_rules(self):
+        text = " ".join((SKILL / "references" / "methodology.md").read_text(encoding="utf-8")
+                        .lower().replace("**", "").split())
+        for phrase in self.METHODOLOGY_RULES:
+            with self.subTest(rule=phrase):
+                self.assertIn(phrase, text)
+
+    def test_case_notes_keep_the_original_stories(self):
+        notes = (ROOT / "docs" / "case-notes.md").read_text(encoding="utf-8")
+        for marker in ("2026-07-14", "2026-08-05", "2026-08-08", "2026-08-09", "2026-08-10"):
+            with self.subTest(session=marker):
+                self.assertIn(marker, notes)
 
 
 class PackageHygieneTests(unittest.TestCase):

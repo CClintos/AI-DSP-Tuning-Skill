@@ -426,21 +426,37 @@ def _sittings(caps):
     return [{'name': caps[i]['name'], 'date': d, 'sitting': groups[i]} for d, i in order]
 
 
+_SIDE_WORDS = {'left', 'right', 'both', 'l', 'r', 'lf', 'rf', 'fl', 'fr', 'lh', 'rh', 'rl', 'rr',
+               'pair', 'together', 'stereo', 'lr', 'front'}
+
+
+def _name_tokens(name):
+    return {t for t in re.split(r'[^a-z0-9]+', (name or '').lower()) if t} - _SIDE_WORDS
+
+
 def find_triples(caps):
-    """(A, B, BOTH) index triples: a 'both' capture and a left and a right
-    capture of the same driver group. Name-based, so it is a suggestion."""
-    out = []
-    for k, c in enumerate(caps):
-        r = c['role']
-        if r['side'] != 'both' or r['ambient']:
+    """(A, B, BOTH) index triples: a left and a right capture of one driver
+    group with the 'both' capture that belongs to them. Name-based, so it is a
+    suggestion: when several 'both' captures could match (a "Front Both" and
+    a "System Sum"), the one sharing the most name words with the halves wins,
+    and each pair of halves is used once."""
+    out, used = [], set()
+    groups = {}
+    for i, x in enumerate(caps):
+        r = x['role']
+        if r['ambient'] or r['side'] not in ('left', 'right', 'both'):
             continue
-        group = r['driver']
-        lefts = [i for i, x in enumerate(caps) if x['role']['side'] == 'left'
-                 and x['role']['driver'] == group and x['role']['stage'] == r['stage']]
-        rights = [i for i, x in enumerate(caps) if x['role']['side'] == 'right'
-                  and x['role']['driver'] == group and x['role']['stage'] == r['stage']]
-        if len(lefts) == 1 and len(rights) == 1:
-            out.append((lefts[0], rights[0], k))
+        groups.setdefault((r['driver'], r['stage']), {'left': [], 'right': [], 'both': []})[r['side']].append(i)
+    for (_driver, _stage), g in groups.items():
+        if len(g['left']) != 1 or len(g['right']) != 1 or not g['both']:
+            continue
+        a, b = g['left'][0], g['right'][0]
+        halves = _name_tokens(caps[a]['name']) | _name_tokens(caps[b]['name'])
+        best = max(g['both'], key=lambda k: (len(_name_tokens(caps[k]['name']) & halves),
+                                            -len(_name_tokens(caps[k]['name']) - halves)))
+        if (a, b) not in used:
+            out.append((a, b, best))
+            used.add((a, b))
     return out
 
 

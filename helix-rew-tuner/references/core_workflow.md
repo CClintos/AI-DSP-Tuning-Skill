@@ -42,8 +42,16 @@ directory (the folder holding `SKILL.md` and `requirements.txt`).
 
 ### `pipeline.py` — the entry point for analysis, proposals and writes
 
+**Start here with captures:** `pipeline.py next --captures <files, folders or
+session.mdat> [--afpx <tune>]` audits them and lists the commands that apply,
+with their arguments filled in. Before a capture session, `pipeline.py
+capture-plan --goal ... [--afpx <tune>]` gives the capture list, names, REW
+settings and limits. Both only read.
+
 | Command | Use it for | Read first |
 |---|---|---|
+| `next` | Audit whatever was captured (text exports, `file.mdat::name`, a whole `.mdat`, a folder; WAVs and `ab_log.json` too) and list the applicable commands with arguments, what is blocked and why, and what is missing. | §Capture audit |
+| `capture-plan` | Before capturing: the named capture list for `--goal tone lr bass xo stability repeat frames validate` (or `all`), REW settings, averages for the capture length, the mic's level ceiling, the T1 delay for `mmm-align` and the RAW/XO/EQ sequence with its safety limits. | §Capture audit |
 | `analyze` | One JSON report: tilt, flagged deviation regions, `bass_balance`, `emma_bands`. Adds `spatial_consistency` with `--positions`, the interference audit and `crossover_confidence` with `--solo-a --solo-b --together --pair-band LO HI`, the gate floor with `--gate-ms`, and a per-dip `boost_gate` verdict when `--measurement` carries phase (`--trust-band LO HI` sets the passband). `--target default` uses the bundled curve. Writes nothing. | §The boost gate |
 | `propose` | A deterministic PEQ proposal from the same inputs (`--fit-band LO HI`, `--max-bands N`). With 3+ positions it validates itself leave-one-position-out: each band carries APPLY, REVIEW or DO NOT APPLY, and DO NOT APPLY bands land in `rejected`. `--sittings` withholds a whole sitting per fold; `--session-tune <afpx>` enforces the car's recorded guards. Writes nothing. | §Multi-position variance |
 | `refine` | Every session after the first: keeps, relaxes, re-fits or removes the PEQ bank the measurement was taken through, and adds only where a residual is real (`--afpx --channels --dsp-rate`; guards come from the `--afpx` sidecar). Writes nothing. | §Refine the tune you have |
@@ -64,15 +72,14 @@ directory (the folder holding `SKILL.md` and `requirements.txt`).
 | `verify` | Did a written change land? Before vs after captures, `--dsp-rate`. | §MMM-first tuning |
 | `voice-variants` | Single-filter voicing variants of a finished tune, for a blind A/B. | §MMM-first tuning |
 | `emma-volume` / `noise-check` | EMMA's 6 dB-louder balance check / system noise (off vs on, playing silence). | §Preparing for EMMA |
-| `capture-audit` | Before analysing MMM captures: reads every header (RTA settings, mic, gain, input volume, time, levels) and checks length, movement noise, mic headroom, infrasound, triple playback level, solo stopbands, mixed settings and twin floors. Ends with what each file can feed. Takes text exports, `file.mdat::name` or a whole `.mdat`. | §Capture audit |
-| `coherence` | Summation coherence rho per band from an A, B, A+B triple: coherent, power sum (alignment cannot change the tone) or cancelling. `--floor` gates noisy bands. | §Summation coherence |
-| `mmm-align` | Junction delay/polarity (and gain) predicted from four MMM captures: A, B, both, both with a known extra delay on B (or the flip form). A `candidate` is confirmed by an `mmm-compare` capture against a repeat of the current setting, then planned as a phase-only edit. | §Four-capture MMM alignment |
-| `stability` | Bass stability below 250 Hz from one run's RTA peak trace (REW "Save both"). Give the same peak file to propose or refine as their peak trace to weight the fit by it. | §Bass stability from the peak trace |
-| `xo-check` | The crossover and PEQ the DSP actually applied, from RAW/XO/EQ captures of one driver, against the `.afpx` (or `--hp/--lp/--peq`). Reads only. | §What the DSP actually applied |
-| `listening-level` / `road-noise` | ISO 226 voicing option for the level you listen at; a driving-preset option from a road-noise capture made by a passenger. Taste options for a blind A/B, never corrections. | §Voicing for the listening level and the road |
-| `prefs` | Preferred voicing (with uncertainty) and the next A/B pair, learned from `ab_log.json`. | §Learning the listener's voicing |
-| `frames` | Per-block statistics of one MMM run from a WAV recording or `rew_api.py rta-frames`: mean, robust mean, peak, half-path exports and split-half repeatability. | §Frame-level MMM |
-| `test-signal` / `signal-analyze` | EXPERIMENTAL: the skill's own periodic test signals (empty-bin multitone, interleaved L/R) and their analysis. Simulation-checked only. | §The skill's own test signals |
+| `capture-audit` | Per-capture and whole-set checks from the files' own headers (length, movement noise, mic headroom, infrasound, triple playback level, stopbands, mixed settings, twin floors) and what each file can feed. `next` runs it. | §Capture audit |
+| `coherence` | Summation coherence per band from an A, B, A+B triple: coherent, power sum (alignment cannot change the tone) or cancelling. | §Summation coherence |
+| `mmm-align` | Junction delay/polarity predicted from four MMM captures (A, B, both, both with a known extra delay on B; or the flip form). Confirm a `candidate` with an `mmm-compare` capture, then plan it as a phase-only edit. | §Four-capture MMM alignment |
+| `stability` | Bass stability below 250 Hz from one run's RTA peak trace (REW "Save both"). | §Bass stability from the peak trace |
+| `xo-check` | The crossover and PEQ the DSP applied, from RAW/XO/EQ captures, against the `.afpx` (or stated `--hp/--lp/--peq`). | §What the DSP actually applied |
+| `listening-level` / `road-noise` | Voicing options for your listening level (ISO 226) and for road noise (a passenger's capture). Blind A/B options, never corrections. | §Voicing for the listening level and the road |
+| `prefs` | Your preferred voicing, with uncertainty, and the next A/B pair, from `ab_log.json`. | §Learning the listener's voicing |
+| `frames` | One MMM run's own repeatability, robust mean and peak trace, from a WAV recording or `rew_api.py rta-frames`. | §Frame-level MMM |
 | `selftest` | Synthetic self-test, including this document's section references. | — |
 
 MMM captures take `--capture mmm` on analyze, propose and refine, plus
@@ -83,6 +90,17 @@ stability), `--capture-profile` (recorded REW setup) and, rarely,
 `--accept-tilt`. Every capture path may be a REW `.mdat` measurement,
 `"session.mdat::LF Mid XO"` or `"session.mdat::#3"`. A short volume step in `emma-volume` is
 `step_not_demonstrated`, not proof that the system has reached maximum output.
+
+**Which tool decides what, by what was captured:**
+
+| Decision | Timed sweeps (phase) | MMM captures only |
+|---|---|---|
+| Sub/midbass delay and polarity | `junction`, `probe`, `bass-trials` | `mmm-align`, then `mmm-compare` to confirm |
+| Is a dip a cancellation? | analyze's `boost_gate`, interference audit | `--cancel-check`, `coherence` |
+| L/R balance | `imaging` | `lr-match`, `stereo-propose` |
+| Tone / PEQ | `propose` (3+ positions) | `propose` / `refine` with `--capture mmm` |
+| Did the DSP apply its settings? | — | `xo-check` |
+| Voicing | `voice-variants`, `ab-make`, `prefs`, `listening-level`, `road-noise` | the same |
 
 **Every AFPX write must use this same CLI:** first run `pipeline.py plan` and
 review `references/tune_plan_schema.md`, then populate the plan's
@@ -111,21 +129,17 @@ shelves). Direct `afpx.py` write helpers are implementation/reference only.
   comma, quoted CSV) or `.mdat` measurements (`file.mdat::name`, read by
   `mdat.py`), parses the whole REW header (`measure.py header <file>`),
   resamples to a common grid, and loads target curves.
-- **`mdat.py`**: reads REW `.mdat` files by structure (Java object stream):
-  REW's own axis, the unsmoothed values, RTA settings, mic serial and cal,
-  levels, and for sweeps the IR, timing, SNR and harmonics. `mdat.py list
-  <file>`, `mdat.py export "<file>::<name>" --out x.txt`. A `.mdat` holds local
-  paths: scrub it before sharing.
+- **`mdat.py`**: `list <file>`, `export "<file>::<name>" --out x.txt` for REW
+  `.mdat` files (read by structure). A `.mdat` holds local paths: scrub it
+  before sharing.
 - **`rew_api.py`**: READ-ONLY bridge to a running REW 5.40+ (Preferences →
   API, default `127.0.0.1:4735`). `rew_api.py list` shows measurements with
   timing reference and SNR. `rew_api.py export "FL tweeter" --out fl_tw.txt`
   writes a text export every tool reads, and `--direct-sound` builds the
   8-cycle direct-sound response on the shared timing-reference axis. It never
   triggers sweeps or changes anything in REW. Prefer it when REW is open.
-  GET-only RTA reads: `rta-config` (FFT, window, overlap, averaging),
-  `rta-capture --out avg.txt --peak-out peak.txt` (the average and its peak
-  trace, with the sample count), `rta-frames` (per-block data by polling with
-  averaging None, for `pipeline.py frames`), `info`, `distortion`,
+  Also GET-only: `rta-config`, `rta-capture --out avg.txt --peak-out
+  peak.txt`, `rta-frames` (for `pipeline.py frames`), `info`, `distortion`,
   `house-curve`.
 - **`decay.py`**: `fdw <ir.txt> --out DRIVER_direct.txt` builds the
   direct-sound response for imaging and junction TIMING above ~500 Hz (keep
@@ -139,73 +153,21 @@ shelves). Direct `afpx.py` write helpers are implementation/reference only.
   a same-sitting noise floor from repeat sweeps, and `check --floor floor.json
   --dev HZ:DB ...` screens a deviation against it.
 - **`benchmark.py --json`**: deterministic robust-fitting regression gate.
-- **`pct6.py`** (**BETA**, personal use): decode and source-bound encode of
-  no-password DSP PC-Tool 6 saves. `decode()` gives a byte-preserving
-  (latin-1) text view that `afpx.py`'s read functions accept. The only file
-  writer is `write_preserving_crossovers` (or the `encode` CLI, which needs
-  the source), which compares every crossover at its original channel/slot
-  and exclusively creates a new output. **Never decode with
-  `errors='replace'` for anything written back**: real files carry
-  binary-ish attributes (e.g. `AV=`) that `'replace'` silently corrupts.
-  Verified only on PC-Tool 6.01.08/6.03.04; the container key is
-  version-fragile.
-- **`alpine_jssh.py`** (**BETA**, personal use): the different-vendor Alpine
-  `.jssh` format. `references/alpine_jssh_format.md` owns the verified model
-  scope, Alpine limits, writable Q values, the unsafe channel-gain caveat,
-  edit preservation, mandatory real-file preflight and hardware read-back.
-  Crossover fields are read-only; the writer and verifier refuse those
-  offsets.
+- **`pct6.py`** and **`alpine_jssh.py`** (**BETA**, personal use): read
+  `references/pct6_format.md` or `references/alpine_jssh_format.md` in full
+  before touching either format; step 1 and step 5 give the gates.
 
 ### `tunelib.py` functions, for ad-hoc analysis
 
-`tunelib.py` is the verified analysis and DSP core (self-test: `python
-scripts/tunelib.py` → `ALL TESTS PASSED`). This table is a lookup, not the
-rationale. Read the methodology section before using a function for the first
-time in a session.
-
-| Function(s) | For | Ref |
-|---|---|---|
-| `voice_target`, `measure_tilt` | voicing layer (tilt/bass/presence/air) | §Voicing |
-| `fit_peq`, `fit_peq_robust` (+`mask`/`conf`/`null_boost_penalty`/`partner_target_db`) | single- or multi-position PEQ optimizer, restraint & L/R matching | §Restraint, §Imaging |
-| `interference_audit` | real dip vs. destructive summation | §The interference audit |
-| `crossover_confidence` | one band-limited crossover go/no-go | §The crossover action-ladder |
-| `polarity_delay_search`, `estimate_delay_xcorr` | cross-checked delay search | §The crossover action-ladder |
-| `delay_sweep`, `overlap_weighted_delay_gain` | in-band-only delay search (run alongside `polarity_delay_search` whenever either driver is band-limited — its damage-band safety net can hide a real gain there); maximin across multiple sessions; flags cycle-ambiguous results | §When `polarity_delay_search` says |
-| `spatial_consistency`, `complex_vector_average` | multi-position averaging | §Multi-position variance |
-| `phase_linearity_residual` | single-position phase reliability | §Quantify single-position phase reliability |
-| `prediction_confidence` | do complex solos reproduce the measured pair sum? gates every phase decision (step 2) | §Quantify single-position phase reliability |
-| `excess_gd_mask` | minimum-phase / EQ-ability classifier | §Minimum-phase |
-| `excess_phase_fields` + `boost_gate_verdict` / `gate_boost_bands` | is a specific BOOST pushing gain into a cancellation? (ALLOW/WARN/BLOCK; specific, not sensitive — ALLOW proves nothing, and it needs UNSMOOTHED data) | §The boost gate |
-| `lr_match_report` | L/R image-stability diagnostic | §Imaging |
-| `source_level_audit`, `source_bandwidth_limits` | is the signal ENTERING the DSP level-independent? (cannot attribute to the source from an acoustic capture — see the docstring) | §Audit the source |
-| `band_itd_ild`, `image_pull` | where the phantom image sits vs FREQUENCY (inter-channel model: ~1 ms or ~16 dB = full shift, cues trade); `smeared` means no single delay or trim fixes it | §Image position is frequency-dependent |
-| `centre_steering` | centre the image at an off-centre seat: level-only vs far-side time lead + smaller trim, with the robustness trade | §Placing the phantom centre |
-| `held_out_band_validation`, `eq_dig_depth` | leave-one-position-out check of a multi-position proposal: per band stability, held-out help and APPLY / REVIEW / DO NOT APPLY; dug depth = the new hole an EQ digs below target | §Multi-position variance |
-| `delay_consensus` | one delay from four estimators with agreement, confidence, and a gross-timing guard (refuses when the energy arrives several periods away) | §Reading a junction |
-| `probe_variants`, `chain_response` | what-if: candidate delay / polarity / Phase angle / all-pass / PEQ evaluated at EVERY junction it touches, before anything is written | §A channel hands over twice |
-| `junction_phase_score`, `junction_sum_loss` | one crossover's phase alignment (both polarities, flip margin, lobe margin) and how far its sum falls short of coherent | §Reading a junction |
-| `helix_phase_rotation`, `helix_phase_rotation_H`, `phase_control_check` | PC-Tool's channel Phase control: the Q=1 AP2 an angle builds at the channel's crossover, and a check that this unit builds it (two solo sweeps) | helix_hardware.md |
-| `predicted_vs_measured` | predict → re-measure loop (step 7) | §Verification & honesty |
-| `inert_band_check`, `reaches_target_after_boost` | sanity checks before trusting a band | §Two checks |
-| `gating_frequency_limit`, `gating_warning` | gated-capture trust floor | §Sweep capture setup |
-| `calibrate_solo_levels` | fix mismatched solo test levels | §Sweep capture setup |
-| `anchor_sensitivity_report` | is a feature's magnitude an anchor artifact? | §Deviation analysis |
-| `causal_ab_delta` | score a causal A/B — no target, no re-anchoring | §Deviation analysis |
-| `mmm_overrides_fixed_point` | forbidden-inference guard (fixed-point can't beat MMM) | §Measurement method selection |
-| `detect_duplicate_traces` | catch a re-exported file double-counted as a session | §Analysis traps |
-| `historical_repeatability` | stable-near-zero ≠ unreliable, across sessions (NOT a universal SD floor — see its docstring) | §Analysis traps |
-| `models_discriminable` | don't prefer the smaller residual unless the gap beats the data's own uncertainty | §Model-discrimination gate |
-| *(decay/ringing + distortion axes — when EQ isn't the right tool)* | waterfall/spectrogram, THD | §Beyond magnitude |
-| `tune_scorecard` (`_abs_rms_db` fields catch what a signed median can hide), `headroom_report` (clip_risk is PEQ-only — check the real output level, it's often a false alarm), `compression_check` | scoring, clip risk, level sanity | — |
-| `hpf_excursion_risk` | driver excursion check (needs a supplied Fs) | — |
-| `ms_to_samples`, `samples_to_ms` | sample-rate-aware delay conversion | — |
-| `validate_peq_band` | hardware gain/Q limits | — |
-| `allpass_fil_str`, `allpass1_fil_str`, `shelf_fil_str` | filter-XML writers | §Shelf cookbook, §All-pass cookbook |
+Only for something no command covers: `references/tunelib_api.md` lists the
+verified analysis functions, what each is for and the methodology section to
+read before first use.
 
 ## Reference files (read as needed)
 
 - **`references/tune_plan_schema.md`**: the plan/apply JSON contract. Read
   before the first AFPX write.
+- **`references/tunelib_api.md`**: the analysis functions for ad-hoc work.
 - **`references/afpx_format.md`**: the exact `.afpx` binary and filter-code
   spec. Read before any write (verified on P SIX DSP MK2; see model caveat).
 - **`references/pct6_format.md`**: the `.pct6` container, BETA caveats and
@@ -255,35 +217,23 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   pan out — and every proposed edit is confirmed individually before it's
   written. A basic tune is normally a handful of short yes/no confirmations
   as you go, not one big automatic apply.
-- **Check for a prior session file before asking any intake question.**
-  Look for `<afpx_path>.tuner_session.json` next to the tune file (e.g.
-  `mytune.afpx.tuner_session.json`) — a small JSON record of a previous
-  session's confirmed intake answers (schema: `dsp_model`, `sample_rate_hz`,
-  `channel_map`, `listening_seat`, `drive_side`, `rear_channel_routing`,
-  `target_curve_path`, `voicing`, `guards`, and `afpx_sha256` — the SHA-256
-  of the `.afpx` at the time it was written). `guards` are vehicle facts
-  (no-boost zones per channel, a boost-Q cap) that stay valid across tune
-  edits; record one whenever evidence shows a band EQ must never fill
-  (§Vehicle guards,). Run `python scripts/pipeline.py
-  session check --tune <file>` — it reads the sidecar, hashes the *current*
-  file, and reports `hash_matches` plus which answers are `stale_fields`:
-  - **Hash matches** → present the stored answers back ("here's what I have
-    on file: channel 2 = tweeter/left, driver's seat, discrete rears,
-    ResoNix target — still correct?") instead of re-deriving or re-asking
-    from scratch. The user only needs to confirm or correct deltas.
-  - **Hash differs** → the file changed since it was recorded (PC-Tool edit
-    between sessions). Say so plainly and treat anything *derived from file
-    content* — the channel map in particular, since it's partly inferred
-    from crossovers — as unconfirmed again; re-run `afpx.py inspect` rather
-    than trust the cached map. Answers that aren't derived from file bytes
-    (seat, rear routing, target choice) can still be offered back for a
-    quick "still correct?", just flag that the file itself moved.
-  - **No file** → run intake normally, then write one at the end of this
-    step (and again after step 3b if voicing changes) with `python
-    scripts/pipeline.py session save --tune <file> --answers <answers.json>`
-    — it computes the hash itself and never touches the tune. This is bookkeeping
-    only — it does **not** relax Non-negotiable #9: always re-decode the
-    current `.afpx` fresh before proposing edits, session file or not.
+- **Check for a prior session file before asking any intake question:**
+  `python scripts/pipeline.py session check --tune <file>` reads
+  `<tune>.tuner_session.json` (confirmed answers: model, sample rate, channel
+  map, seat, drive side, rear routing, target, voicing, vehicle `guards`, and
+  the tune's SHA-256) and reports `hash_matches` and `stale_fields`.
+  - **Hash matches** → present the stored answers back for a quick "still
+    correct?" instead of asking from scratch.
+  - **Hash differs** → the tune changed since (a PC-Tool edit). Say so, and
+    treat the channel map and anything else derived from the file as
+    unconfirmed: re-run `afpx.py inspect`. Seat, rear routing and target can
+    still be offered back.
+  - **No file** → run intake, then record it with `pipeline.py session save
+    --tune <file> --answers <answers.json>` (again after step 3b if voicing
+    changes); it never touches the tune.
+  Record a `guard` whenever evidence shows a band EQ must never fill
+  (§Vehicle guards,). The sidecar is bookkeeping: it does not relax
+  Non-negotiable #9 (re-decode the current tune before proposing).
 - **File format**: if given a `.pct6` instead of `.afpx`, read
   `references/pct6_format.md` first, then decode with `pct6.decode()` and
   **verify it actually produced `<ATF ...>` XML** before doing anything else —
@@ -316,9 +266,10 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   ask for the capture set listed there (ONE run of each: full system, the L/R
   and sub/midbass halves, an ambient capture) and pass `--capture mmm`. A
   repeat run is optional, never a prerequisite: it adds repeatability checks
-  for small changes. Run `pipeline.py capture-audit` on the set first and
-  show the user what it found (§Capture audit,); a whole `.mdat` session can
-  be passed as it is.
+  for small changes. Before they capture, offer `pipeline.py capture-plan`
+  (with the tune, if there is one); after, run `pipeline.py next` on what they
+  captured and show the user the audit before analysing (§Capture audit,). A
+  whole `.mdat` session can be passed as it is.
 - **Otherwise, ask for 3+ mic positions before any EQ proposal** — it
   is the single biggest lever on how good the tune ends up. From one sweep the
   fitter cannot tell a real response fault from a reflection comb at that mic
@@ -329,19 +280,15 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   they're getting and why.
 - **Listening seat / drive side** (LHD/RHD or "which seat did you measure"): needed
   to interpret near vs far speaker for imaging — never assume it.
-- **Measurement method**: fixed-position sweep (phase-valid → usable for timing/APF)
-  vs Moving Mic Method/RTA average (magnitude-only → tonal balance only, NOT
-  phase). This distinction gates which corrections are allowed — but they aren't
-  interchangeable-when-both-are-valid either: **when both exist, MMM is the
-  preferred source for tonal/EQ/voicing conclusions**, not the fixed sweep — a
-  single fixed point in a car's near field can show position-specific comb-
-  filtering that MMM's spatial averaging (and `spatial_consistency`'s discrete
-  version of the same idea) doesn't. If offered MMM data, ask whether it was
-  captured **engine off** (RTA has no noise rejection — a real dip can read as
-  falsely filled) and whether any OS/driver **loudness-contour enhancement**
-  (e.g. Windows Loudness Equalization) was active (breaks the level-anchor-then-
-  compare-shape assumption `target_anchor_offset` relies on). See
-  `references/methodology.md`'s "Measurement method selection" section.
+- **Measurement method**: a fixed-position sweep is phase-valid (timing,
+  all-pass); a Moving Mic Method/RTA average is magnitude-only (tone, never
+  phase). When both exist, **MMM is the preferred source for tonal, EQ and
+  voicing conclusions**: one fixed point in a car shows position-specific
+  combing that spatial averaging removes. For MMM data ask whether it was
+  captured **engine off** (an RTA adds the noise in, so a dip can read as
+  filled) and with no OS **loudness enhancement** (e.g. Windows Loudness
+  Equalization), which breaks the level anchoring (§Measurement method
+  selection,).
 - **Rear-channel routing** (if rear channels exist): ask whether they're a discrete
   feed or a **stereo-difference matrix** (e.g. Rear L = 0.5×FL − 0.5×FR). This isn't
   detectable from crossovers, so it's a separate question from the channel map
@@ -604,34 +551,27 @@ as a voicing question.
 ### 7. When a re-measure comes back — close the loop, don't just eyeball it
 
 If the user returns with a fresh measurement after loading the write, run
-`tunelib.predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
-old_bands=<filters already in the tune when before_db was measured>,
-repeatability=<capture.repeatability report>)` for repeated MMM captures
-instead of just glancing at the new plot. The profile supplies uncertainty
-in each filter's region; unsupported regions stay inconclusive. For other
-measurements, or legacy reports, pass `noise_db=<measured repeatability>`.
-A raw before/after diff would get swamped by exactly the things that differ
-between two real measurement runs (playback level, mic position, capture
-noise) — this function is built to not be fooled by those: it auto-aligns a
-broadband level offset using only frequencies the edit leaves at ~0 dB (so a
-quieter re-measure doesn't read as "the EQ failed", and a broad filter's
-skirts can't leak into the alignment), compares octave-smoothed regions (so
-ordinary mic-position comb ripple doesn't either), and downgrades to
-`'inconclusive'` wherever confidence is low rather than forcing a verdict.
-Pass `old_bands` whenever filters were edited or removed: the before trace
-already contains them, so the prediction is new minus old, never another
-cascade on top. `'confirmed'` requires the re-measure to sit closer to the
-predicted change than to no change at all; a change smaller than the
-measurement can resolve is `'inconclusive'`, never `'confirmed'`. If
-`trace_changed` is false no change clears the available resolution —
-check the new tune was actually loaded before judging any band. Each changed
-band comes back graded `confirmed` / `diverged` / `reverted_recommended` /
-`inconclusive`. Treat
-`reverted_recommended` as an instruction to reconsider or pull that band, not
-a suggestion — it means the predicted change didn't show up, the same
-"phase is eating this" signature `reaches_target_after_boost` already flags
-before a write. Report the verdicts plainly; don't silently re-tune around a
-reverted band without telling the user why.
+`pipeline.py verify --before <captures> --after <captures> --report <the
+refine or propose JSON> --dsp-rate <rate>` (or `--bands`/`--old-bands` for
+bands written by hand) instead of eyeballing the new plot. It wraps
+`tunelib.predicted_vs_measured`, which:
+
+- aligns the broadband level using only frequencies the edit leaves at ~0 dB,
+  so a quieter re-measure does not read as "the EQ failed";
+- compares octave-smoothed regions, so mic-position comb ripple cannot either;
+- predicts new minus old when filters were edited or removed (`old_bands`),
+  never another cascade on top;
+- uses repeated MMM captures' repeatability per filter region (or
+  `--noise-db`), and leaves regions it cannot resolve `inconclusive`.
+
+Each changed band comes back `confirmed` (closer to the predicted change than
+to no change), `diverged`, `reverted_recommended` or `inconclusive` (smaller
+than the measurement can resolve — never `confirmed`). If `trace_changed` is
+false, check the new tune was actually loaded before judging any band. Treat
+`reverted_recommended` as an instruction to reconsider or pull that band: the
+predicted change did not show up, the same "phase is eating this" signature
+`reaches_target_after_boost` flags before a write. Report the verdicts
+plainly; never re-tune around a reverted band without telling the user why.
 
 ## Non-negotiables
 

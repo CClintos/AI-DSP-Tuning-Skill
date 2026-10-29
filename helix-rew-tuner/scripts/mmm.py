@@ -478,7 +478,11 @@ def xo_check_cmd(args):
     ch = _channel_from_args(args)
     fs = float(args.dsp_rate)
     freqs = measure.common_grid(15.0, min(20000.0, 0.45 * fs), 48)
-    raw, sr = _load(args.raw, freqs)
+    if not args.raw and not args.eq:
+        raise ValueError('give --raw (crossover check) and/or --eq (PEQ check) with --xo')
+    # Without a RAW capture (a tweeter must never play without its high-pass)
+    # only the PEQ is checked: EQ minus XO needs no RAW.
+    raw, sr = _load(args.raw or args.xo, freqs)
     xo, sx = _load(args.xo, freqs)
     live = sr & sx
     transfer = xo - raw
@@ -504,9 +508,10 @@ def xo_check_cmd(args):
         notes.append("no --floor given: where movement noise fills the XO capture's stopband the "
                      "fit can misread a corner (pass the session's band-limited solos)")
     sections = []
+    wanted = {'both': ('hp', 'lp'), 'hp': ('hp',), 'lp': ('lp',)}[getattr(args, 'section', None) or 'both']
     for kind, hz, slope, idx in (('hp', ch['hp_hz'], ch.get('hp_slope_db_oct'), ch.get('hp_char_idx')),
                                  ('lp', ch['lp_hz'], ch.get('lp_slope_db_oct'), ch.get('lp_char_idx'))):
-        if not hz:
+        if not hz or not args.raw or kind not in wanted:
             continue
         side = trusted & ((freqs <= math.sqrt(pass_lo * pass_hi)) if kind == 'hp'
                           else (freqs >= math.sqrt(pass_lo * pass_hi)))
