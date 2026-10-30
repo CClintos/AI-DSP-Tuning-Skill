@@ -184,11 +184,15 @@ def plan(goals, chans=None, sample_rate=48000, fft=65536, seconds=25.0, mic_mode
                  _cap('Sub Midbass sweep', 'same, together', goal='validate'),
                  _cap('System Sum run 1', 'MMM full system with Save both', goal='validate', peak=True),
                  _cap('System Sum run 2', 'a second identical run with Save both', goal='validate', peak=True)]
-        steps += ['compare: mmm-align\'s best delay against bass-trials/junction from the three '
-                  'timed sweeps -- the same junction, measured two ways',
-                  'compare: stability from run 1\'s peak trace against the run-to-run spread '
-                  '(analyze --positions "System Sum run 1" "System Sum run 2" --capture mmm)',
-                  'compare: frames on a WAV recorded during run 1 against REW\'s own average of run 1']
+        fc = juncs[0]['hz'] if juncs else 80.0
+        steps += ['junction: pipeline.py junction --lower "Sub sweep" --upper "Midbass sweep" '
+                  '--crossover %.0f --out junction.json (and the mmm-align step above with --out '
+                  'align.json)' % fc,
+                  'record a WAV of run 1 for frames (frames --wav ... --out-dir frames)',
+                  'decide: pipeline.py trust-check --align align.json --junction junction.json '
+                  '--average "System Sum run 1" --peak "System Sum run 1 peak" --repeat "System Sum '
+                  'run 2" --frames-mean <frames mean file> -- trusted, advisory or remove for each '
+                  'simulation-checked tool']
     names = [c['name'] for c in caps]
     triples = []
     if all(n in names for n in ('Front L', 'Front R', 'Front Both')):
@@ -225,7 +229,8 @@ _CH = re.compile(r'\bch(\d+)\b', re.I)
 
 
 def _expand_inputs(paths):
-    out, wavs, logs = [], [], []
+    import scoresheet
+    out, wavs, logs, sheets = [], [], [], []
     for p in paths:
         if os.path.isdir(p):
             for q in sorted(glob.glob(os.path.join(p, '*'))):
@@ -236,13 +241,17 @@ def _expand_inputs(paths):
                     wavs.append(q)
                 elif os.path.basename(low) == 'ab_log.json':
                     logs.append(q)
+                elif low.endswith('.json') and scoresheet.is_sheet(q):
+                    sheets.append(q)
         elif p.lower().endswith('.wav'):
             wavs.append(p)
         elif os.path.basename(p).lower() == 'ab_log.json':
             logs.append(p)
+        elif p.lower().endswith('.json') and scoresheet.is_sheet(p):
+            sheets.append(p)
         else:
             out.append(p)
-    return out, wavs, logs
+    return out, wavs, logs, sheets
 
 
 def _spec_by_name(caps):
@@ -263,8 +272,8 @@ def _spec_by_name(caps):
 
 
 def next_steps(paths, afpx_path=None, target='default'):
-    files, wavs, logs = _expand_inputs(paths)
-    if not files and not wavs and not logs:
+    files, wavs, logs, sheets = _expand_inputs(paths)
+    if not files and not wavs and not logs and not sheets:
         raise ValueError('no captures found in %s' % ', '.join(paths))
     report = capture_audit.audit(files) if files else {'captures': [], 'set': {'flags': [], 'triples': []},
                                                        'table': []}
@@ -415,11 +424,14 @@ def next_steps(paths, afpx_path=None, target='default'):
         parts.append('--ir %s' % ' '.join(p(c) for c in bass_irs))
     if afpx_path:
         parts.append('--afpx %s' % _q(afpx_path))
+    if sheets:
+        parts.append('--heard %s' % _q(sheets[-1]))
     if parts:
         floor_part = (' --floor ' + ' '.join(p(c) for c in solos)) if solos else ''
         add('finish %s%s' % (' '.join(parts), floor_part),
             'after the curve: residual low-Q peaks, each instrument band imaging in one place, '
-            'height overlaps, the sub and bass decay')
+            'height overlaps, the sub and bass decay' +
+            ('; and each lost point on the listening sheet against them' if sheets else ''))
     if not triple_rows:
         missing.append('a cancel-check set (left, right, both): summation coherence and boost evidence')
     if not ambient and not solos:

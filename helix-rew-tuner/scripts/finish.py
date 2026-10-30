@@ -8,10 +8,11 @@
 #            audible than equal dips (Buecklein 1981), and broad resonances are
 #            audible at small amplitudes (Toole & Olive 1988). Dips are listed
 #            to be left alone unless a cancel check explains them.
-#   imaging  each EMMA instrument band imaging in ONE place: the position
-#            (level, and time when the captures carry phase) in third-octave
-#            slices of the band, its mean (centre) and its spread (focus). EMMA
-#            scores an instrument heard in two places as zero; a band average
+#   imaging  each EMMA instrument imaging in ONE place: the position (level,
+#            and time when the captures carry phase) in third-octave slices of
+#            the part of its range (2026 judge book, as `imaging --bands emma`)
+#            both sides play; their mean (centre) and spread (focus). EMMA
+#            scores an instrument heard in two places as zero; a range average
 #            can be centred while the instrument is smeared.
 #   height   overlapping passbands between driver pairs mounted at different
 #            heights. Delay cannot move vertical images (no precedence effect
@@ -24,6 +25,9 @@
 #            level measured.
 #   decay    bass ringing against Fazenda, Stephenson & Goldberg 2015
 #            (music: 0.51 s at 63 Hz falling to 0.12 s at 250 Hz).
+#   heard    with --heard, a listening sheet (assets/emma_listening_sheet.html,
+#            the 280-point EMMA SQ sheet) read against all of the above by
+#            scoresheet.py: each lost point next to what the captures show.
 #
 # It writes nothing. Each finding carries its evidence level and the command
 # that acts on it; filters still go through propose/refine and plan/apply.
@@ -39,9 +43,11 @@ import tunelib
 GRID = measure.common_grid(20.0, 20000.0, 96)
 DEFAULT_TARGET = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'assets',
                               'default_incar_target.txt')
-EMMA_INSTRUMENTS = (('electronic bass', 40.0, 100.0), ('electric guitar', 100.0, 250.0),
-                    ('flute', 250.0, 1000.0), ('celesta', 1000.0, 2000.0),
-                    ('triangle', 2000.0, 4000.0))
+# The 2026 judge book's instruments and ranges (tracks 2-6), shared with imaging --bands emma.
+EMMA_INSTRUMENTS = tuple((name, lo, hi) for name, (lo, hi)
+                         in zip(tunelib.EMMA_IMAGING_INSTRUMENTS, tunelib.EMMA_IMAGING_BANDS))
+MIN_COVER_OCT = 1.0           # the least of an instrument's range both sides must play
+IMAGE_TOP_HZ = 16000.0        # as EMMA_BANDS: above this a moving-mic capture is mic- and noise-limited
 PEAK_BAND = (150.0, 10000.0)
 FULL_SCALE_DB = 16.0          # inter-channel level for a full image shift (tunelib.image_pull)
 FB_LIMITS_PCT = {2: 3.0, 3: 1.0}
@@ -139,32 +145,35 @@ def _slices(lo, hi):
 
 
 def image_balance(freqs, left_db, right_db, live, left_phase=None, right_phase=None, played=None):
-    """Per EMMA instrument band: the image position (pull, -1 full right ..
-    +1 full left) in third-octave slices, from level and, with phase, time.
-    Centre = mean pull; focus = spread of the slices (max - min)."""
+    """Per EMMA instrument: the image position (pull, -1 full right .. +1 full
+    left) in third-octave slices of the part of its range both sides play,
+    from level and, with phase, time. Centre = mean pull; focus = spread of
+    the slices (max - min), up to 16 kHz. A mono sub carries no left/right
+    image, so an instrument's image comes from the L/R drivers that play it."""
     lsm, rsm = tunelib.erb_smooth(freqs, left_db), tunelib.erb_smooth(freqs, right_db)
     time_cue = left_phase is not None and right_phase is not None
+    reach = live if played is None else played & live
     out = []
     for name, lo, hi in EMMA_INSTRUMENTS:
-        slices = _slices(lo, hi)
-        if played is not None:
-            inside = played & (freqs >= lo) & (freqs <= hi)
-            share = np.count_nonzero(inside) / max(1, np.count_nonzero((freqs >= lo) & (freqs <= hi)))
-            if share < 0.6:
-                out.append({'instrument': name, 'band_hz': [lo, hi], 'slices': len(slices),
-                            'verdict': 'not_covered',
-                            'why': 'the left/right captures play only %.0f%% of this band (their '
-                                   'passbands); a mono sub carries no left/right image, so this '
-                                   "band's image comes from whatever L/R driver plays it" % (100 * share)})
-                continue
+        cov = reach & (freqs >= lo) & (freqs <= min(hi, IMAGE_TOP_HZ))
+        row = {'instrument': name, 'band_hz': [lo, hi]}
+        span = (float(freqs[cov][0]), float(freqs[cov][-1])) if np.any(cov) else None
+        if span is None or math.log2(span[1] / span[0]) < MIN_COVER_OCT:
+            row.update(verdict='not_covered',
+                       why=('the left/right captures play %s of this %d-%d Hz range: less than an '
+                            'octave to judge its image by'
+                            % ('none' if span is None else '%d-%d Hz' % span, lo, hi)))
+            out.append(row)
+            continue
+        slices = _slices(*span)
         rows = tunelib.band_itd_ild(freqs, np.where(live, lsm, np.nan), np.where(live, rsm, np.nan),
                                     left_phase if time_cue else None, right_phase if time_cue else None,
                                     bands=slices, min_bins=6)
         pulled = tunelib.image_pull(rows, icld_full_scale_db=FULL_SCALE_DB)
         pulls = [b['pull'] for b in pulled['bands']]
-        row = {'instrument': name, 'band_hz': [lo, hi], 'slices': len(slices)}
+        row.update(analysed_hz=[round(span[0]), round(span[1])], slices=len(slices))
         if len(pulls) < 2:
-            row.update(verdict='insufficient_data', why='too few measured bins in the band')
+            row.update(verdict='insufficient_data', why='too few measured bins in the range')
             out.append(row)
             continue
         mean, spread = float(np.mean(pulls)), float(max(pulls) - min(pulls))
@@ -347,20 +356,22 @@ def _load_ir(spec):
 
 # ------------------------------------------------------------------ report
 LISTENING = [
-    {'listen': 'EMMA tracks 2-6, each instrument in one place (bass, guitar, flute, celesta, triangle)',
-     'if_wrong': 'an instrument sounds in two places, or its size is wrong', 'section': 'imaging'},
-    {'listen': 'track 7, every instrument at eye level from left to right',
-     'if_wrong': 'the low-mid instruments sit low, or the height wanders',
-     'section': 'height (and the height voicing variant)'},
-    {'listen': 'track 7, width and distance', 'if_wrong': 'a narrow or close stage',
-     'section': 'imaging at 2-4 kHz and up; focus versus spaciousness is a deliberate choice'},
-    {'listen': 'bass drum and bass separated, both centred and in front',
-     'if_wrong': 'the bass is pulled back or blurred', 'section': 'sub and decay; mmm-align or junction for timing'},
-    {'listen': 'tonal tracks 8-11, nothing pokes out',
-     'if_wrong': 'a note or a voice range is louder than the rest', 'section': 'tone (residual peaks)'},
-    {'listen': 'the same at about 6 dB louder', 'if_wrong': 'the balance changes',
-     'section': 'emma-volume'},
+    {'listen': 'tracks 2-6: at each of the five positions, every instrument (bass, guitar, banjo, '
+               'vibraphone, triangle) in that one place',
+     'if_wrong': 'an instrument off its position, or heard in two places (0 points for it)',
+     'section': 'imaging'},
+    {'listen': 'track 12: stage distance, width and height',
+     'if_wrong': 'a close or narrow stage, or instruments low or moving in height with pitch',
+     'section': 'height and imaging focus; the height and distance voicing variants'},
+    {'listen': 'tracks 13-16: sub-bass, mid-bass, midrange and high, each clean and even',
+     'if_wrong': 'a note or range louder than the rest, boom, harshness',
+     'section': 'tone (residual peaks, emma_bands), sub and bass decay'},
+    {'listen': 'track 16 at your volume, then about 6 dB louder',
+     'if_wrong': 'the balance changes or the system strains', 'section': 'emma-volume'},
+    {'listen': 'the silent track', 'if_wrong': 'hum, hiss or pops', 'section': 'noise-check'},
 ]
+SHEET_NOTE = ('score the listening on assets/emma_listening_sheet.html (or copy a judge\'s sheet into '
+              'it) and pass its export to finish --heard')
 
 
 def _side(paths):
@@ -374,14 +385,20 @@ def _side(paths):
 
 def finish_cmd(args):
     import mmm
-    if not any((args.system, args.left, args.sub, args.ir, args.afpx)):
-        raise ValueError('give at least one of --system, --left/--right, --sub, --ir or --afpx')
+    heard = getattr(args, 'heard', None)
+    if not any((args.system, args.left, args.sub, args.ir, args.afpx, heard)):
+        raise ValueError('give at least one of --system, --left/--right, --sub, --ir, --afpx or --heard')
     if bool(args.left) != bool(args.right):
         raise ValueError('--left and --right go together')
+    sheet = None
+    if heard:
+        import scoresheet
+        sheet = scoresheet.load(heard)          # checked before any capture is read
     floor = mmm._floor(args.floor, GRID) if args.floor else None
-    report = {'meta': {k: getattr(args, k) for k in ('system', 'left', 'right', 'sub', 'ir', 'afpx',
-                                                    'low', 'high', 'floor', 'target')},
-              'evidence': EVIDENCE, 'summary': [], 'listening_checklist': LISTENING}
+    report = {'meta': {k: getattr(args, k, None) for k in ('system', 'left', 'right', 'sub', 'ir', 'afpx',
+                                                          'low', 'high', 'floor', 'target', 'heard')},
+              'evidence': EVIDENCE, 'summary': [], 'listening_checklist': LISTENING,
+              'listening_sheet': SHEET_NOTE}
     if args.system:
         f, s, _ph, _c = measure.load_text_export(args.system)
         db = measure.resample_log(f, s, GRID)
@@ -399,6 +416,7 @@ def finish_cmd(args):
         ripple = nbd(GRID, _smooth(GRID, db, 24.0))
         report['tone'] = {'nbd_db': None if ripple is None else round(ripple, 2),
                           'residual_peaks': peaks, 'leave_alone_dips': dips,
+                          'emma_bands': tunelib.emma_band_balance(GRID, dev, live),
                           'notes': ['peaks about a two-octave trend after the target is matched; a '
                                     'suggested cut is a starting point for propose/refine with '
                                     '--fit-band, which validate it -- never written from here',
@@ -449,10 +467,10 @@ def finish_cmd(args):
         chans = afpx.channels(afpx.decode(args.afpx))
         over = passband_overlap(chans, args.low, args.high)
         report['height'] = {'overlaps': over,
-                            'voicing_option': ('A/B a height variant: voice-variants --presence-db 1.5 '
-                                               '--presence-hz 8000 --presence-channels <tweeter channels> '
-                                               '(Blauert: a band near 8 kHz reads "above"; weak evidence '
-                                               'in cars, so blind A/B only)'),
+                            'voicing_option': ('A/B a height variant: voice-variants --height-db 1 2 '
+                                               '--height-channels <tweeter channels> (Blauert: a band '
+                                               'near 8000 Hz reads "above"; weak evidence in cars, so '
+                                               'blind A/B only)'),
                             'notes': ['channel pairs come from the tune\'s pair guess: confirm the map']}
         for o in over:
             if o['verdict'] in ('height_risk', 'question'):
@@ -487,8 +505,12 @@ def finish_cmd(args):
         'bass and treble to taste: voice-variants + ab-make + prefs (preferred bass spans many dB '
         'between listeners)',
         'listening level: listening-level --capture <full-system capture>',
-        'distance (taste, unproven): voice-variants --presence-db -1.5 --presence-hz 2500',
+        'distance (taste, unproven): voice-variants --distance-db -1 -2 --distance-channels <mid and '
+        'tweeter channels>',
     ]
+    if sheet is not None:
+        report['heard'] = scoresheet.explain(sheet[0], sheet[1], report)
+        report['summary'] = ['heard: ' + p for p in report['heard']['priorities']] + report['summary']
     if not report['summary']:
         report['summary'].append('nothing above the thresholds in what was given')
     return report

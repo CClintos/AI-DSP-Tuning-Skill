@@ -99,13 +99,21 @@ THIRD_OCT = 1000.0 * 2.0 ** (np.arange(-17, 14) / 3.0)      # 20 Hz .. 20 kHz
 
 
 def smooth_oct(freqs, db, frac=3.0):
-    """Power average over a 1/frac-octave window centred on every bin."""
+    """Power average over a 1/frac-octave window centred on every bin. NaN
+    bins (outside a capture's range) stay NaN and are left out of their
+    neighbours' windows: a running sum would otherwise carry one NaN into
+    every bin above it."""
     p = 10.0 ** (np.asarray(db, dtype=float) / 10.0)
+    ok = np.isfinite(p)
     lf = np.log2(freqs)
-    c = np.concatenate([[0.0], np.cumsum(p)])
+    c = np.concatenate([[0.0], np.cumsum(np.where(ok, p, 0.0))])
+    n = np.concatenate([[0], np.cumsum(ok)])
     lo = np.searchsorted(lf, lf - 0.5 / frac)
     hi = np.searchsorted(lf, lf + 0.5 / frac, side='right')
-    return 10.0 * np.log10((c[hi] - c[lo]) / np.maximum(hi - lo, 1))
+    count = n[hi] - n[lo]
+    with np.errstate(divide='ignore', invalid='ignore'):
+        out = 10.0 * np.log10((c[hi] - c[lo]) / np.maximum(count, 1))
+    return np.where(ok & (count > 0), out, np.nan)
 
 
 def passband(freqs, db, driver=None, drop_db=20.0):

@@ -133,7 +133,7 @@ The full Helix filter set, each used for what it's good at:
 ## Install
 
 `SKILL.md`'s frontmatter carries a `metadata.version` field (currently
-`1.23.0`) so you can tell whether an already-installed copy is current — open
+`1.24.0`) so you can tell whether an already-installed copy is current — open
 your installed `SKILL.md` and compare its version against this repo's; if
 it's older, redownload/re-copy per below. There's no auto-update; this skill
 has no persistent connection back to GitHub once installed.
@@ -197,7 +197,10 @@ captures to make and how to name them, the REW settings, how many averages make
 each capture long enough, the level your mic can take, and the safety limits.
 Once the tune sits on the target, `pipeline.py finish` lists what still
 decides the sound: the last broad peaks, whether each instrument images in one
-place, stage height and the sub. Afterwards, point the agent at the files or the session `.mdat`
+place, stage height and the sub. Score a listening session, or copy a judge's
+sheet, on `helix-rew-tuner/assets/emma_listening_sheet.html` (the 280-point
+EMMA sheet, offline on a phone) and `finish --heard` reads it against the
+captures. Afterwards, point the agent at the files or the session `.mdat`
 (`pipeline.py next --captures <folder>`): it audits them and runs what they
 support. Short captures, mic-handling noise and mixed settings were the commonest
 problems in real sessions, and the plan prevents them.

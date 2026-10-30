@@ -65,7 +65,7 @@ settings and limits. Both only read.
 | `next` | Audit whatever was captured (text exports, `file.mdat::name`, a whole `.mdat`, a folder; WAVs and `ab_log.json` too) and list the applicable commands with arguments, what is blocked and why, and what is missing. | §Capture audit |
 | `capture-plan` | Before capturing: the named capture list for `--goal tone lr bass xo stability repeat frames validate` (or `all`), REW settings, averages for the capture length, the mic's level ceiling, the T1 delay for `mmm-align` and the RAW/XO/EQ sequence with its safety limits. | §Capture audit |
 | `analyze` | One JSON report: tilt, flagged deviation regions, `bass_balance`, `emma_bands`. Adds `spatial_consistency` with `--positions`, the interference audit and `crossover_confidence` with `--solo-a --solo-b --together --pair-band LO HI`, the gate floor with `--gate-ms`, and a per-dip `boost_gate` verdict when `--measurement` carries phase (`--trust-band LO HI` sets the passband). `--target default` uses the bundled curve. Writes nothing. | §The boost gate |
-| `propose` | A deterministic PEQ proposal from the same inputs (`--fit-band LO HI`, `--max-bands N`). With 3+ positions it validates itself leave-one-position-out: each band carries APPLY, REVIEW or DO NOT APPLY, and DO NOT APPLY bands land in `rejected`. `--sittings` withholds a whole sitting per fold; `--session-tune <afpx>` enforces the car's recorded guards. Writes nothing. | §Multi-position variance |
+| `propose` | A deterministic PEQ proposal from the same inputs (`--fit-band LO HI`, `--max-bands N`, `--dsp-rate` with the confirmed rate: without it bands are modelled at 96 kHz and the report says so). With 3+ positions it validates itself leave-one-position-out: each band carries APPLY, REVIEW or DO NOT APPLY, and DO NOT APPLY bands land in `rejected`. `--sittings` withholds a whole sitting per fold; `--session-tune <afpx>` enforces the car's recorded guards. Writes nothing. | §Multi-position variance |
 | `refine` | Every session after the first: keeps, relaxes, re-fits or removes the PEQ bank the measurement was taken through, and adds only where a residual is real (`--afpx --channels --dsp-rate`; guards come from the `--afpx` sidecar). Writes nothing. | §Refine the tune you have |
 | `plan` / `apply` | The only AFPX write route (step 5). | `references/tune_plan_schema.md` |
 | `session check` / `session save` | Read or record the intake sidecar (step 1). | — |
@@ -82,9 +82,9 @@ settings and limits. Both only read.
 | `mmm-compare` | Rank MMM captures of different settings over one band (default `balanced`). For a close final touch-up, add `--repeat A2.txt --candidate-repeat trial=B2.txt`: both candidate runs must beat both baseline runs, using the same anchor and the worse repeat disagreement. | §MMM-first tuning |
 | `lr-match` | Left/right tonal match from half-system captures (`--target <curve>`). Corrects only target-supported excess and never copies a dip onto the good side. | §MMM-first tuning |
 | `verify` | Did a written change land? Before vs after captures, `--dsp-rate`. | §MMM-first tuning |
-| `voice-variants` | Single-filter voicing variants of a finished tune, for a blind A/B. | §MMM-first tuning |
+| `voice-variants` | Single-filter voicing variants of a finished tune, for a blind A/B: bass, treble, presence, height (near 8 kHz) and distance (near 4 kHz). | §MMM-first tuning |
 | `emma-volume` / `noise-check` | EMMA's 6 dB-louder balance check / system noise (off vs on, playing silence). | §Preparing for EMMA |
-| `finish` | After the sum is on target: residual broad peaks (cut these, not dips), each EMMA instrument band imaging in one place (centre and focus), overlapping passbands between drivers at different heights (`--low`/`--high`), sub leakage and harmonics, bass decay (`--ir`). Writes nothing; each finding names its fix. | §Finishing touches after the curve |
+| `finish` | After the sum is on target: residual broad peaks (cut these, not dips), each EMMA instrument band imaging in one place (centre and focus), overlapping passbands between drivers at different heights (`--low`/`--high`), sub leakage and harmonics, bass decay (`--ir`). `--heard` reads a listening sheet (`assets/emma_listening_sheet.html`) against all of it. Writes nothing; each finding names its fix. | §Finishing touches after the curve |
 | `capture-audit` | Per-capture and whole-set checks from the files' own headers (length, movement noise, mic headroom, infrasound, triple playback level, stopbands, mixed settings, twin floors) and what each file can feed. `next` runs it. | §Capture audit |
 | `coherence` | Summation coherence per band from an A, B, A+B triple: coherent, power sum (alignment cannot change the tone) or cancelling. | §Summation coherence |
 | `mmm-align` | Junction delay/polarity predicted from four MMM captures (A, B, both, both with a known extra delay on B; or the flip form). Confirm a `candidate` with an `mmm-compare` capture, then plan it as a phase-only edit. | §Four-capture MMM alignment |
@@ -93,6 +93,7 @@ settings and limits. Both only read.
 | `listening-level` / `road-noise` | Voicing options for your listening level (ISO 226) and for road noise (a passenger's capture). Blind A/B options, never corrections. | §Voicing for the listening level and the road |
 | `prefs` | Your preferred voicing, with uncertainty, and the next A/B pair, from `ab_log.json`. | §Learning the listener's voicing |
 | `frames` | One MMM run's own repeatability, robust mean and peak trace, from a WAV recording or `rew_api.py rta-frames`. | §Frame-level MMM |
+| `trust-check` | After a validation evening (the `validate` goal of `capture-plan`): is `mmm-align`, the stability map, `frames` or the test signal trusted, advisory or to remove on this car, each checked against an independent measurement of the same thing. | §Validating these tools on a real car |
 | `selftest` | Synthetic self-test, including this document's section references. | — |
 
 MMM captures take `--capture mmm` on analyze, propose and refine, plus
@@ -181,6 +182,8 @@ read before first use.
 - **`references/tune_plan_schema.md`**: the plan/apply JSON contract. Read
   before the first AFPX write.
 - **`references/tunelib_api.md`**: the analysis functions for ad-hoc work.
+- **`references/first_tune.md`**: the user's guide from a new install to the
+  first captures and the first tune.
 - **`references/afpx_format.md`**: the exact `.afpx` binary and filter-code
   spec. Read before any write (verified on P SIX DSP MK2; see model caveat).
 - **`references/pct6_format.md`**: the `.pct6` container, BETA caveats and
@@ -207,6 +210,10 @@ intake questions (step 1). Then work through steps 2–7.
 capture covers and where it was measured. Nothing is written until a tune file
 exists and each edit is confirmed. Non-negotiable #1 then means confirming
 the drivers and seat in words, since there is no channel map to read.
+
+**Nothing measured yet** (a new install)? Walk the user through
+`references/first_tune.md` one stage at a time, from preparing the install to
+the first captures.
 
 ### 0. Preflight — once per environment, before intake
 
@@ -436,7 +443,8 @@ twice,).
   (§Refine the tune you have,). Use `propose` for a channel with no PEQ yet.
 - **Start from `python scripts/pipeline.py propose`** with the same inputs you
   gave `analyze` (`--measurement` and/or `--positions`, `--target`, `--voice`,
-  optionally `--fit-band LO HI` per channel and `--max-bands N`). It runs the
+  optionally `--fit-band LO HI` per channel, `--max-bands N` and `--dsp-rate`
+  with the confirmed rate). It runs the
   joint fitter the same way every session — multi-position robust fit with
   spatial mask/confidence when 3+ positions exist, the boost gate on any boost
   when the measurement carries phase (BLOCKed boosts land in `rejected`), and
@@ -589,7 +597,10 @@ plainly; never re-tune around a reverted band without telling the user why.
 Once the bands are confirmed and the sum sits on the target, run `pipeline.py
 finish` on the new captures: it lists what still decides the sound, imaging
 per instrument, the last broad peaks, height and the sub (§Finishing touches
-after the curve,).
+after the curve,). Then listen, or bring back a judge's sheet: score it on
+`assets/emma_listening_sheet.html` (the 280-point EMMA sheet) and pass the
+export to `pipeline.py finish --heard`, which puts each lost point next to the
+measurement that explains it, or says that none does.
 
 ## Non-negotiables
 

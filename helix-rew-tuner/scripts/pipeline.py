@@ -611,7 +611,7 @@ def load_guards(tune_path, notes):
     return guards
 
 
-def guard_check(guards, channels=None, freqs=None):
+def guard_check(guards, channels=None, freqs=None, fs=tunelib.FS):
     """(F, Q, G) -> None, or the reason a BOOST breaks a vehicle guard.
 
     A zone applies when its channels are null, the caller names no channels,
@@ -631,7 +631,7 @@ def guard_check(guards, channels=None, freqs=None):
             return None
         if qmax is not None and Q > qmax + 1e-9:
             return 'boost Q %.2f exceeds the max_boost_q %g set for this car' % (Q, qmax)
-        rise = tunelib.peaking_db(f, F, Q, G)
+        rise = tunelib.peaking_db(f, F, Q, G, fs=fs)
         for z in zones:
             sel = (f >= z['lo_hz']) & (f <= z['hi_hz'])
             if np.any(sel) and float(np.max(rise[sel])) > GUARD_TOLERANCE_DB:
@@ -1327,8 +1327,15 @@ def propose(args):
     per-edit confirmation, and pipeline.py plan/apply to be written."""
     freqs = measure.common_grid(20.0, 20000.0, 96)
     notes = []
+    rate = getattr(args, 'dsp_rate', None)
+    fs = float(rate) if rate is not None else tunelib.FS
+    tunelib._validate_peq_rate(freqs, fs)
     sess = _load_session(args, freqs)
     notes.extend(sess['notes'])
+    if rate is None:
+        notes.append('bands modelled at %.0f Hz (P SIX MK2) because no --dsp-rate was given; '
+                     'on a unit that runs at another rate a band above about 6 kHz lands up to '
+                     '0.4-0.65 dB differently -- pass the CONFIRMED rate' % tunelib.FS)
     band = tuple(args.fit_band) if args.fit_band else PROPOSE_FIT_BAND
     covered = freqs[sess['support']]
     clipped = (max(band[0], float(covered[0])), min(band[1], float(covered[-1])))
@@ -1379,7 +1386,7 @@ def propose(args):
         # proposal, so validation and proposal cannot drift apart.
         held_out = tunelib.held_out_band_validation(
             freqs, deviations, band, mask=mask, conf=conf,
-            fitter_kwargs=dict({'n_bands_max': args.max_bands}, **qkw), groups=groups)
+            fitter_kwargs=dict({'n_bands_max': args.max_bands}, **qkw), groups=groups, fs=fs)
         bands = [(r['f_hz'], r['q'], r['gain_db']) for r in held_out['bands']]
         band_validation = {(r['f_hz'], r['q'], r['gain_db']): r for r in held_out['bands']}
         fit_report = {'held_out_verdict': held_out['verdict'],
@@ -1394,7 +1401,7 @@ def propose(args):
         deviations = sess['aligned'] - (sess['target_db'] + sess['anchor'])
         bands, fit_report = tunelib.fit_peq_robust(
             freqs, deviations, band, n_bands_max=args.max_bands,
-            mask=mask, conf=conf, fit_smoothed=True, **qkw)
+            mask=mask, conf=conf, fit_smoothed=True, fs=fs, **qkw)
         if groups is None and mmm:
             notes.append('two MMM runs: fitted jointly; their repeatability (%.2f dB) is the '
                          'resolution any re-measure must beat' % sess['repeatability']['noise_db'])
@@ -1405,7 +1412,7 @@ def propose(args):
         deviations = None
         bands, fit_report = tunelib.fit_peq(
             freqs, dev_db, band, n_bands_max=args.max_bands, mask=mask, fit_smoothed=True,
-            cut_seed_retry=mmm, **qkw)
+            cut_seed_retry=mmm, fs=fs, **qkw)
         if mmm:
             notes.append('one MMM run: already a spatial average, so the fit is not chasing '
                          'one mic spot -- capture the same tune a second time to measure '
@@ -1422,7 +1429,7 @@ def propose(args):
     if sess['measurement_phase'] is not None and has_boost:
         try:
             _trust, fields = _phase_fields(args, freqs, sess)
-            rows, _summary = tunelib.gate_boost_bands(fields, bands)
+            rows, _summary = tunelib.gate_boost_bands(fields, bands, fs=fs)
             gate = {(r['f_hz'], r['q'], r['gain_db']): r['verdict'] for r in rows}
             if fields['mad_floored']:
                 notes.append('boost gate ran on a trace too smooth to support it -- '
@@ -1450,7 +1457,7 @@ def propose(args):
 
     gcheck = None
     if args.session_tune:
-        gcheck = guard_check(load_guards(args.session_tune, notes), args.channels, freqs)
+        gcheck = guard_check(load_guards(args.session_tune, notes), args.channels, freqs, fs=fs)
         if gcheck is None:
             notes.append('no vehicle guards recorded in the session file for %s'
                          % args.session_tune)
@@ -1485,7 +1492,7 @@ def propose(args):
             row['caution'] = 're-measure with the mic moved ~10 cm before proposing this boost'
         if mmm:
             support_v = tunelib.mmm_change_support(
-                freqs, tunelib.peaking_db(freqs, F, Q, G), tunelib.peq_region(F, Q),
+                freqs, tunelib.peaking_db(freqs, F, Q, G, fs=fs), tunelib.peq_region(F, Q),
                 sess['repeatability'])
             row['repeatability'] = support_v
             if support_v['status'] == 'below_repeatability':
@@ -1510,7 +1517,7 @@ def propose(args):
         rejected.append({'f_hz': F, 'q': Q, 'gain_db': G, 'reason': 'exceeds measured additional-gain ceiling'})
     final = [(r['f_hz'], r['q'], r['gain_db']) for r in kept]
 
-    eq = tunelib.cascade_db(freqs, final)
+    eq = tunelib.cascade_db(freqs, final, fs=fs)
     smoothed_before = tunelib.erb_smooth(freqs, dev_db)
     smoothed_after = tunelib.erb_smooth(freqs, dev_db + eq)
     for row in kept:
@@ -1581,9 +1588,8 @@ def propose(args):
                  'duplicate_positions': sess['duplicates'],
                  'anchor_offset_db': round(float(sess['anchor']), 2),
                  'voicing_applied': sess['voice_knobs'] or None,
-                 # Bands are modelled at this rate. On a 48 kHz unit a band above
-                 # ~6 kHz lands up to ~0.4 dB differently; refine takes --dsp-rate.
-                 'prediction_sample_rate_hz': tunelib.FS},
+                 'dsp_sample_rate_hz': None if rate is None else fs,
+                 'prediction_sample_rate_hz': fs},
         'tilt': {'measured': tunelib.measure_tilt(freqs, sess['basis_db']),
                  'target': tunelib.measure_tilt(freqs, sess['target_db'])},
         'proposal': {'bands': kept, 'rejected': rejected, 'needs_trial': needs_trial},
@@ -1919,7 +1925,7 @@ def refine(args):
             _trust, fields = _phase_fields(args, freqs, sess)
 
             def boost_check(F, Q, G):
-                rows, _summary = tunelib.gate_boost_bands(fields, [(F, Q, G)])
+                rows, _summary = tunelib.gate_boost_bands(fields, [(F, Q, G)], fs=fs)
                 return rows[0]['verdict']
         except ValueError as exc:
             notes.append('boost gate unavailable: %s' % exc)
@@ -1952,7 +1958,7 @@ def refine(args):
             return None
 
     guards = load_guards(args.afpx, notes)
-    gcheck = guard_check(guards, args.channels, freqs)
+    gcheck = guard_check(guards, args.channels, freqs, fs=fs)
     mcheck = guard_move_check(guards, args.channels, freqs, fs)
     guard_blocks, move_blocks = {}, {}
     if mcheck:
@@ -2308,22 +2314,29 @@ def verify(args):
                           'ones by the blind A/B (ab-make with the measured level offset)')}
 
 
-def voice_variants(args):
-    """Shelf-only voicing variants of a finished tune, for a blind A/B.
+# Voicing knobs: (end-shelf dF, or None for a free PEQ slot; filter type code).
+# height: a broad lift near 8 kHz, Blauert's band heard "above"; distance: a
+# broad band near 4 kHz, where the "presence dip" practice pushes the stage
+# back. Both are taste variants for blind A/B, never corrections.
+VOICE_KNOBS = {'bass': ('25', '3'), 'treble': ('20000', '4'), 'presence': (None, '17'),
+               'height': (None, '17'), 'distance': (None, '17')}
 
-    Each variant changes ONE thing -- a low shelf on the bass channels or a
-    high shelf on the tweeter channels -- in the channel's end shelf slot,
-    through the verified plan/apply path. Without --confirm it only shows the
-    edits. Voicing is a preference decision: compare the variants blind and
-    level-matched (ab-make with the predicted loudness change), never by
-    which one measures closer to a curve."""
+def voice_variants(args):
+    """Single-filter voicing variants of a finished tune, for a blind A/B.
+
+    Each variant changes ONE thing -- a low shelf on the bass channels, a high
+    shelf on the tweeter channels, or one broad peaking band (presence, height
+    near 8 kHz, distance near 4 kHz) in a free slot of the channels that play
+    it -- through the verified plan/apply path. Without --confirm it only
+    shows the edits. Voicing is a preference decision: compare the variants
+    blind and level-matched (ab-make with the predicted loudness change),
+    never by which one measures closer to a curve."""
     xml = afpx.decode(args.afpx)
     chans = afpx.channels(xml)
-    variants = [('bass', d) for d in (args.bass_db or [])] + \
-               [('treble', d) for d in (args.treble_db or [])] + \
-               [('presence', d) for d in (getattr(args, 'presence_db', None) or [])]
+    variants = [(kind, d) for kind in VOICE_KNOBS for d in (getattr(args, kind + '_db', None) or [])]
     if not variants:
-        raise ValueError('give --bass-db and/or --treble-db values, e.g. --bass-db -1 1')
+        raise ValueError('give at least one of --bass-db, --treble-db, --presence-db, --height-db '
+                         'or --distance-db, e.g. --bass-db -1 1')
     freqs = measure.common_grid(20.0, 20000.0, 96)
     program = measure.load_target(ASSETS_DEFAULT_TARGET, freqs)
     out_dir = os.path.abspath(args.out_dir)
@@ -2332,37 +2345,40 @@ def voice_variants(args):
     for kind, delta in variants:
         step = round(float(delta) * 4.0) / 4.0
         if step == 0.0:
-            raise ValueError('%s variant %+g dB rounds to 0 at the 0.25 dB shelf step' % (kind, delta))
-        channels = (args.bass_channels if kind == 'bass' else
-                    getattr(args, 'presence_channels', None) if kind == 'presence' else args.treble_channels)
+            raise ValueError('%s variant %+g dB rounds to 0 at the 0.25 dB step' % (kind, delta))
+        channels = getattr(args, kind + '_channels', None)
         if not channels:
             raise ValueError('--%s-channels is required for a %s variant' % (kind, kind))
-        end, code = ('25', '3') if kind == 'bass' else ('presence', '17') if kind == 'presence' else ('20000', '4')
-        hz = args.bass_hz if kind == 'bass' else args.presence_hz if kind == 'presence' else args.treble_hz
+        end, code = VOICE_KNOBS[kind]
+        hz = getattr(args, kind + '_hz')
+        q = getattr(args, kind + '_q', None) or args.q
         edits, curve_spec = [], None
         for c in channels:
             if not 0 <= c < len(chans):
                 raise ValueError('channel %d does not exist' % c)
-            slot = next((sl for sl in chans[c]['slots'] if (sl['free'] and sl['dF'] not in ('25', '20000') if kind == 'presence' else sl['dF'] == end)), None)
+            slot = next((sl for sl in chans[c]['slots']
+                         if (sl['free'] and sl['dF'] not in ('25', '20000') if end is None
+                             else sl['dF'] == end)), None)
             if slot is None:
-                raise ValueError('channel %d has no %s shelf slot (dF=%s)' % (c, kind, end))
+                raise ValueError('channel %d has no %s slot (%s)'
+                                 % (c, kind, 'a free PEQ slot' if end is None else 'dF=%s' % end))
             edit = {'id': 'voice-%s%+.2f-ch%d' % (kind, step, c), 'kind': 'filter_slot',
                     'channel': c, 'slot': slot['slot_index']}
-            if slot['type_code'] == code and slot['G']:
+            if end is not None and slot['type_code'] == code and slot['G']:
                 G = float(np.clip(slot['G'] + step, -15.0, 6.0))
                 edit['G'] = G
                 spec = (slot['F'], slot['Q'], G - slot['G'])
             elif slot['free'] or slot['type_code'] == code:
-                edit.update({'type_code': code, 'F': float(hz), 'Q': float(args.q), 'G': step})
-                spec = (float(hz), float(args.q), step)
+                edit.update({'type_code': code, 'F': float(hz), 'Q': float(q), 'G': step})
+                spec = (float(hz), float(q), step)
             else:
                 raise ValueError('channel %d %s slot holds a %s filter' % (c, kind, slot['type']))
             curve_spec = curve_spec or spec
             edits.append(edit)
         F, Q, G = curve_spec
         shelf = (tunelib.low_shelf_db(freqs, F, Q, G) if kind == 'bass' else
-                 tunelib.peaking_db(freqs, F, Q, G) if kind == 'presence' else
-                 tunelib.high_shelf_db(freqs, F, Q, G))
+                 tunelib.high_shelf_db(freqs, F, Q, G) if kind == 'treble' else
+                 tunelib.peaking_db(freqs, F, Q, G))
         loud = tunelib.loudness_change_db(freqs, program, program + shelf)
         name = '%s%+.2fdB' % (kind, step)
         path = os.path.join(out_dir, name + '.afpx')
@@ -2396,10 +2412,13 @@ def voice_variants(args):
             json.dump(known, fh, indent=2)
     return {'meta': {'afpx': args.afpx, 'out_dir': out_dir, 'written': bool(args.confirm)},
             'variants': rows,
-            'notes': ['each variant changes one shelf; the original tune is untouched',
+            'notes': ['each variant changes one filter; the original tune is untouched',
+                      'height and distance are taste variants with weak evidence behind them '
+                      '(Blauert\'s directional bands; the "presence dip" practice): keep one '
+                      'only if it wins blind',
                       'compare each against the current tune blind and level-matched '
                       '(its ab_make line), at your normal volume, on familiar tracks',
-                      'predicted loudness assumes the shelf reaches the whole system -- '
+                      'predicted loudness assumes the filter reaches the whole system -- '
                       'confirm the match by ear'] +
                      ([] if args.confirm else ['dry run: show the user these edits, then '
                                                're-run with --confirm to write the files'])}
@@ -2895,6 +2914,9 @@ def main():
                     help='one sitting label per --positions file (e.g. 8aug 8aug 10aug): '
                          'held-out validation then withholds a whole sitting at a time')
     pr.add_argument('--target', required=True, help='target curve file, or "default"')
+    pr.add_argument('--dsp-rate', type=float,
+                    help='the CONFIRMED DSP sample rate in Hz; without it bands are '
+                         'modelled at 96000 (P SIX MK2) and the report says so')
     pr.add_argument('--session-tune', metavar='AFPX',
                     help='enforce the vehicle guards recorded in the session file of this tune')
     pr.add_argument('--channels', nargs='+', type=int,
@@ -2983,6 +3005,16 @@ def main():
     vv.add_argument('--bass-hz', type=float, default=120.0)
     vv.add_argument('--treble-hz', type=float, default=6000.0)
     vv.add_argument('--q', type=float, default=0.7)
+    vv.add_argument('--height-db', nargs='+', type=float,
+                    help='broad band near 8 kHz, heard higher when raised (taste variant)')
+    vv.add_argument('--height-channels', nargs='+', type=int, help='the channels that play 8 kHz')
+    vv.add_argument('--height-hz', type=float, default=8000.0)
+    vv.add_argument('--height-q', type=float, default=1.4)
+    vv.add_argument('--distance-db', nargs='+', type=float,
+                    help='broad band near 4 kHz: negative pushes the stage back (taste variant)')
+    vv.add_argument('--distance-channels', nargs='+', type=int, help='the channels that play 4 kHz')
+    vv.add_argument('--distance-hz', type=float, default=4000.0)
+    vv.add_argument('--distance-q', type=float, default=1.0)
     vv.add_argument('--confirm', action='store_true', help='write the variant files')
     vv.add_argument('--out')
 
@@ -3072,7 +3104,8 @@ def main():
     cp.add_argument('--out')
 
     fi = sub.add_parser('finish', help='after the curve: residual peaks, image focus per instrument, '
-                                       'height overlaps, sub and bass decay (writes nothing)')
+                                       'height overlaps, sub, bass decay and a listening sheet '
+                                       '(writes nothing)')
     fi.add_argument('--system', help='full-system capture (MMM or sweep): residual low-Q peaks')
     fi.add_argument('--left', nargs='+', help='left-side solo capture(s), power-summed')
     fi.add_argument('--right', nargs='+', help='right-side solo capture(s), power-summed')
@@ -3086,7 +3119,22 @@ def main():
     fi.add_argument('--voice', nargs='+')
     fi.add_argument('--noise-db', type=float, default=0.3, help='capture repeatability for the peak floor')
     fi.add_argument('--max-peaks', type=int, default=6)
+    fi.add_argument('--heard', help='a listening sheet exported from assets/emma_listening_sheet.html '
+                                    '(your own listening, or a judge\'s sheet copied into it)')
     fi.add_argument('--out')
+
+    tc = sub.add_parser('trust-check', help='after capture-plan --goal validate: is mmm-align, the '
+                                            'stability map, frames or the test signal trusted on this car?')
+    tc.add_argument('--align', help='mmm-align report (--out) for the sub/midbass junction')
+    tc.add_argument('--junction', help='junction report (--out) from timed sweeps of the same junction')
+    tc.add_argument('--average', help='REW average of the first full-system run')
+    tc.add_argument('--peak', help='the peak trace saved with that run (Save both)')
+    tc.add_argument('--repeat', help='REW average of a second identical run')
+    tc.add_argument('--frames-mean', help='frames mean from a WAV recorded during the first run')
+    tc.add_argument('--signal', help='signal-analyze report (--out) of an lr-interleaved pass')
+    tc.add_argument('--front-l', help='Front L capture (REW, same volume)')
+    tc.add_argument('--front-r', help='Front R capture (REW, same volume)')
+    tc.add_argument('--out')
 
     nx = sub.add_parser('next', help='audit what was captured and list the commands that apply')
     nx.add_argument('--captures', nargs='+', required=True,
@@ -3328,13 +3376,14 @@ def _dispatch(args):
                       'verify', 'voice-variants', 'emma-volume', 'noise-check', 'bass-trials', 'voice-match', 'stereo-propose',
                       'capture-plan', 'next', 'finish', 'capture-audit', 'coherence', 'mmm-align', 'stability', 'xo-check',
                       'listening-level', 'road-noise', 'prefs', 'frames', 'test-signal',
-                      'signal-analyze'):
+                      'signal-analyze', 'trust-check'):
         _check_report_out(args)
         import mmm
         import frames as frames_mod
         import signals as signals_mod
         import planner
         import finish as finish_mod
+        import trust as trust_mod
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,
@@ -3350,7 +3399,8 @@ def _dispatch(args):
                   'xo-check': mmm.xo_check_cmd, 'listening-level': mmm.listening_level_cmd,
                   'road-noise': mmm.road_noise_cmd, 'prefs': mmm.prefs_cmd,
                   'frames': frames_mod.run, 'test-signal': signals_mod.make_cmd,
-                  'signal-analyze': signals_mod.analyze_cmd}[args.cmd](args)
+                  'signal-analyze': signals_mod.analyze_cmd,
+                  'trust-check': trust_mod.trust_cmd}[args.cmd](args)
         text = json.dumps(report, indent=2, default=_json_default)
         if getattr(args, 'out', None):
             with open(args.out, 'w', encoding='utf-8') as fh:

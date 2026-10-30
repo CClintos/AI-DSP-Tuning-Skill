@@ -532,6 +532,19 @@ class StabilityAndCrossover(_Tmp):
         self.assertGreater(np.mean(w[(GRID > 30) & (GRID < 60)]), 0.9)
         self.assertTrue(np.all(w[GRID > 300] == 1.0))
 
+    def test_stability_reads_captures_that_start_above_ten_hz(self):
+        # 1.21.0-1.23.0: the smoother carried the empty bins below a 20 Hz
+        # export into every band, and the map read "stable" everywhere
+        f = measure.common_grid(20.0, 20000.0, 96)
+        avg = np.full_like(f, 70.0)
+        peak = avg + 3.0
+        peak[(f > 90) & (f < 130)] += 6.0
+        r = self.run_cli("stability", "--average", rew_text(self.root / "Avg.txt", f, avg, "System Sum"),
+                         "--peak", rew_text(self.root / "Peak.txt", f, peak, "System Sum peak"))
+        reads = {round(b["hz"]): b["reads"] for b in r["bands"]}
+        self.assertEqual(reads[99], "moves with head position")
+        self.assertEqual(reads[50], "stable")
+
     def test_xo_check_reads_the_applied_crossover(self):
         raw = 80 + self.rng.normal(0, 0.15, len(GRID))
         xo = raw + _lr4_db(GRID, 80, "hp")
@@ -649,6 +662,43 @@ class Voicing(_Tmp):
         self.assertEqual(man["variants"][0]["knobs"], {"bass": 1.5})
         self.assertEqual(r["variants"][0]["knobs"], {"bass": 1.5})
         self.assertEqual(mmm.knobs_for(man["variants"][0]["file"])["bass"], 1.5)
+
+    def test_height_and_distance_are_knobs_prefs_can_learn(self):
+        free = "".join('<Fil T="1" F="1000.00" Q="1" G="0" dF="1000" FN="%d" I="0" FilBy="0"/>' % n
+                       for n in (2, 3, 4))
+        blk = ('<OC ON="1" CINV="0"><Fil T="16" F="2600.00" Q="0.7" G="-24" dF="2600" FN="1" I="0" '
+               'FilBy="0"/>' + free + '<Vol T="15" L="1.0" i="0"/><T PM="1" P="0" T="0"/></OC>')
+        tune = self.root / "t.afpx"
+        afpx._encode_unchecked("<ATF>" + blk + "</ATF>", str(tune))
+        r = self.run_cli("voice-variants", "--afpx", str(tune), "--out-dir", str(self.root / "vv"),
+                         "--height-channels", "0", "--height-db", "-1", "1", "2", "3",
+                         "--distance-channels", "0", "--distance-db", "-1", "--confirm")
+        by = {v["variant"]: v for v in r["variants"]}
+        self.assertEqual(set(by), {"height-1.00dB", "height+1.00dB", "height+2.00dB",
+                                   "height+3.00dB", "distance-1.00dB"})
+        h = by["height+2.00dB"]["edits"][0]
+        self.assertEqual((h["F"], h["Q"], h["G"], h["type_code"]), (8000.0, 1.4, 2.0, "17"))
+        d = by["distance-1.00dB"]["edits"][0]
+        self.assertEqual((d["F"], d["Q"], d["G"]), (4000.0, 1.0, -1.0))
+        self.assertEqual(mmm.knobs_for(by["height+2.00dB"]["file"])["height"], 2.0)
+        self.assertEqual(mmm.knobs_for(str(self.root / "x" / "distance-1.5dB.afpx"))["distance"], -1.5)
+        # a listener who likes the stage lifted by +1 dB, judged blind
+        rng = np.random.default_rng(4)
+        files = [(0.0, str(tune))] + [(by[n]["knobs"]["height"], by[n]["file"])
+                                       for n in by if n.startswith("height")]
+        log = []
+        for _ in range(40):
+            i, j = rng.choice(len(files), 2, replace=False)
+            (xa, pa), (xb, pb) = files[i], files[j]
+            p_a = 1 / (1 + math.exp(-(-0.5 * (xa - 1.0) ** 2 + 0.5 * (xb - 1.0) ** 2)))
+            wins = int(rng.binomial(6, p_a))
+            log.append({"counts": {"X": wins, "Y": 6 - wins}, "reveal": {"X": "A", "Y": "B"},
+                        "sources": {"A": pa, "B": pb}})
+        (self.root / "ab_log.json").write_text(json.dumps(log))
+        p = self.run_cli("prefs", "--log", str(self.root / "ab_log.json"), "--base", str(tune))
+        self.assertIn("height", p["preferences"])
+        self.assertNotIn("distance", p["preferences"])
+        self.assertAlmostEqual(p["preferences"]["height"]["preferred_db"], 1.0, delta=0.9)
 
 
 # ---------------------------------------------------------------- D1 / D2 / API

@@ -10,7 +10,7 @@ description: >-
   after a tune change; or prepare for EMMA sound-quality judging. Not for
   home or studio room EQ, and not for writing other brands' DSP files.
 metadata:
-  version: "1.23.0"
+  version: "1.24.0"
 ---
 
 # Helix / REW car-audio tuner
@@ -28,9 +28,10 @@ not confirmed edit by edit.
 | Anything with a `.pct6` | `references/pct6_format.md` in full, then core_workflow | Beta: no-password saves only. |
 | Anything with an Alpine `.jssh` | `references/alpine_jssh_format.md` in full, then core_workflow | Beta: run its real-file preflight before any write. |
 | Only to read a tune (channel map, filters, delays) | this file | `scripts/afpx.py inspect <file>`. Roles are inferred from crossovers, so ask the user to confirm them. |
+| A newly installed DSP, or nothing measured yet | `references/first_tune.md` | Walk the user through it one stage at a time, then core_workflow. |
 | Only to look at REW files, no tune file yet | core_workflow steps 1-3b | Analysis only; nothing is written. |
-| To finish a tune that already sits on its target | core_workflow step 7 | `pipeline.py finish`. |
-| To plan MMM captures, or check them | core_workflow step 2 | Before: `pipeline.py capture-plan`. After: `pipeline.py next --captures <files, folder or session.mdat>`. |
+| To finish a tune that already sits on its target, or to read a listening or judging sheet | core_workflow step 7 | `pipeline.py finish` (`--heard` for the sheet). |
+| To plan MMM captures, or check them | core_workflow step 2 | Before: `pipeline.py capture-plan`. After: `pipeline.py next --captures <files, folder or session.mdat>`. After a validation evening: `pipeline.py trust-check`. |
 | The reason behind a rule, or how to judge an unusual case | the methodology.md section core_workflow names | Open that section, not the whole file (about 170 KB). |
 
 ## Running the scripts

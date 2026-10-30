@@ -161,9 +161,11 @@ advisory, or removed. Until then they stay labelled.
 activation and scenario sets exist but have never run against a live agent.
 Running them before and after C1/C2 shows the cuts did not change behaviour.
 
-Still open from the 2026-10-22 audit: F1, the level-anchor bias (three
-fixes tried and rejected). It is the main known correctness gap, but needs a
-design, not a trim.
+Correction (2026-10-30): an earlier version of this audit listed F1, the
+level-anchor bias from the 2026-10-22 audit, as still open. That was wrong.
+Version 1.18.0 corrected both known cases and holds one reference through
+refinement and judging; the two tests that were expected failures for F1 now
+pass as ordinary tests.
 
 ## 7. Suggested order
 
@@ -200,3 +202,7 @@ Two findings above were wrong and were corrected before acting on them:
 | — | `xo-check --section` and a PEQ-only mode (no RAW, as a tweeter needs); `capture-audit` pairs L/R halves with the right "both" capture | — |
 
 Not done: A4 (needs a car) and live-agent evals (need fresh agent sessions).
+
+Update 1.24.0 (2026-10-30): A4's tooling exists (`pipeline.py trust-check` after
+`capture-plan`'s `validate` goal); the evening itself still needs a car. The
+live-agent evals ran for the first time: `evals/results/1.24.0.md`.

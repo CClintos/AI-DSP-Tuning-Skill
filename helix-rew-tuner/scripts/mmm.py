@@ -723,8 +723,8 @@ def road_noise_cmd(args):
 
 
 # ------------------------------------------------------------------ C3
-KNOBS = ('bass', 'treble', 'presence')
-_VARIANT_RE = re.compile(r'(bass|treble|presence)([+-]\d+(?:\.\d+)?)dB', re.I)
+KNOBS = ('bass', 'treble', 'presence', 'height', 'distance')
+_VARIANT_RE = re.compile(r'(bass|treble|presence|height|distance)([+-]\d+(?:\.\d+)?)dB', re.I)
 
 
 def knobs_for(path, manifest_cache=None, manual=None, base=None):

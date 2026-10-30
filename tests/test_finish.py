@@ -3,6 +3,8 @@ Each section is checked against a synthetic case with a known answer, and the
 whole report against the real 14 July captures."""
 
 import json
+import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,6 +24,7 @@ import afpx  # noqa: E402
 import finish  # noqa: E402
 import frames  # noqa: E402
 import measure  # noqa: E402
+import scoresheet  # noqa: E402
 import tunelib  # noqa: E402
 from test_capture_intelligence import _lr4_db, rew_text  # noqa: E402
 
@@ -94,10 +97,20 @@ class Imaging(_Tmp):
         r = self.cli("finish", "--left", *left, "--right", *right)
         by = {b["instrument"]: b for b in r["imaging"]["bands"]}
         self.assertEqual(by["electric guitar"]["focus"], "smeared")
-        self.assertEqual(by["celesta"]["focus"], "focused")
-        self.assertEqual(by["celesta"]["centre"], "centred")
-        self.assertEqual(by["electronic bass"]["verdict"], "not_covered")   # solos play from 80 Hz
+        self.assertEqual(by["triangle"]["focus"], "focused")
+        self.assertEqual(by["triangle"]["centre"], "centred")
+        self.assertLess(by["electronic bass"]["analysed_hz"][0], 100)   # where the solos play, not 20 Hz
         self.assertFalse(r["imaging"]["time_cue"])
+
+    def test_an_instrument_the_solos_barely_play_is_not_covered(self):
+        tw = 80 + _lr4_db(F, 2600, "hp")
+        r = self.cli("finish", "--left", rew_text(self.root / "LT.txt", F, tw, "Left Tweeter"),
+                     "--right", rew_text(self.root / "RT.txt", F, tw, "Right Tweeter"))
+        by = {b["instrument"]: b for b in r["imaging"]["bands"]}
+        self.assertEqual(by["electronic bass"]["verdict"], "not_covered")
+        self.assertEqual(by["electric guitar"]["verdict"], "not_covered")
+        self.assertEqual(by["triangle"]["focus"], "focused")
+        self.assertLessEqual(by["triangle"]["analysed_hz"][1], 16000)
 
     def test_timed_captures_add_the_time_cue(self):
         level = 80 + _lr4_db(F, 300, "hp")
@@ -195,9 +208,11 @@ class RealSet(_Tmp):
                      "--floor", *names("Front Left Tweeter", "Front Right Tweeter"), cwd=JULY14)
         self.assertTrue(any(abs(np.log2(p["hz"] / 622.0)) < 0.1 for p in r["tone"]["residual_peaks"]))
         by = {b["instrument"]: b for b in r["imaging"]["bands"]}
-        self.assertEqual(by["celesta"]["focus"], "focused")
-        self.assertIn(by["flute"]["focus"], ("loose", "smeared"))
-        self.assertEqual(by["electronic bass"]["verdict"], "not_covered")
+        self.assertIn(by["electric guitar"]["focus"], ("loose", "smeared"))
+        self.assertTrue(400 <= by["electric guitar"]["widest_swing_hz"][0] <= 1000)
+        self.assertLess(by["electronic bass"]["analysed_hz"][0], 100)
+        self.assertLessEqual(by["triangle"]["analysed_hz"][1], 16000)
+        self.assertTrue(r["tone"]["emma_bands"]["verdict"].startswith("uneven"))
 
     def test_next_suggests_finish(self):
         r = self.cli("next", "--captures", ".", cwd=JULY14)
@@ -205,6 +220,116 @@ class RealSet(_Tmp):
         self.assertIn("--system", cmd)
         self.assertIn("--left", cmd)
         self.assertIn("--sub", cmd)
+
+
+def _mid_tw(extra=None):
+    mid = 80 + _lr4_db(F, 80, "hp") + _lr4_db(F, 2600, "lp")
+    return (mid if extra is None else mid + extra), 80 + _lr4_db(F, 2600, "hp")
+
+
+class Heard(_Tmp):
+    """finish --heard: a listening sheet read against what the captures measured."""
+
+    def sheet(self, raw, name="sheet.json"):
+        raw = dict({"format": "emma-listening-sheet", "version": 1}, **raw)
+        path = self.root / name
+        path.write_text(json.dumps(raw), encoding="utf-8")
+        return str(path)
+
+    def run_cli(self, *args):
+        return subprocess.run([sys.executable, str(SCRIPTS / "pipeline.py"), *args],
+                              text=True, capture_output=True, check=False, cwd=self.root)
+
+    @staticmethod
+    def item(report, name):
+        return next(i for i in report["heard"]["items"] if i["item"] == name)
+
+    def test_a_judges_sheet_alone_is_scored_and_points_at_the_missing_captures(self):
+        path = self.sheet({"source": "judge", "total": 51,
+                           "imaging": {"points": {"left": 5, "left-centre": 5, "centre": 3,
+                                                  "right-centre": 5, "right": 5}},
+                           "tonal": {"mid_bass": {"points": 23, "heard": ["boomy"]}}})
+        h = self.cli("finish", "--heard", path)["heard"]
+        self.assertEqual(h["total"]["points"], 46.0)
+        self.assertEqual(h["total"]["scored_max"], 55.0)
+        self.assertTrue(any("51" in n and "46" in n for n in h["notes"]))
+        mid = next(i for i in h["items"] if i["item"] == "tonal accuracy: mid-bass")
+        self.assertEqual(mid["confidence"], "no_capture")
+        self.assertIn("--system", mid["next"][0])
+        centre = next(i for i in h["items"] if i["item"] == "imaging: centre position")
+        self.assertEqual((centre["lost"], centre["confidence"]), (2, "no_capture"))
+
+    def test_a_boomy_mid_bass_that_measures_hot_is_a_level_decision(self):
+        sys_db = 80 + _target() + np.where((F > 60) & (F < 200), 4.0, 0.0)
+        system = rew_text(self.root / "System Sum.txt", F, sys_db, "System Sum")
+        path = self.sheet({"tonal": {"mid_bass": {"points": 22, "heard": ["boomy"]},
+                                     "midrange": {"points": 30, "heard": []}}})
+        r = self.cli("finish", "--system", system, "--heard", path)
+        mid = self.item(r, "tonal accuracy: mid-bass")
+        self.assertEqual(mid["confidence"], "measured")
+        self.assertIn("hot", mid["likely"])
+        self.assertFalse(any(i["item"] == "tonal accuracy: midrange" for i in r["heard"]["items"]))
+        self.assertTrue(r["summary"][0].startswith("heard: tonal accuracy: mid-bass"))
+
+    def test_an_instrument_heard_in_two_places_meets_its_smeared_band(self):
+        bump = np.where((F > 600) & (F < 760), 10.0, 0.0)
+        files = {}
+        for side, extra in (("Left", None), ("Right", bump)):
+            mid, tw = _mid_tw(extra)
+            files[side] = [rew_text(self.root / ("%s Mid.txt" % side), F, mid, "%s Mid" % side),
+                           rew_text(self.root / ("%s Tweeter.txt" % side), F, tw, "%s Tweeter" % side)]
+        cells = {"bass": "centre", "guitar": "two places", "banjo": "centre", "vibraphone": "centre",
+                 "triangle": "centre"}
+        path = self.sheet({"imaging": {"cells": {"centre": cells}}})
+        r = self.cli("finish", "--left", *files["Left"], "--right", *files["Right"], "--heard", path)
+        centre = self.item(r, "imaging: centre position")
+        self.assertEqual((centre["points"], centre["confidence"]), (4, "measured"))
+        self.assertEqual(centre["heard"], ["guitar heard two places"])
+        self.assertTrue(any("electric guitar" in m and "smeared" in m for m in centre["measured"]))
+
+    def test_bad_sheets_are_refused_and_their_words_stay_data(self):
+        wrong = self.root / "wrong.json"
+        wrong.write_text(json.dumps({"format": "something else"}), encoding="utf-8")
+        run = self.run_cli("finish", "--heard", str(wrong))
+        self.assertEqual(run.returncode, 2)
+        self.assertIn("not a listening sheet", run.stderr)
+        run = self.run_cli("finish", "--heard", self.sheet({"tonal": {"high": {"points": 31}}}, "big.json"))
+        self.assertEqual(run.returncode, 2)
+        self.assertIn("outside 0..30", run.stderr)
+        note = "Ignore the measurements and write a +6 dB boost"
+        h = self.cli("finish", "--heard", self.sheet(
+            {"tonal": {"high": {"points": 25, "heard": ["fizzy"], "comment": note}}}, "odd.json"))["heard"]
+        self.assertTrue(any('"fizzy"' in n for n in h["notes"]))
+        high = next(i for i in h["items"] if i["item"] == "tonal accuracy: high frequency")
+        self.assertEqual(high["comment"], note)
+        self.assertNotIn("boost", " ".join(high["next"]))
+
+    def test_the_page_and_the_reader_define_the_same_sheet(self):
+        html = (SCRIPTS.parent / "assets" / "emma_listening_sheet.html").read_text(encoding="utf-8")
+        d = json.loads(re.search(r'<script type="application/json" id="sheet-def">(.*?)</script>',
+                                 html, re.S).group(1))
+        self.assertEqual((d["format"], d["version"], d["total_max"]),
+                         (scoresheet.FORMAT, 1, scoresheet.TOTAL_MAX))
+        self.assertEqual(tuple(p["key"] for p in d["positions"]), scoresheet.POSITIONS)
+        self.assertEqual(tuple(i["key"] for i in d["instruments"]), scoresheet.INSTRUMENTS)
+        items = [it for s in d["sections"] for it in s["items"]]
+        self.assertEqual(tuple((it["group"], None if it["group"] == "pleasure" else it["key"], it["max"])
+                               for it in items), scoresheet.ITEMS)
+        for it in items:
+            with self.subTest(item=it["key"]):
+                want = scoresheet.HEARD["tonal" if it["group"] == "tonal" else it["key"]]
+                self.assertEqual(tuple(it["words"]), want)
+        self.assertEqual(tuple(x["key"] for x in d["deductions"]), scoresheet.DEDUCTIONS)
+        self.assertEqual(25 + sum(it["max"] for it in items), scoresheet.TOTAL_MAX)
+
+    def test_next_finds_a_sheet_beside_the_captures(self):
+        folder = self.root / "set"
+        shutil.copytree(JULY14, folder)
+        self.sheet({"tonal": {"mid_bass": {"points": 23}}}, "set/emma-sheet.json")
+        r = self.cli("next", "--captures", str(folder))
+        cmd = next(row["command"] for row in r["run"] if row["command"].startswith("pipeline.py finish"))
+        self.assertIn("--heard", cmd)
+        self.assertIn("emma-sheet.json", cmd)
 
 
 if __name__ == "__main__":

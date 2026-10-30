@@ -70,7 +70,9 @@ before correcting, and prefer doing less.**
   - [Learning the listener's voicing](#learning-the-listeners-voicing-from-blind-abs)
   - [Frame-level MMM](#frame-level-mmm-one-run-that-measures-its-own-repeatability)
   - [The skill's own test signals](#the-skills-own-test-signals-experimental)
+  - [Validating these tools on a real car](#validating-these-tools-on-a-real-car-one-evening)
 - [Finishing touches after the curve](#finishing-touches-after-the-curve)
+  - [Reading a listening sheet](#reading-a-listening-sheet-against-the-measurements)
 - [Refine the tune you have](#refine-the-tune-you-have-before-adding-to-it)
 - [Matched-loudness blind A/B](#judge-by-ear-only-at-matched-loudness-blind)
 - [Crossover what-ifs](#crossover-what-ifs-modelled-never-written)
@@ -1879,6 +1881,10 @@ uses. What the rules mean for a tune, and which command answers each item:
   one with it on playing silence at your volume, then `pipeline.py
   noise-check --off OFF.txt --on ON.txt`. Listen separately for turn-on pops
   and noise while changing volume or track.
+- **Score your listening the way the judges do.**
+  `assets/emma_listening_sheet.html` follows the 280-point sheet, and a
+  judge's sheet can be copied into it; `finish --heard` reads it against the
+  captures (§Reading a listening sheet against the measurements).
 - **The car is judged "ready for driving"**: windows, trunk and sunroof
   closed, no curtains or window covers. Capture that way.
 - **Channel check**: tracks 2 and 3 verify left and right; a reversal gives
@@ -2239,9 +2245,12 @@ moving. It rebalances what the noise masks; it is not a reason to play louder.
 `voice-variants --confirm` records each variant's knob values in
 `voice_variants.json`; `ab-result` logs each blind choice. `pipeline.py prefs
 --log ab_log.json --base TUNE` fits a paired-comparison (Bradley-Terry)
-model with a concave quadratic preference per knob (bass, treble, presence)
-and returns the preferred value with an 80% interval, and the next variant
-pair to test (around the least certain knob). Values outside the tested range
+model with a concave quadratic preference per knob (bass, treble, presence,
+height, distance) and returns the preferred value with an 80% interval, and
+the next variant pair to test (around the least certain knob). Height (a broad
+band near 8 kHz on the channels that play it, `--height-db`) and distance (near
+4 kHz, `--distance-db`) are taste variants with weak evidence behind them:
+keep one only if it wins blind. Values outside the tested range
 are extrapolations; fewer than about 20 decided choices give wide intervals.
 The preferred values feed `--voice` as the taste layer on the target.
 
@@ -2289,6 +2298,26 @@ near 210 Hz at 0.3 m/s; above `doppler_limit_hz` empty-bin readings are
 reported as leakage, never as distortion. Everything here is checked in
 simulation only, and none of it replaces a timed sweep for delays.
 
+### Validating these tools on a real car: one evening
+
+`mmm-align`, the peak-trace stability map, `frames` and the test signals were
+checked in simulation only. `capture-plan --goal validate` lists one evening
+that measures each of them a second, independent way, and `pipeline.py
+trust-check` compares the two:
+
+| Tool | Checked against | Trusted | Advisory |
+|---|---|---|---|
+| `mmm-align` | `junction` on timed sweeps of the same junction (delay added to the midbass equals the same delay taken off the sub) | same polarity, within 1/8 period | same polarity, within 1/4 period |
+| `stability` | how far two identical runs disagree, band by band below 250 Hz | rank correlation 0.5 or more, and the bands marked moving disagree 1.5 times more | rank correlation 0.2 or more |
+| `frames` | REW's own average of the same pass | 0.5 dB RMS or less, worst 1.5 dB (50 Hz-10 kHz) | 1 dB RMS or less, worst 3 dB |
+| test signals | Front L and Front R captured separately | left/right difference within 1 dB RMS | within 2 dB RMS |
+
+Anything worse is `remove`: stop relying on the tool until it is fixed. Two
+runs that agree within 0.3 dB everywhere leave the stability map
+`inconclusive`. The timed sweeps stay the reference for delay and polarity
+whatever the result. One evening is one car and one seat: record the result,
+and drop a tool's "simulation only" label once a second car agrees.
+
 ## Finishing touches after the curve
 
 A target curve is a long-term average. Once the system sum sits on it, what
@@ -2305,9 +2334,12 @@ evidence level.
   cancel check or the boost gate says they can be filled.
 - **One instrument, one place.** EMMA scores an instrument heard in two places
   as zero. `finish` finds the image position (pull: +1 fully left, −1 fully
-  right; 16 dB or 1 ms is a full shift) in third-octave slices of each EMMA
-  instrument band: the mean is the centre, and the spread is the focus (up to
-  0.25 focused, up to 0.5 loose, above that smeared). A band can be centred on
+  right; 16 dB or 1 ms is a full shift) in third-octave slices of each
+  instrument on the 2026 imaging tracks (electronic bass, electric guitar,
+  banjo, vibraphone, triangle, over the ranges `imaging --bands emma` uses),
+  across the part of its range both sides play, up to 16 kHz: the mean is the
+  centre, and the spread is the focus (up to 0.25 focused, up to 0.5 loose,
+  above that smeared). A band can be centred on
   average while its instrument is smeared. MMM gives the level cue only; timed
   sweeps add time. Correct the hot side at the widest-swing slice only
   (`stereo-propose`, `lr-match`), then confirm by ear.
@@ -2323,7 +2355,7 @@ evidence level.
   hertz up: `finish --afpx --low <door channels> --high <dash/pillar channels>`
   flags the overlap, `probe` models a new low-pass, and the user sets it in
   PC-Tool. A broad +1-2 dB near 8 kHz (the band heard "above") is a blind A/B
-  height variant, not a correction.
+  height variant (`voice-variants --height-db`), not a correction.
 - **Focus or spaciousness, chosen on purpose.** Reflections (windshield, side
   windows, a glass roof) and decorrelation widen and brighten the sound but
   blur the image; absorption focuses it (Kaplanis et al. 2017). Competition
@@ -2343,6 +2375,27 @@ evidence level.
   listeners (trained listeners choose less of both), so the last tonal word
   belongs to a blind, level-matched A/B (`voice-variants`, `ab-make`, `prefs`,
   `listening-level`).
+
+### Reading a listening sheet against the measurements
+
+`assets/emma_listening_sheet.html` is the 280-point EMMA SQ scoresheet as an
+offline phone page: imaging (tracks 2-6: at each of five positions, each of
+the five instruments in one place, one point each), sound stage (track 12:
+distance, width, height), tonal accuracy (tracks 13-16, four bands), spectral
+balance at the suggested volume and about 6 dB louder (track 16), listening
+pleasure, and the system-noise and visibility deductions. The 2026 judge book
+adds a separate focus item (tracks 7-11); this sheet scores positions only.
+Score your own listening, or copy a judge's sheet in (the subtotals alone are
+enough), and export the JSON.
+
+`finish --heard <that file>` puts each lost point next to what the captures
+given to `finish` measured in the same region, and says how far they explain
+it: `measured` (the captures show the cause), `consistent` (they fit it),
+`not_explained` (they do not show it) or `no_capture` (nothing given to check
+it against). A sheet is evidence about the sound, not about its cause: an
+item the captures do not explain stays unexplained, and its remedy is another
+capture or a blind A/B, never a filter fitted to the complaint. Comments are
+the listener's words, quoted as data.
 
 ## Refine the tune you have before adding to it
 

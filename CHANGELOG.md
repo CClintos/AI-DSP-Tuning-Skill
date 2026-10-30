@@ -2,6 +2,37 @@
 
 Newest first. Version numbers match `metadata.version` in `helix-rew-tuner/SKILL.md`.
 
+## 1.24.0
+
+- **Listening sheet.** `assets/emma_listening_sheet.html` is the 280-point EMMA
+  SQ scoresheet as an offline phone page, for your own listening or a judge's
+  sheet copied in. `finish --heard` puts each lost point next to what the
+  captures measured, with how far they explain it, and `next` picks up a
+  sheet saved beside the captures.
+- **`finish` uses the 2026 judge book's instruments** (electronic bass,
+  electric guitar, banjo, vibraphone, triangle, over the ranges `imaging
+  --bands emma` uses) instead of the 2024 book's flute and celesta, across the
+  part of each range both sides play, up to 16 kHz. It also reports
+  `emma_bands`.
+- **`trust-check`**: after `capture-plan --goal validate`, decides whether
+  `mmm-align`, the stability map, `frames` and the test signal are trusted,
+  advisory or to be removed on this car, each against an independent
+  measurement of the same thing.
+- **`propose --dsp-rate`** models bands at the confirmed DSP rate (fitter,
+  boost gate, held-out validation, vehicle guards); without it the report says
+  96 kHz was assumed. `refine` now fits the filters it adds at the confirmed
+  rate too (it fitted additions at 96 kHz).
+- **Height and distance voicing knobs** in `voice-variants` (`--height-db`
+  near 8 kHz, `--distance-db` near 4 kHz), learned by `prefs`.
+- **First-tune guide**, `references/first_tune.md`, ported from the
+  `improve-first-tune-workflow` branch and updated for `capture-plan`, `next`
+  and `finish`.
+- Fixed: octave smoothing carried a capture's empty low bins into every band
+  above them, so `stability` read every band as stable for an export that
+  starts above 10 Hz.
+- First live agent evals: `evals/results/1.24.0.md` (activation recall 1.00,
+  false triggers 0, no critical failures in 15 behaviour runs).
+
 ## 1.23.0
 
 `pipeline.py finish`: what still decides the sound once the system sum is on

@@ -317,7 +317,7 @@ def s_at(fields, f0):
     return float(fields['s'][i])
 
 
-def boost_gate_verdict(fields, f0, Q, z_warn=7.0, z_block=11.0, dip_db=4.0):
+def boost_gate_verdict(fields, f0, Q, z_warn=7.0, z_block=11.0, dip_db=4.0, fs=FS):
     """Should this PEQ BOOST at (f0, Q) be allowed on phase grounds?
 
     Returns dict:
@@ -368,7 +368,7 @@ def boost_gate_verdict(fields, f0, Q, z_warn=7.0, z_block=11.0, dip_db=4.0):
     weak = bool(fields.get('mad_floored', False))
     smooth_note = (' -- NOTE: the trace is too smooth for this test (MAD hit '
                    'its floor); re-export without smoothing' if weak else '')
-    w = np.abs(peaking_db(g, float(f0), float(Q), 3.0))
+    w = np.abs(peaking_db(g, float(f0), float(Q), 3.0, fs=fs))
     w = w / max(float(w.max()), 1e-12)
     hot = (s >= z_warn) & (dip >= dip_db) & (w >= 0.5)
     if not np.any(hot):
@@ -391,7 +391,7 @@ def boost_gate_verdict(fields, f0, Q, z_warn=7.0, z_block=11.0, dip_db=4.0):
 
 
 def gate_boost_bands(fields, bands, z_warn=7.0, z_block=11.0, dip_db=4.0,
-                     min_boost_db=0.25):
+                     min_boost_db=0.25, fs=FS):
     """Run boost_gate_verdict over a proposed [(F, Q, G), ...] cascade.
 
     Cuts (and negligible gains) are passed through untouched with verdict
@@ -406,7 +406,7 @@ def gate_boost_bands(fields, bands, z_warn=7.0, z_block=11.0, dip_db=4.0,
                    'dip_db': None, 'low_confidence': False,
                    'note': 'cut -- boost gate does not apply'}
         else:
-            row = dict(boost_gate_verdict(fields, F, Q, z_warn, z_block, dip_db))
+            row = dict(boost_gate_verdict(fields, F, Q, z_warn, z_block, dip_db, fs=fs))
             row.update({'f_hz': float(F), 'q': float(Q), 'gain_db': float(G)})
         counts[row['verdict']] += 1
         rows.append(row)
@@ -561,6 +561,14 @@ def validate_boost_ceiling(freqs, ceiling):
     return ceiling
 
 
+def _validate_peq_rate(freqs, fs):
+    """Refuse an invalid DSP rate, or a response grid at or above its Nyquist limit."""
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError('DSP sample rate must be finite and positive')
+    if np.any(np.asarray(freqs, dtype=float) >= fs / 2.0):
+        raise ValueError('DSP sample rate must exceed twice the highest modelled frequency')
+
+
 def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             g_lim=(-15.0, 3.0), q_lim=(0.5, 8.0), min_gain=1.0,
             improve_pct=6.0, boost_penalty=0.5, hf_q_penalty=0.4,
@@ -568,7 +576,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
             null_boost_penalty=0.8, partner_target_db=None, partner_weight=0.0,
             partner_band=(700.0, 5000.0), partner_conf=None, dip_weight=1.0,
             fit_smoothed=False, seed_retries=0, objective='symmetric',
-            boost_mode='allowed', cut_seed_retry=False, verbose=False, boost_ceiling_db=None):
+            boost_mode='allowed', cut_seed_retry=False, verbose=False, boost_ceiling_db=None, fs=FS):
     """Jointly fit up to n_bands_max peaking bands so that dev+EQ -> 0 over
     fit_band, minimizing the ERB/audibility-weighted residual.
 
@@ -657,10 +665,14 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         for MMM captures, which are spatial averages; a single fixed sweep
         keeps the stricter default because its peaks may belong to the mic spot.
 
+    ``fs`` is the confirmed DSP processing rate, not the measurement rate.
+    The default is the P SIX MK2's 96 kHz; another model's rate must be passed.
+
     Returns (bands, report) - bands as [(F, Q, G), ...] rounded to hardware
     steps (0.25 dB gain), report dict with before/after scores (plus
     partner_mismatch_before/after when partner matching is active).
     """
+    _validate_peq_rate(freqs, fs)
     from scipy.optimize import least_squares
     boost_ceiling_db = validate_boost_ceiling(freqs, boost_ceiling_db)
 
@@ -705,7 +717,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     def partner_mismatch(bands):
         if psel is None:
             return 0.0
-        own = dev_db[psel] + cascade_db(freqs[psel], bands)
+        own = dev_db[psel] + cascade_db(freqs[psel], bands, fs=fs)
         if np.sum(pw ** 2) <= 1e-12:
             return 0.0
         return float(wrms(np.abs(own - ptarget), pw))
@@ -719,7 +731,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
     def resid(params):
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
-        eq_sel = cascade_db(fsel, bands)
+        eq_sel = cascade_db(fsel, bands, fs=fs)
         if objective == 'asymmetric':
             res = asymmetric_eq_residual(fit_dev[sel], eq_sel, fill_allowed=fill_sel)
             parts = [res * np.tile(w, 3), penalties(bands)]
@@ -733,14 +745,14 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         if boost_mode == 'refill':
             parts.append(20.0 * np.maximum(eq_sel, 0.0))
         if psel is not None:
-            own_p = dev_db[psel] + cascade_db(freqs[psel], bands)
+            own_p = dev_db[psel] + cascade_db(freqs[psel], bands, fs=fs)
             parts.append(partner_weight * pw * (own_p - ptarget))
         return np.concatenate(parts)
 
     def score_of(params):
         bands = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                  for i in range(len(params) // 3)]
-        eq_full = cascade_db(freqs, bands)
+        eq_full = cascade_db(freqs, bands, fs=fs)
         if objective == 'asymmetric':
             res = asymmetric_eq_residual(fit_dev[sel], eq_full[sel], fill_allowed=fill_sel)
             ww = np.tile(w, 3)
@@ -780,7 +792,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         if mask is not None and null_boost_penalty > 0:
             excluded = ~mask
             if np.any(excluded):
-                spill = cascade_db(freqs, bands)[excluded]
+                spill = cascade_db(freqs, bands, fs=fs)[excluded]
                 null_cost = null_boost_penalty * float(np.mean(np.maximum(spill, 0.0)))
         return combined_score_of(params) + selection_tax_weight * tax + null_cost
 
@@ -807,7 +819,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         # before partner matching ever gets a chance.
         bands_now = [(10 ** params[3 * i], params[3 * i + 1], params[3 * i + 2])
                      for i in range(len(params) // 3)]
-        raw_now = dev_db + cascade_db(freqs, bands_now)
+        raw_now = dev_db + cascade_db(freqs, bands_now, fs=fs)
         seed_basis = raw_now.copy()
         if psel is not None:
             seed_basis[psel] = (raw_now[psel]
@@ -858,7 +870,7 @@ def fit_peq(freqs, dev_db, fit_band, n_bands_max=5, mask=None, conf=None,
         G = round(float(params[3 * i + 2]) * 4) / 4.0       # 0.25 dB steps
         if abs(G) >= min_gain:
             bands.append((F, Q, G))
-    final = audibility_score(freqs, dev_db + cascade_db(freqs, bands),
+    final = audibility_score(freqs, dev_db + cascade_db(freqs, bands, fs=fs),
                              band=fit_band, mask=mask, conf=conf)
     final_tax = selection_score_of(np.array(
         sum(([np.log10(F), Q, G] for F, Q, G in bands), []), dtype=float))
@@ -901,8 +913,10 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                    null_boost_penalty=0.8, tail_weight=0.75,
                    max_worst_loss_db=0.25, fit_smoothed=False, dig_weight=1.0,
                    max_dig_db=6.0, cut_seed_retry=True, verbose=False, boost_ceiling_db=None,
-                   partner_target_db=None, partner_weight=0.0):
+                   partner_target_db=None, partner_weight=0.0, fs=FS):
     """Fit one quantized PEQ cascade across multiple measured positions.
+
+    ``fs`` is the confirmed DSP processing rate (default: P SIX MK2, 96 kHz).
 
     ``deviations_db`` is shaped ``(positions, frequencies)``. ``mask`` and
     ``conf`` may be shared one-dimensional measurement-authority arrays or
@@ -944,6 +958,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
     gouging its neighbours (Resonalyze charges dug depth the same way).
     dig_weight=0 restores the old objective.
     """
+    _validate_peq_rate(freqs, fs)
     from scipy.optimize import least_squares
 
     freqs = np.asarray(freqs, dtype=float)
@@ -1012,7 +1027,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         return vmax + float(np.log(np.mean(np.exp(beta * (values - vmax)))) / beta)
 
     def position_scores(bands):
-        correction = cascade_db(freqs, bands)
+        correction = cascade_db(freqs, bands, fs=fs)
         return np.asarray([
             audibility_score(freqs, deviations[i] + correction, band=fit_band,
                               mask=masks[i], conf=confidence[i])
@@ -1020,7 +1035,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         ])
 
     def evidence_cost(bands):
-        eq = cascade_db(freqs, bands)
+        eq = cascade_db(freqs, bands, fs=fs)
         cost = 0.0
         if boost_ceiling_db is not None:
             cost += 20.0 * float(np.max(np.maximum(eq - boost_ceiling_db, 0.0)))
@@ -1046,7 +1061,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
         excluded_freq = np.any(excluded, axis=0)
         if not np.any(excluded_freq):
             return 0.0
-        spill = cascade_db(freqs, bands)[excluded_freq]
+        spill = cascade_db(freqs, bands, fs=fs)[excluded_freq]
         return null_boost_penalty * float(np.mean(np.maximum(spill, 0.0)))
 
     def selection_score(bands):
@@ -1058,7 +1073,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
 
     def resid(params):
         bands = raw_bands(params)
-        errors = fit_deviations + cascade_db(freqs, bands)[None, :]
+        errors = fit_deviations + cascade_db(freqs, bands, fs=fs)[None, :]
         weighted = errors * weights
         median_error = authoritative_median(errors)
         median_weight = np.median(weights, axis=0)
@@ -1083,7 +1098,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                  tail_weight * tail,
                  penalties(bands)]
         if boost_ceiling_db is not None:
-            parts.append(20.0 * np.maximum(cascade_db(freqs, bands) - boost_ceiling_db, 0.0))
+            parts.append(20.0 * np.maximum(cascade_db(freqs, bands, fs=fs) - boost_ceiling_db, 0.0))
         if partner_target_db is not None and partner_weight > 0:
             ps = inband & (freqs >= 700) & (freqs <= 5000) & np.any(authority, axis=0)
             parts.append(partner_weight * (np.mean(errors, axis=0)[ps] - partner_target_db[ps]))
@@ -1120,7 +1135,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
 
     while len(accepted) < n_bands_max and attempts < n_bands_max + 3:
         attempts += 1
-        current_error = deviations + cascade_db(freqs, accepted)[None, :]
+        current_error = deviations + cascade_db(freqs, accepted, fs=fs)[None, :]
         median_error = erb_smooth(freqs, authoritative_median(current_error))
         seed_weight = np.median(weights, axis=0)
         seed_basis = np.where(blocked, 0.0, np.abs(median_error) * seed_weight)
@@ -1158,7 +1173,7 @@ def fit_peq_robust(freqs, deviations_db, fit_band, n_bands_max=5,
                 continue
             break
         if max_dig_db is not None:
-            eq_c = cascade_db(freqs, candidate)
+            eq_c = cascade_db(freqs, candidate, fs=fs)
             dig = float(np.median([eq_dig_depth(freqs, deviations[i], eq_c, fit_band)
                                    for i in range(shape[0])]))
             if dig > max_dig_db:
@@ -1214,7 +1229,7 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
                              match_oct=1.0 / 3.0, fitter_kwargs=None,
                              high_stability=0.8, medium_stability=0.5,
                              high_help_fraction=0.75, max_held_out_loss_db=0.25,
-                             max_held_out_dig_db=3.0, groups=None):
+                             max_held_out_dig_db=3.0, groups=None, fs=FS):
     """Leave-one-position-out validation of a multi-position PEQ proposal.
 
     A correction has to help mic positions it was NOT fitted on -- the
@@ -1256,6 +1271,10 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
         raise ValueError('held-out validation needs at least three positions')
     kw = dict(fit_smoothed=True)
     kw.update(fitter_kwargs or {})
+    _validate_peq_rate(freqs, fs)
+    if 'fs' in kw and kw['fs'] != fs:
+        raise ValueError('fitter_kwargs fs must match the held-out DSP sample rate')
+    kw['fs'] = fs
     if groups is None:
         labels = list(range(devs.shape[0]))
     else:
@@ -1289,7 +1308,7 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
         f_mask, f_conf = authority(devs[keep])
         bands_i, _ = fit_peq_robust(freqs, devs[keep], fit_band, mask=f_mask, conf=f_conf, **kw)
         before = group_score(held, 0.0)
-        after = group_score(held, cascade_db(freqs, bands_i))
+        after = group_score(held, cascade_db(freqs, bands_i, fs=fs))
         folds.append({'held_out_position': i if groups is None else held,
                       'held_out_group': order[i], 'held': held, 'bands': bands_i,
                       'held_out_gain_db': round(before - after, 3)})
@@ -1304,10 +1323,10 @@ def held_out_band_validation(freqs, deviations_db, fit_band, mask=None, conf=Non
                 continue
             found += 1
             k = min(match, key=lambda m: abs(np.log2(fold['bands'][m][0] / F)))
-            without = cascade_db(freqs, [b for j, b in enumerate(fold['bands']) if j != k])
+            without = cascade_db(freqs, [b for j, b in enumerate(fold['bands']) if j != k], fs=fs)
             gain = (group_score(fold['held'], without)
-                    - group_score(fold['held'], cascade_db(freqs, fold['bands'])))
-            band_k = cascade_db(freqs, [fold['bands'][k]])
+                    - group_score(fold['held'], cascade_db(freqs, fold['bands'], fs=fs)))
+            band_k = cascade_db(freqs, [fold['bands'][k]], fs=fs)
             dig = max(eq_dig_depth(freqs, devs[j] + without, band_k, fit_band)
                       for j in fold['held'])
             gains.append(gain)
@@ -1512,7 +1531,7 @@ def delays_semantically_equal(xml_a, xml_b):
 
 # --------------------------------------------------------------------------
 # 4) HEADROOM REPORT (mandatory output on every tune — clipping guard)
-def headroom_report(freqs, bands, xover_lo=None, xover_hi=None):
+def headroom_report(freqs, bands, xover_lo=None, xover_hi=None, fs=FS):
     """Given a channel's full PEQ set, report the worst-case positive gain the
     EQ cascade produces (that's what eats digital headroom / clips). Every tune
     must print this per channel. `xover_*` optionally bounds the summed-boost
@@ -1529,7 +1548,7 @@ def headroom_report(freqs, bands, xover_lo=None, xover_hi=None):
     net risk remains, `recommended_trim_db` is the number to apply, via
     `afpx.write_output_trim` (attenuation-only by construction) under the same
     confirm-then-verify rule as any other write."""
-    g = cascade_db(freqs, bands)
+    g = cascade_db(freqs, bands, fs=fs)
     sel = np.ones_like(freqs, dtype=bool)
     if xover_lo is not None: sel &= freqs >= xover_lo
     if xover_hi is not None: sel &= freqs <= xover_hi
@@ -4468,7 +4487,7 @@ def refine_bank(freqs, deviations, old_bank, band, mask=None, conf=None, fs=FS,
             mean_dev = np.mean(devs, axis=0) + T
             added, _rep = fit_peq(f, mean_dev, band, n_bands_max=1, mask=mask, conf=conf,
                                   g_lim=g_lim, q_lim=q_lim, min_gain=min_add_gain,
-                                  fit_smoothed=True)
+                                  fit_smoothed=True, fs=fs)
             for F, Q, G in added:
                 new = snap(F, Q, G)
                 moves.append(('add', None, new, list(bank) + [new]))

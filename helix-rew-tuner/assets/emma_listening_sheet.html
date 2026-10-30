@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EMMA Listening Sheet</title>
+<style>
+:root {
+  --bg: #f5f6f8; --card: #ffffff; --ink: #15181d; --muted: #5a6472; --line: #d8dde4;
+  --accent: #1d63d8; --accent-ink: #ffffff; --chip: #eceff3; --target: #e3edfd;
+  --good: #1a7f37; --warn: #9a6700; --bad: #c4232e;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1216; --card: #171c22; --ink: #e7ecf2; --muted: #9ba6b3; --line: #2c333c;
+    --accent: #4b8ff5; --accent-ink: #0b1220; --chip: #232a32; --target: #13284a;
+    --good: #4ac26b; --warn: #d29922; --bad: #f47067;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1216; --card: #171c22; --ink: #e7ecf2; --muted: #9ba6b3; --line: #2c333c;
+  --accent: #4b8ff5; --accent-ink: #0b1220; --chip: #232a32; --target: #13284a;
+  --good: #4ac26b; --warn: #d29922; --bad: #f47067;
+}
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+body { margin: 0; background: var(--bg); color: var(--ink);
+  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 760px; margin: 0 auto; padding: 0 16px 96px; }
+header.top { position: sticky; top: 0; z-index: 5; background: var(--bg);
+  border-bottom: 1px solid var(--line); }
+header.top .bar { max-width: 760px; margin: 0 auto; padding: 10px 16px;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+h1 { font-size: 1.15rem; margin: 0; }
+.total { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 1.15rem; white-space: nowrap; }
+.total small { font-weight: 400; color: var(--muted); }
+.intro { color: var(--muted); margin: 16px 0 8px; }
+section.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+  padding: 14px 14px 10px; margin: 14px 0; }
+section.card > h2 { font-size: 1.02rem; margin: 0 0 2px; display: flex; justify-content: space-between; gap: 8px; }
+section.card > h2 .sub { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 600; white-space: nowrap; }
+.hint { color: var(--muted); font-size: .88rem; margin: 0 0 10px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+label.field { display: grid; gap: 4px; font-size: .9rem; color: var(--muted); flex: 1 1 160px; }
+input[type=text], input[type=date], textarea, input[type=number] {
+  font: inherit; color: var(--ink); background: var(--bg); border: 1px solid var(--line);
+  border-radius: 8px; padding: 8px 10px; width: 100%; }
+textarea { min-height: 60px; resize: vertical; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 9px; overflow: hidden; }
+.seg button { border: 0; border-right: 1px solid var(--line); background: var(--card); color: var(--ink);
+  font: inherit; padding: 8px 12px; min-height: 40px; cursor: pointer; }
+.seg button:last-child { border-right: 0; }
+.seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+.pos { border-top: 1px solid var(--line); padding: 10px 0 6px; }
+.pos:first-of-type { border-top: 0; }
+.pos h3 { font-size: .95rem; margin: 0 0 6px; display: flex; justify-content: space-between; gap: 8px; align-items: center; }
+.pos h3 .got { font-variant-numeric: tabular-nums; color: var(--muted); font-weight: 600; }
+.ins { display: grid; grid-template-columns: 6.2em 1fr; align-items: center; gap: 6px; margin: 6px 0; }
+.ins .name { font-size: .92rem; }
+.where { display: grid; grid-template-columns: repeat(6, 1fr); gap: 4px; }
+.where button { font: inherit; font-size: .82rem; min-height: 38px; border-radius: 7px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--chip); color: var(--ink); padding: 0 2px; }
+.where button.target { background: var(--target); }
+.where button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.where button.two[aria-pressed="true"] { background: var(--bad); border-color: var(--bad); color: #fff; }
+.subtotal { display: flex; align-items: center; gap: 8px; font-size: .88rem; color: var(--muted); margin-top: 4px; }
+.subtotal input { width: 4.2em; }
+.item { border-top: 1px solid var(--line); padding: 10px 0 8px; }
+.item:first-of-type { border-top: 0; }
+.item .head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+.item .label { font-weight: 600; }
+.item .label small { font-weight: 400; color: var(--muted); }
+.stepper { display: inline-flex; align-items: center; gap: 4px; }
+.stepper button { font: inherit; width: 40px; height: 40px; border-radius: 8px; cursor: pointer;
+  border: 1px solid var(--line); background: var(--chip); color: var(--ink); font-size: 1.15rem; }
+.stepper input { width: 4.4em; text-align: center; font-variant-numeric: tabular-nums; }
+.stepper .of { color: var(--muted); font-size: .9rem; min-width: 2.6em; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chips button { font: inherit; font-size: .85rem; border-radius: 999px; padding: 6px 11px; min-height: 34px;
+  border: 1px solid var(--line); background: var(--chip); color: var(--ink); cursor: pointer; }
+.chips button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.item textarea { margin-top: 8px; min-height: 44px; }
+.warn { color: var(--warn); font-size: .85rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.actions button, .actions label.btn { font: inherit; border-radius: 9px; padding: 10px 14px; min-height: 44px;
+  border: 1px solid var(--line); background: var(--card); color: var(--ink); cursor: pointer; }
+.actions .primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.actions input[type=file] { display: none; }
+#status { min-height: 1.4em; color: var(--muted); font-size: .9rem; margin: 8px 0 0; }
+details summary { cursor: pointer; color: var(--muted); }
+pre { white-space: pre-wrap; word-break: break-word; font-size: .78rem; background: var(--bg);
+  border: 1px solid var(--line); border-radius: 8px; padding: 10px; max-height: 340px; overflow: auto; }
+@media (max-width: 420px) {
+  .ins { grid-template-columns: 1fr; gap: 4px; }
+  .where button { font-size: .78rem; }
+}
+</style>
+</head>
+<body>
+<header class="top"><div class="bar">
+  <h1>EMMA listening sheet</h1>
+  <div class="total" id="total" aria-live="polite">0 <small>/ 280</small></div>
+</div></header>
+<main>
+<p class="intro">The 280-point EMMA SQ scoresheet. Score your own listening, or copy a judge's sheet
+in, then export it for <code>pipeline.py finish --heard</code>, which puts each lost point next to
+what your captures measured. Your draft stays on this device.</p>
+
+<section class="card" id="details">
+  <h2>Details</h2>
+  <div class="row">
+    <span class="seg" role="group" aria-label="Source">
+      <button type="button" data-source="self" aria-pressed="true">My listening</button>
+      <button type="button" data-source="judge" aria-pressed="false">Judge's sheet</button>
+    </span>
+  </div>
+  <div class="row">
+    <label class="field">Date <input type="date" id="date"></label>
+    <label class="field">Event or session <input type="text" id="event" autocomplete="off"></label>
+    <label class="field">Listener or judge <input type="text" id="listener" autocomplete="off"></label>
+  </div>
+</section>
+
+<section class="card" id="imaging">
+  <h2>4.2 Imaging <span class="sub" id="imaging-sub">0 / 25</span></h2>
+  <p class="hint">Tracks 2-6. Each track places all five instruments at one position. Tap where you
+  heard each one; "2x" means heard in two places (0 points). With a judge's sheet, enter the subtotal
+  per position if the marks are not known.</p>
+  <div id="positions"></div>
+</section>
+
+<div id="items"></div>
+
+<section class="card" id="deductions">
+  <h2>4.7 Adjustments <span class="sub" id="deductions-sub">0</span></h2>
+  <div id="deduction-rows"></div>
+</section>
+
+<section class="card">
+  <h2>Notes</h2>
+  <textarea id="notes" aria-label="Notes"></textarea>
+</section>
+
+<section class="card">
+  <h2>Export</h2>
+  <p class="hint">Save the JSON next to your captures. <code>pipeline.py next</code> finds it there.</p>
+  <div class="actions">
+    <button type="button" class="primary" id="download">Download JSON</button>
+    <button type="button" id="copy">Copy JSON</button>
+    <label class="btn" for="load">Load JSON<input type="file" id="load" accept="application/json,.json"></label>
+    <button type="button" id="clear">Clear</button>
+  </div>
+  <p id="status" role="status"></p>
+  <details><summary>Show the JSON</summary><pre id="json"></pre></details>
+</section>
+</main>
+
+<script type="application/json" id="sheet-def">
+{
+  "format": "emma-listening-sheet",
+  "version": 1,
+  "sheet": "EMMA SQ 280",
+  "total_max": 280,
+  "positions": [
+    {"key": "left", "label": "Left", "short": "L"},
+    {"key": "left-centre", "label": "Left-centre", "short": "LC"},
+    {"key": "centre", "label": "Centre", "short": "C"},
+    {"key": "right-centre", "label": "Right-centre", "short": "RC"},
+    {"key": "right", "label": "Right", "short": "R"}
+  ],
+  "instruments": [
+    {"key": "bass", "label": "Bass"},
+    {"key": "guitar", "label": "Guitar"},
+    {"key": "banjo", "label": "Banjo"},
+    {"key": "vibraphone", "label": "Vibraphone"},
+    {"key": "triangle", "label": "Triangle"}
+  ],
+  "sections": [
+    {"title": "4.3 Sound stage", "track": "Track 12", "items": [
+      {"group": "stage", "key": "distance", "label": "Distance to soundstage", "max": 15,
+       "words": ["too close", "too far", "vague"]},
+      {"group": "stage", "key": "width", "label": "Stage width", "max": 15,
+       "words": ["narrow", "too wide", "holes"]},
+      {"group": "stage", "key": "height", "label": "Stage height", "max": 15,
+       "words": ["low", "high", "varies with pitch", "unstable"]}]},
+    {"title": "4.4 Tonal accuracy", "track": "Tracks 13-16", "comment": true, "items": [
+      {"group": "tonal", "key": "sub_bass", "label": "Sub-bass", "max": 30,
+       "words": ["too much", "too little", "boomy", "uneven", "muddy", "thin", "harsh", "bright", "dull", "sibilant", "distorted", "rattle"]},
+      {"group": "tonal", "key": "mid_bass", "label": "Mid-bass", "max": 30,
+       "words": ["too much", "too little", "boomy", "uneven", "muddy", "thin", "harsh", "bright", "dull", "sibilant", "distorted", "rattle"]},
+      {"group": "tonal", "key": "midrange", "label": "Midrange", "max": 30,
+       "words": ["too much", "too little", "boomy", "uneven", "muddy", "thin", "harsh", "bright", "dull", "sibilant", "distorted", "rattle"]},
+      {"group": "tonal", "key": "high", "label": "High frequency", "max": 30,
+       "words": ["too much", "too little", "boomy", "uneven", "muddy", "thin", "harsh", "bright", "dull", "sibilant", "distorted", "rattle"]}]},
+    {"title": "4.5 Overall spectral balance", "track": "Track 16", "items": [
+      {"group": "balance", "key": "normal", "label": "Normal volume", "max": 30,
+       "words": ["bass heavy", "bass light", "mids forward", "mids recessed", "bright", "dull"]},
+      {"group": "balance", "key": "louder", "label": "Higher volume (about +6 dB)", "max": 30,
+       "words": ["harsh", "compressed", "distorted", "boomy", "rattle", "bass heavy", "bass light", "bright", "dull"]}]},
+    {"title": "4.6 Listening pleasure", "track": "All tracks", "items": [
+      {"group": "pleasure", "key": "pleasure", "label": "Listening pleasure", "max": 30, "prompt": "What held it back",
+       "words": ["naturalness", "harmony & musicality", "atmosphere & emotion", "clarity", "effortless sound", "dynamics & energy", "distinction & separation", "body of voice & air", "transparency", "details"]}]}
+  ],
+  "deductions": [
+    {"key": "system_noise", "label": "System noise", "min": -6},
+    {"key": "visibility", "label": "Visibility (pre-judging check)", "min": -6}
+  ]
+}
+</script>
+<script>
+(function () {
+  "use strict";
+  var DEF = JSON.parse(document.getElementById("sheet-def").textContent);
+  var STORE = "emma-listening-sheet-draft";
+  var ITEMS = [];
+  DEF.sections.forEach(function (s) { s.items.forEach(function (it) { ITEMS.push(it); }); });
+  var state = blank();
+
+  function blank() {
+    var s = { source: "self", date: "", event: "", listener: "", notes: "",
+              cells: {}, subtotals: {}, items: {}, deductions: {} };
+    DEF.positions.forEach(function (p) { s.cells[p.key] = {}; s.subtotals[p.key] = null; });
+    ITEMS.forEach(function (it) { s.items[it.key] = { points: null, words: [], comment: "" }; });
+    DEF.deductions.forEach(function (d) { s.deductions[d.key] = 0; });
+    return s;
+  }
+
+  function el(tag, attrs, kids) {
+    var e = document.createElement(tag);
+    Object.keys(attrs || {}).forEach(function (k) {
+      if (k === "text") { e.textContent = attrs[k]; }
+      else if (k === "cls") { e.className = attrs[k]; }
+      else { e.setAttribute(k, attrs[k]); }
+    });
+    (kids || []).forEach(function (c) { if (c) { e.appendChild(c); } });
+    return e;
+  }
+
+  function num(v, lo, hi) {
+    if (v === null || v === undefined || v === "") { return null; }
+    var n = Number(v);
+    if (!isFinite(n)) { return null; }
+    return Math.min(hi, Math.max(lo, n));
+  }
+
+  // ---------------------------------------------------------------- scoring
+  function positionPoints(key) {
+    if (state.subtotals[key] !== null) { return state.subtotals[key]; }
+    var cells = state.cells[key], marked = 0, right = 0;
+    DEF.instruments.forEach(function (i) {
+      if (cells[i.key]) { marked += 1; if (cells[i.key] === key) { right += 1; } }
+    });
+    return marked === DEF.instruments.length ? right : null;
+  }
+
+  function totals() {
+    var img = 0, imgScored = 0, total = 0, scored = 0, bySection = {};
+    DEF.positions.forEach(function (p) {
+      var v = positionPoints(p.key);
+      if (v !== null) { img += v; imgScored += 1; }
+    });
+    if (imgScored) { total += img; scored += 1; }
+    DEF.sections.forEach(function (s) {
+      var sum = 0, any = false;
+      s.items.forEach(function (it) {
+        var v = state.items[it.key].points;
+        if (v !== null) { sum += v; any = true; scored += 1; }
+      });
+      bySection[s.title] = any ? sum : null;
+      total += sum;
+    });
+    var ded = 0;
+    DEF.deductions.forEach(function (d) { ded += state.deductions[d.key] || 0; });
+    total += ded;
+    return { imaging: imgScored ? img : null, sections: bySection, deductions: ded,
+             total: scored ? Math.round(total * 10) / 10 : null };
+  }
+
+  // ---------------------------------------------------------------- render
+  function renderPositions() {
+    var host = document.getElementById("positions");
+    host.textContent = "";
+    DEF.positions.forEach(function (p) {
+      var got = el("span", { cls: "got", id: "got-" + p.key, text: "- / 5" });
+      var box = el("div", { cls: "pos" }, [el("h3", {}, [el("span", { text: p.label + " position" }), got])]);
+      DEF.instruments.forEach(function (ins) {
+        var where = el("div", { cls: "where", role: "group", "aria-label": ins.label + " at " + p.label });
+        DEF.positions.concat([{ key: "two places", short: "2x", label: "two places" }]).forEach(function (q) {
+          var b = el("button", { type: "button", text: q.short, "aria-label": q.label, "data-key": q.key,
+                                  "aria-pressed": String(state.cells[p.key][ins.key] === q.key) });
+          if (q.key === p.key) { b.classList.add("target"); }
+          if (q.key === "two places") { b.classList.add("two"); }
+          b.addEventListener("click", function () {
+            if (state.cells[p.key][ins.key] === q.key) { delete state.cells[p.key][ins.key]; }
+            else { state.cells[p.key][ins.key] = q.key; }
+            Array.prototype.forEach.call(where.children, function (c) {
+              c.setAttribute("aria-pressed", String(c.getAttribute("data-key") === state.cells[p.key][ins.key]));
+            });
+            changed();
+          });
+          where.appendChild(b);
+        });
+        box.appendChild(el("div", { cls: "ins" }, [el("span", { cls: "name", text: ins.label }), where]));
+      });
+      var sub = el("input", { type: "number", inputmode: "numeric", min: "0", max: "5", step: "1",
+                              "aria-label": "Judge's subtotal, " + p.label });
+      sub.value = state.subtotals[p.key] === null ? "" : state.subtotals[p.key];
+      sub.addEventListener("input", function () { state.subtotals[p.key] = num(sub.value, 0, 5); changed(); });
+      var warn = el("span", { cls: "warn", id: "warn-" + p.key });
+      box.appendChild(el("div", { cls: "subtotal" }, [el("span", { text: "Judge's subtotal" }), sub, warn]));
+      host.appendChild(box);
+    });
+  }
+
+  function stepper(it) {
+    var input = el("input", { type: "number", inputmode: "decimal", min: "0", max: String(it.max), step: "1",
+                              "aria-label": it.label + " points" });
+    input.value = state.items[it.key].points === null ? "" : state.items[it.key].points;
+    function set(v) {
+      state.items[it.key].points = num(v, 0, it.max);
+      input.value = state.items[it.key].points === null ? "" : state.items[it.key].points;
+      changed();
+    }
+    var minus = el("button", { type: "button", text: "−", "aria-label": "One point less" });
+    var plus = el("button", { type: "button", text: "+", "aria-label": "One point more" });
+    minus.addEventListener("click", function () {
+      var v = state.items[it.key].points; set(v === null ? it.max - 1 : v - 1);
+    });
+    plus.addEventListener("click", function () {
+      var v = state.items[it.key].points; set(v === null ? it.max : v + 1);
+    });
+    input.addEventListener("change", function () { set(input.value); });
+    return el("span", { cls: "stepper" }, [minus, input, plus, el("span", { cls: "of", text: "/ " + it.max })]);
+  }
+
+  function chips(it) {
+    var box = el("div", { cls: "chips", role: "group", "aria-label": it.prompt || "What you heard" });
+    it.words.forEach(function (w) {
+      var b = el("button", { type: "button", text: w,
+                              "aria-pressed": String(state.items[it.key].words.indexOf(w) >= 0) });
+      b.addEventListener("click", function () {
+        var list = state.items[it.key].words, i = list.indexOf(w);
+        if (i >= 0) { list.splice(i, 1); } else { list.push(w); }
+        b.setAttribute("aria-pressed", String(i < 0));
+        changed();
+      });
+      box.appendChild(b);
+    });
+    return box;
+  }
+
+  function renderItems() {
+    var host = document.getElementById("items");
+    host.textContent = "";
+    DEF.sections.forEach(function (s, si) {
+      var max = s.items.reduce(function (a, it) { return a + it.max; }, 0);
+      var card = el("section", { cls: "card" }, [
+        el("h2", {}, [el("span", { text: s.title }), el("span", { cls: "sub", id: "sec-" + si, text: "0 / " + max })]),
+        el("p", { cls: "hint", text: s.track })]);
+      s.items.forEach(function (it) {
+        var head = el("div", { cls: "head" }, [el("span", { cls: "label", text: it.label }), stepper(it)]);
+        var box = el("div", { cls: "item" }, [head]);
+        if (it.prompt) { box.appendChild(el("p", { cls: "hint", text: it.prompt })); }
+        box.appendChild(chips(it));
+        if (s.comment) {
+          var ta = el("textarea", { "aria-label": it.label + " comment", placeholder: "Comment" });
+          ta.value = state.items[it.key].comment;
+          ta.addEventListener("input", function () { state.items[it.key].comment = ta.value; changed(); });
+          box.appendChild(ta);
+        }
+        card.appendChild(box);
+      });
+      host.appendChild(card);
+    });
+  }
+
+  function renderDeductions() {
+    var host = document.getElementById("deduction-rows");
+    host.textContent = "";
+    DEF.deductions.forEach(function (d) {
+      var seg = el("span", { cls: "seg", role: "group", "aria-label": d.label });
+      for (var v = 0; v >= d.min; v -= 1) {
+        (function (v) {
+          var b = el("button", { type: "button", text: String(v), "aria-pressed": String(state.deductions[d.key] === v) });
+          b.addEventListener("click", function () {
+            state.deductions[d.key] = v;
+            Array.prototype.forEach.call(seg.children, function (c) {
+              c.setAttribute("aria-pressed", String(Number(c.textContent) === v));
+            });
+            changed();
+          });
+          seg.appendChild(b);
+        })(v);
+      }
+      host.appendChild(el("div", { cls: "item" }, [el("div", { cls: "head" }, [el("span", { cls: "label", text: d.label }), seg])]));
+    });
+  }
+
+  function renderDetails() {
+    Array.prototype.forEach.call(document.querySelectorAll("[data-source]"), function (b) {
+      b.setAttribute("aria-pressed", String(b.getAttribute("data-source") === state.source));
+    });
+    ["date", "event", "listener", "notes"].forEach(function (k) {
+      document.getElementById(k).value = state[k] || "";
+    });
+  }
+
+  function renderAll() { renderDetails(); renderPositions(); renderItems(); renderDeductions(); update(); }
+
+  // ---------------------------------------------------------------- export
+  function toJSON() {
+    var t = totals();
+    var out = { format: DEF.format, version: DEF.version, sheet: DEF.sheet, source: state.source };
+    ["date", "event", "listener", "notes"].forEach(function (k) { if (state[k]) { out[k] = state[k]; } });
+    out.imaging = { cells: {}, points: {} };
+    DEF.positions.forEach(function (p) {
+      var c = {};
+      DEF.instruments.forEach(function (i) { if (state.cells[p.key][i.key]) { c[i.key] = state.cells[p.key][i.key]; } });
+      if (Object.keys(c).length) { out.imaging.cells[p.key] = c; }
+      if (state.subtotals[p.key] !== null) { out.imaging.points[p.key] = state.subtotals[p.key]; }
+    });
+    ITEMS.forEach(function (it) {
+      var s = state.items[it.key];
+      var node = { points: s.points };
+      node[it.group === "pleasure" ? "lacking" : "heard"] = s.words.slice();
+      if (s.comment) { node.comment = s.comment; }
+      if (it.group === "pleasure") { out.pleasure = node; }
+      else { out[it.group] = out[it.group] || {}; out[it.group][it.key] = node; }
+    });
+    out.deductions = {};
+    DEF.deductions.forEach(function (d) { out.deductions[d.key] = state.deductions[d.key]; });
+    out.total = t.total;
+    return out;
+  }
+
+  function fromJSON(raw) {
+    if (!raw || raw.format !== DEF.format || raw.version !== DEF.version) {
+      throw new Error("not an EMMA listening sheet (version 1)");
+    }
+    var s = blank();
+    s.source = raw.source === "judge" ? "judge" : "self";
+    ["date", "event", "listener", "notes"].forEach(function (k) { s[k] = raw[k] ? String(raw[k]) : ""; });
+    var img = raw.imaging || {}, cells = img.cells || {}, pts = img.points || {};
+    var valid = DEF.positions.map(function (p) { return p.key; }).concat(["two places"]);
+    DEF.positions.forEach(function (p) {
+      var c = cells[p.key] || {};
+      DEF.instruments.forEach(function (i) { if (valid.indexOf(c[i.key]) >= 0) { s.cells[p.key][i.key] = c[i.key]; } });
+      s.subtotals[p.key] = num(pts[p.key], 0, 5);
+    });
+    ITEMS.forEach(function (it) {
+      var node = it.group === "pleasure" ? (raw.pleasure || {}) : ((raw[it.group] || {})[it.key] || {});
+      var words = (it.group === "pleasure" ? node.lacking : node.heard) || [];
+      s.items[it.key] = { points: num(node.points, 0, it.max), words: words.map(String), comment: node.comment ? String(node.comment) : "" };
+    });
+    DEF.deductions.forEach(function (d) { s.deductions[d.key] = num((raw.deductions || {})[d.key], d.min, 0) || 0; });
+    return s;
+  }
+
+  // ---------------------------------------------------------------- update
+  function update() {
+    var t = totals();
+    document.getElementById("total").innerHTML = "";
+    document.getElementById("total").appendChild(document.createTextNode(t.total === null ? "-" : String(t.total)));
+    document.getElementById("total").appendChild(el("small", { text: " / " + DEF.total_max }));
+    document.getElementById("imaging-sub").textContent = (t.imaging === null ? "-" : t.imaging) + " / 25";
+    DEF.positions.forEach(function (p) {
+      var v = positionPoints(p.key);
+      document.getElementById("got-" + p.key).textContent = (v === null ? "-" : v) + " / 5";
+      var marked = 0, right = 0;
+      DEF.instruments.forEach(function (i) {
+        var c = state.cells[p.key][i.key];
+        if (c) { marked += 1; if (c === p.key) { right += 1; } }
+      });
+      var warn = document.getElementById("warn-" + p.key);
+      warn.textContent = (state.subtotals[p.key] !== null && marked === DEF.instruments.length && right !== state.subtotals[p.key])
+        ? "the marks give " + right : "";
+    });
+    DEF.sections.forEach(function (s, si) {
+      var max = s.items.reduce(function (a, it) { return a + it.max; }, 0);
+      var v = t.sections[s.title];
+      document.getElementById("sec-" + si).textContent = (v === null ? "-" : v) + " / " + max;
+    });
+    document.getElementById("deductions-sub").textContent = String(t.deductions);
+    document.getElementById("json").textContent = JSON.stringify(toJSON(), null, 2);
+  }
+
+  function changed() {
+    update();
+    try { localStorage.setItem(STORE, JSON.stringify(toJSON())); } catch (e) { /* storage unavailable */ }
+  }
+
+  function status(msg) { document.getElementById("status").textContent = msg; }
+
+  function fileName() {
+    return "emma-sheet-" + (state.date || "undated") + (state.source === "judge" ? "-judge" : "") + ".json";
+  }
+
+  // ---------------------------------------------------------------- wiring
+  Array.prototype.forEach.call(document.querySelectorAll("[data-source]"), function (b) {
+    b.addEventListener("click", function () { state.source = b.getAttribute("data-source"); renderDetails(); changed(); });
+  });
+  ["date", "event", "listener", "notes"].forEach(function (k) {
+    document.getElementById(k).addEventListener("input", function (e) { state[k] = e.target.value; changed(); });
+  });
+  document.getElementById("download").addEventListener("click", function () {
+    try {
+      var blob = new Blob([JSON.stringify(toJSON(), null, 2) + "\n"], { type: "application/json" });
+      var a = el("a", { href: URL.createObjectURL(blob), download: fileName() });
+      document.body.appendChild(a); a.click(); a.remove();
+      status("Saved " + fileName() + ".");
+    } catch (e) { status("Download is blocked here: use Copy JSON instead."); }
+  });
+  document.getElementById("copy").addEventListener("click", function () {
+    var text = JSON.stringify(toJSON(), null, 2);
+    function fallback() {
+      document.querySelector("details").open = true;
+      var range = document.createRange(); range.selectNodeContents(document.getElementById("json"));
+      var sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(range);
+      status("Selected below: copy it, then save it as a .json file.");
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(function () { status("Copied. Save it as a .json file."); }, fallback);
+    } else { fallback(); }
+  });
+  document.getElementById("load").addEventListener("change", function (e) {
+    var f = e.target.files && e.target.files[0];
+    if (!f) { return; }
+    var r = new FileReader();
+    r.onload = function () {
+      try { state = fromJSON(JSON.parse(String(r.result))); renderAll(); changed(); status("Loaded " + f.name + "."); }
+      catch (err) { status("Could not load it: " + err.message); }
+    };
+    r.readAsText(f);
+    e.target.value = "";
+  });
+  document.getElementById("clear").addEventListener("click", function () {
+    if (!window.confirm("Clear every score on this sheet?")) { return; }
+    state = blank(); renderAll(); changed(); status("Cleared.");
+  });
+
+  try {
+    var saved = localStorage.getItem(STORE);
+    if (saved) { state = fromJSON(JSON.parse(saved)); }
+  } catch (e) { state = blank(); }
+  renderAll();
+})();
+</script>
+</body>
+</html>
