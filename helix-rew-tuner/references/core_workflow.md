@@ -191,7 +191,11 @@ read before first use.
 **Session start, in this order:** (1) preflight if this environment is new
 (step 0); (2) `pipeline.py session check` when there is a tune file; (3) your
 first reply: set expectations and present what the sidecar holds, or ask the
-intake questions (step 1). Then work through steps 2–7.
+intake questions (step 1). Then work through steps 2–7. A read-only look at a
+whole-system capture (`analyze`: tilt, peaks, flagged dips) may come before
+the answers, to make the questions specific; label it provisional, and keep
+anything per driver or per side, and every proposal, until the channel map and
+seat are confirmed.
 
 **No tune file yet?** Measurements alone are enough for steps 2–3b: run
 `analyze` (and `propose` if the user wants candidate bands), and ask what each
@@ -271,8 +275,12 @@ Nothing here is hardcoded. Before analyzing, confirm with the user:
   summation analysis, per-side imaging, robustness). Ask what they captured.
 - **If the user tunes by MMM (moving-mic RTA), follow §MMM-first tuning,
   instead of asking for positions:** one MMM run is already a spatial average;
-  ask for the capture set listed there (ONE run of each: full system, the L/R
-  and sub/midbass halves, an ambient capture) and pass `--capture mmm`. A
+  ask for the capture set listed there, ONE run of each, and pass `--capture
+  mmm`:
+  - the full system;
+  - `Front L`, `Front R`, `Front Both` (sub off);
+  - `Sub`, `Midbass Both`, `Sub Midbass Both`;
+  - an ambient capture (generator off, same movement). A
   repeat run is optional, never a prerequisite: it adds repeatability checks
   for small changes. Before they capture, offer `pipeline.py capture-plan`
   (with the tune, if there is one); after, run `pipeline.py next` on what they
@@ -487,7 +495,10 @@ twice,).
   `references/tune_plan_schema.md`. Put every proposed edit in the plan, keep the
   generated `source_sha256`, choose a distinct not-yet-existing `output_path`,
   and set `confirmations[edit.id]` to `true` only after the user confirms that
-  specific edit. Ordinary PEQ requires confirmation too. Review the printed
+  specific edit. Ordinary PEQ requires confirmation too. A matched left/right
+  pair is two edits: one question that names both (the same filter on ch0 and
+  ch1) may be answered by one yes, which confirms both ids; anything that
+  differs between the two needs its own question. Review the printed
   verification manifest before handing off the file.
 - Supported plan edits are PEQ (`T=17`), justified shelves (`T=3/4`, end slots
   only), all-passes (`T=19/20`), confirmed delays, the channel Phase control

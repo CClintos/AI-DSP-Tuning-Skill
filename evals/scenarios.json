@@ -117,7 +117,7 @@
     {
       "id": "S08",
       "title": "Re-measure after a write",
-      "prompt": "I loaded the new tune and re-measured: after1.txt, after2.txt, after3.txt. Did it work?",
+      "prompt": "I loaded the new tune (mytune_new.afpx; the old one is mytune.afpx) and re-measured: after1.txt, after2.txt, after3.txt. Did it work?",
       "replies": {},
       "must": [
         "runs pipeline.py verify or tunelib.predicted_vs_measured with the written bands and the bands they replaced",

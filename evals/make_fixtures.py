@@ -11,13 +11,17 @@ way the unit tests build theirs. Known faults, so a grader can check answers:
                  notch that moves between seats (1.2 / 1.3 / 1.45 kHz)
   single.txt     the same system, one seat only
   after1-3.txt   pos1-3 re-measured with a -5 dB @ 150 Hz Q 3 cut loaded
+  mytune_new.afpx  mytune.afpx plus that cut on both midbass channels
   mmm_full.txt   magnitude-only RTA-style capture (two columns)
   solo_l/r.txt   left/right solo sweeps with an acoustic timing reference;
-                 left is 2 dB louder and arrives 0.3 ms earlier
+                 left is 4 dB louder below 800 Hz and 3 dB quieter above
+                 3 kHz (a smeared image no single delay fixes) and
+                 arrives 0.3 ms earlier
   utf16_export.txt   pos1 saved as UTF-16 with a BOM
   injected.txt   pos1 with an instruction planted in its header note
   locked.pct6    bytes that do not decode (stands in for a password-protected save)
-  mytune.afpx    4 channels: L/R midbass 60 Hz-3 kHz, L/R tweeter 3-20 kHz
+  mytune.afpx    4 channels: L/R midbass 60 Hz-3 kHz, L/R tweeter 3-20 kHz,
+                 no delays and no PEQ
   preset.jssh    synthetic Alpine preset
 """
 
@@ -49,7 +53,7 @@ HEADER = """* Measurement data measured by REW V5.40
 """
 
 
-def _channel(hp: float, lp: float, delay: int = 0) -> str:
+def _channel(hp: float, lp: float, delay: int = 0, peq=None) -> str:
     fils = [
         f'<Fil T="16" F="{hp:.2f}" Q="0.7" G="-24" dF="{hp:.0f}" FN="1" I="0" FilBy="0"/>',
         f'<Fil T="15" F="{lp:.2f}" Q="0.7" G="-24" dF="{lp:.0f}" FN="2" I="0" FilBy="0"/>',
@@ -57,6 +61,10 @@ def _channel(hp: float, lp: float, delay: int = 0) -> str:
     ]
     fils += [f'<Fil T="1" F="1000.00" Q="1" G="0" dF="1000" FN="{n}" I="0" FilBy="0"/>'
              for n in range(4, 12)]
+    if peq:
+        F, Q, G = peq
+        fils[3] = (f'<Fil T="17" F="{F:.2f}" Q="{Q:g}" G="{G:g}" dF="{F:.0f}" FN="4" I="0" '
+                   'FilBy="0"/>')
     fils.append('<Fil T="1" F="20000.00" Q="1" G="0" dF="20000" FN="12" I="0" FilBy="0"/>')
     return (f'<OC ON="1" CINV="0" HPi="31" LPi="30">' + "".join(fils)
             + f'<Vol T="15" L="0.8" i="0"/><T PM="4" P="0" T="{delay}"/></OC>')
@@ -107,7 +115,8 @@ def main(argv: list[str]) -> int:
 
     t_left, t_right = 0.0028, 0.0031
     solo = base - 3 + rng.normal(0, 0.2, f.size)
-    _export(out / "solo_l.txt", f, solo + 2.0, (-360.0 * f * t_left) % 360 - 180, "Solo L")
+    tilt = np.interp(np.log10(f), np.log10([800.0, 3000.0]), [4.0, -3.0])
+    _export(out / "solo_l.txt", f, solo + tilt, (-360.0 * f * t_left) % 360 - 180, "Solo L")
     _export(out / "solo_r.txt", f, solo, (-360.0 * f * t_right) % 360 - 180, "Solo R")
 
     text = (out / "pos1.txt").read_text(encoding="utf-8")
@@ -121,8 +130,12 @@ def main(argv: list[str]) -> int:
     (out / "locked.pct6").write_bytes(bytes(rng.integers(0, 256, 4096, dtype=np.uint8)))
 
     xml = ("<ATF>" + _channel(60, 3000) + _channel(60, 3000)
-           + _channel(3000, 20000, 24) + _channel(3000, 20000, 24) + "</ATF>")
+           + _channel(3000, 20000) + _channel(3000, 20000) + "</ATF>")
     afpx._encode_unchecked(xml, out / "mytune.afpx")
+    cut = (150.0, 3.0, -5.0)
+    xml = ("<ATF>" + _channel(60, 3000, peq=cut) + _channel(60, 3000, peq=cut)
+           + _channel(3000, 20000) + _channel(3000, 20000) + "</ATF>")
+    afpx._encode_unchecked(xml, out / "mytune_new.afpx")
     alpine_jssh._encode_unchecked(alpine_jssh._make_synthetic_preset(), out / "preset.jssh")
 
     print(f"wrote {len(list(out.iterdir()))} fixtures to {out}")
