@@ -17,7 +17,7 @@ ARCHIVE_NAME = f"{SKILL_DIR_NAME}.skill"
 FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 TEXT_SUFFIXES = {".html", ".json", ".md", ".py", ".toml", ".txt", ".yaml", ".yml"}
 
-SKILL_VERSION = "1.25.0"
+SKILL_VERSION = "1.26.0"
 
 SKILL_WRAPPER = f"""\
 ---

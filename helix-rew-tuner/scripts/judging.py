@@ -35,8 +35,9 @@ def regions(freqs, support):
     for name, lo, hi in BANDS:
         sel = live & (freqs >= lo) & (freqs < hi)
         # Partial bands cannot certify a whole band.
-        covered = (np.count_nonzero(sel) >= 8 and freqs[live].min() <= lo * 1.01
-                   and freqs[live].max() >= hi / 1.01) if np.any(live) else False
+        expected = (freqs >= lo) & (freqs < hi)
+        covered = (np.count_nonzero(sel) >= 8 and np.all(live[expected])
+                   and freqs[0] <= lo * 1.01 and freqs[-1] >= hi / 1.01)
         yield name, lo, hi, sel, covered
 
 

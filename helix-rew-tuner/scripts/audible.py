@@ -196,6 +196,12 @@ def stereo_propose(args):
     additional cuts only and does not allocate or write hardware slots.
     """
     f = measure.common_grid(20, 20000, 96)
+    import pipeline
+    pipeline._independent_capture_paths(args.left + args.right)
+    fs = getattr(args, 'dsp_rate', None)
+    fs = tunelib.FS if fs is None else fs
+    if not np.isfinite(fs) or fs <= 0:
+        raise ValueError('DSP rate must be positive')
     band = tuple(map(float, args.band))
     if not 60 <= band[0] < band[1] <= 16000 or not 1 <= args.max_bands <= 5:
         raise ValueError('stereo-propose needs a 60-16000 Hz band and 1-5 bands per stage')
@@ -212,7 +218,7 @@ def stereo_propose(args):
         if tunelib.detect_duplicate_traces(raw):
             raise ValueError('duplicate stereo captures cannot count as independent runs')
         # Preserve the cross-side level scale; no independent side normalization.
-        sides[side] = np.mean(traces, axis=0)
+        sides[side] = tunelib.mmm_power_pool(traces) if len(traces) > 1 else traces[0]
         repeat[side] = traces
     sel = (f >= band[0]) & (f <= band[1])
     if np.any(sel & ~live):
@@ -232,11 +238,11 @@ def stereo_propose(args):
     original_dev = {s: curve - target - anchor for s, curve in raw_sides.items()}
     common_excess = np.minimum(np.maximum(dev['left'], 0), np.maximum(dev['right'], 0))
     common, _ = tunelib.fit_peq(f, common_excess, band, n_bands_max=args.max_bands,
-                               g_lim=(-6, 0), q_lim=(.5, 4), fit_smoothed=True, cut_seed_retry=True)
+                               g_lim=(-6, 0), q_lim=(.5, 4), fit_smoothed=True, cut_seed_retry=True, fs=fs)
     shared = np.zeros(len(f))
     kept_common = []
     for b in common:
-        proposed = shared + tunelib.cascade_db(f, [b])
+        proposed = shared + tunelib.cascade_db(f, [b], fs=fs)
         if all(np.max((np.maximum(-tunelib.masked_erb_smooth(f, d + proposed, sel), 0)
                           - np.maximum(-tunelib.masked_erb_smooth(f, d, sel), 0))[sel]) <= .5 for d in dev.values()):
             kept_common.append(b)
@@ -246,9 +252,9 @@ def stereo_propose(args):
     for side, other in (('left', 'right'), ('right', 'left')):
         excess = np.minimum(np.maximum(current[side], 0), np.maximum(current[side] - current[other], 0))
         bands, _ = tunelib.fit_peq(f, excess, band, n_bands_max=args.max_bands,
-                                  g_lim=(-6, 0), q_lim=(.5, 4), fit_smoothed=True, cut_seed_retry=True)
+                                  g_lim=(-6, 0), q_lim=(.5, 4), fit_smoothed=True, cut_seed_retry=True, fs=fs)
         for b in bands:
-            transfer = tunelib.cascade_db(f, [b])
+            transfer = tunelib.cascade_db(f, [b], fs=fs)
             before = tunelib.audibility_score(f, current[side], band=band, mask=sel)
             after = tunelib.audibility_score(f, current[side] + transfer, band=band, mask=sel)
             guard = partner_guard(f, current[side], current[other], transfer, sel)
@@ -271,7 +277,7 @@ def stereo_propose(args):
     if a_gap > b_gap + .25:
         judge['verdict'] = 'regressed'
     worthwhile = judge['verdict'] == 'improved' or b_gap - a_gap > margin
-    return {'predicted_not_measured': True, 'prediction_sample_rate_hz': tunelib.FS,
+    return {'predicted_not_measured': True, 'prediction_sample_rate_hz': fs,
             'target_anchor_db': round(anchor, 3),
             'level_trim': trim, 'common_bands': kept_common, 'side_bands': banks,
             'judging': judge, 'before_lr_mismatch_db': round(b_gap, 3),

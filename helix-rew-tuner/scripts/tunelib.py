@@ -2147,13 +2147,13 @@ def perceptual_score(freqs, dev_db, left_db=None, right_db=None, band=(60.0, 160
         return {'total': float('inf'), 'tonal': float('inf'),
                 'resonance': float('inf'), 'stereo': 0.0}
     c = np.ones_like(freqs, dtype=float) if conf is None else np.clip(np.asarray(conf, dtype=float), 0.0, 1.0)
-    sm = erb_smooth(freqs, dev_db)
+    sm = masked_erb_smooth(freqs, dev_db, sel)
     W = loudness_weight(freqs) * c
     peak_term = np.maximum(sm, 0.0)
     dip_term = 0.6 * np.maximum(-sm, 0.0)
     tonal = wrms((peak_term + dip_term)[sel] * masking_relief(freqs[sel], sm[sel]), W[sel])
 
-    local = dev_db - sm
+    local = np.where(sel, dev_db - sm, 0.0)
     q_proxy = local_peak_q_proxy(freqs, local)
     resonance_weight = band_weight(freqs, 1500.0, 6000.0, floor=0.05) * c
     resonance_term = np.maximum(local, 0.0) * np.clip(q_proxy / 1.8, 0.8, 3.0)
@@ -3090,7 +3090,7 @@ VERIFY_VERDICTS = ('confirmed', 'diverged', 'reverted_recommended', 'inconclusiv
 def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
                           conf=None, region_oct=0.3, consistent_db=2.0,
                           min_predicted_db=0.5, old_bands=None, noise_db=0.3,
-                          anchor_max_db=0.1, fs=FS, repeatability=None):
+                          anchor_max_db=0.1, fs=FS, repeatability=None, support=None):
     """freqs, before_db: the ORIGINAL pre-write measurement (what the
     correction was actually proposed against). remeasured_after_db: the new
     measurement taken after loading the write. bands: the (F, Q, G) list
@@ -3142,7 +3142,8 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
     predicted_after_db = before_db + transfer_db
     notes = []
 
-    untouched = np.abs(transfer_db) <= anchor_max_db
+    live = np.ones(len(freqs), bool) if support is None else np.asarray(support, bool)
+    untouched = (np.abs(transfer_db) <= anchor_max_db) & live
     level_anchored = bool(np.count_nonzero(untouched) >= 12)
     if level_anchored:
         level_offset_db = target_anchor_offset(
@@ -3156,11 +3157,11 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
                      'compare at a carefully matched playback level')
     aligned_after_db = remeasured_after_db - level_offset_db
 
-    pred_delta = erb_smooth(freqs, transfer_db)
-    act_delta = erb_smooth(freqs, aligned_after_db - before_db)
+    pred_delta = masked_erb_smooth(freqs, transfer_db, live)
+    act_delta = masked_erb_smooth(freqs, aligned_after_db - before_db, live)
     resolution = max(float(min_predicted_db), 2.0 * float(
         repeatability['noise_db'] if repeatability is not None else noise_db))
-    trace_changed = bool(np.max(np.abs(act_delta)) > resolution)
+    trace_changed = bool(np.any(live) and np.max(np.abs(act_delta[live])) > resolution)
 
     changed = ([b for b in new_set if b not in old_set] +
                [b for b in old_set if b not in new_set])
@@ -3173,12 +3174,12 @@ def predicted_vs_measured(freqs, before_db, remeasured_after_db, bands,
         predicted_change = float(np.average(pred_delta[region], weights=w))
         actual_change = float(np.average(act_delta[region], weights=w))
         error = actual_change - predicted_change
-        region_conf = float(np.mean(conf[region])) if conf is not None else 1.0
+        region_conf = (float(np.mean(conf[region])) if conf is not None else 1.0) if np.all(live[region]) else 0.0
         local_noise = (repeatability_noise(repeatability, (F / 2 ** region_oct, F * 2 ** region_oct))
                        if repeatability is not None else float(noise_db))
         local_resolution = (max(float(min_predicted_db), 2.0 * local_noise)
                             if local_noise is not None else None)
-        if local_resolution is not None and abs(actual_change) > local_resolution:
+        if region_conf >= .3 and local_resolution is not None and abs(actual_change) > local_resolution:
             trace_changed = True
 
         if (region_conf < 0.3 or local_resolution is None

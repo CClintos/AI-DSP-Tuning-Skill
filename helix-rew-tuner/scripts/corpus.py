@@ -18,7 +18,8 @@ def _load(base, item, grid):
     if digest != item['sha256']:
         raise ValueError('corpus capture hash changed: %s' % path)
     f, db, _phase, _coh = measure.load_text_export(path)
-    return measure.resample_log(f, db, grid), measure.support_mask(f, grid), digest
+    import pipeline
+    return measure.resample_log(f, db, grid), measure.support_mask(f, grid), (digest, pipeline._capture_id(path))
 
 
 def _hash_file(path):
@@ -50,8 +51,10 @@ def replay(spec, base):
                   for key in ('before', 'after')}
         if not loaded['before'] or not loaded['after']:
             raise ValueError('corpus session needs before and after captures')
-        capture_ids = [item[2] for group_items in loaded.values() for item in group_items if item[2]]
-        if len(capture_ids) != len(set(capture_ids)):
+        identities = [item[2] for group_items in loaded.values() for item in group_items]
+        capture_ids = [x[1] for x in identities if x[1]]
+        hashes = [x[0] for x in identities]
+        if len(capture_ids) != len(set(capture_ids)) or len(hashes) != len(set(hashes)):
             raise ValueError('one corpus recording was counted more than once')
         live = np.logical_and.reduce([item[1] for g in loaded.values() for item in g])
         if np.count_nonzero(live) < 8:

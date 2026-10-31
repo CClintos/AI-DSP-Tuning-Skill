@@ -70,6 +70,7 @@ settings and limits. Both only read.
 | `plan` / `apply` | The only AFPX write route (step 5). | `references/tune_plan_schema.md` |
 | `session check` / `session save` | Read or record the intake sidecar (step 1). | — |
 | `stereo-propose` | Shared voicing plus limited side cuts, evaluated together from L/R captures. | `references/audible_tuning.md` |
+| `stereo-refine` | Joint remove/relax/refit proposals for two existing channel PEQ banks from independent repeated L/R MMM. Requires confirmed DSP rate; missing timed junction evidence holds edits for review. | `references/audible_tuning.md` |
 | `bass-trials` | Sub gain/delay/polarity trial directions from timed solos validated against the actual together capture. | `references/audible_tuning.md` |
 | `voice-match` | Level-match actual measured candidate system responses before blind preference tests. | `references/audible_tuning.md` |
 | `audible-study` | Compare measured crossover finalists, multitone workload, warm output, bass across the driver's head area, stage/volume listening, and repeatable physical noise symptoms. | `references/audible_tuning.md` |

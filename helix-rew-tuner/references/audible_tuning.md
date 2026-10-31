@@ -120,6 +120,42 @@ explicitly and include it in subsequent system measurements.
 
 ## Joint L/R correction
 
+For an existing tune, use `stereo-refine` to assess both banks together:
+
+```text
+pipeline.py stereo-refine --afpx current.afpx --left-channel 0 --right-channel 1 --left L1.txt L2.txt --right R1.txt R2.txt --dsp-rate 96000 --band 700 5000 --out joint.json
+```
+
+Channels and rate are placeholders. Each selected channel needs its own
+left/right solo measurement through that exact bank; do not use a whole
+half-system capture to justify editing one driver. Each side needs at least
+two independent full MMM passes at identical playback level and mic coverage.
+Known same-source IDs and duplicate traces are rejected; unknown provenance
+requires operator confirmation. Repeats are pooled in power without separate
+left/right normalization. Fixed-position phase data remains separate.
+
+This bounded search considers keeping, removing, relaxing, and small frequency,
+Q or gain refits of existing bells, including paired moves. It uses the same
+fixed-anchor scorecards for selection and reporting. Every pass must avoid
+regional regression; L/R mismatch is checked over the supported 700-5000 Hz
+region. Changes must beat measured repeat disagreement and a 0.5 dB decision
+floor; neutral removals have a 0.02 dB simplicity tolerance. These are engineering
+margins. Search is limited to eight edits and a shortlist of four moves per
+side each round; it does not establish a globally optimal bank.
+
+Supply `--left-limits` and `--right-limits` for measured clean-output ceilings.
+Without them additional gain, including removing cuts, is capped at 3 dB.
+Use `--left-junction-spec` and `--right-junction-spec` with the existing timed
+neighbour schema and matching DSP rate. Each side's incremental transfer is
+checked separately, conservatively; supplied evidence only covers named
+junctions. Missing or failing evidence yields `hold_for_review`. The report
+names channel and slot for every edit and writes no tune. Review edits through
+plan/apply. Then remeasure left, right and both playing and compare mono vocals
+at matched level through normal head movements.
+
+`stereo-propose --dsp-rate` also accepts the confirmed rate and uses power
+pooling/provenance checks for repeated MMM passes.
+
 ```text
 pipeline.py stereo-propose --left left1.txt left2.txt --right right1.txt right2.txt --target target.txt --out stereo.json
 pipeline.py refine --afpx current.afpx --channels 0 --dsp-rate 96000 --positions left1.txt left2.txt --capture mmm --target target.txt --partner right.txt --limits left-quality.json --out left-refine.json
@@ -216,6 +252,38 @@ confirmation. This checks one bass junction; any additional junction touched
 by a shared channel must also be checked with `probe`.
 
 ## Preference at matched loudness
+
+Keep a context JSON beside the A/B logs, for example:
+
+```json
+{"listener":"Clinton","baseline_sha256":"replace with 64 lowercase hex characters","level_db":80,"environment":"parked"}
+```
+
+The hash identifies the unchanged baseline tune; `level_db` is the listening
+SPL used for the session, and environment is `parked` or `driving`. Pass the
+same file to `ab-result --context context.json` when recording choices and
+`prefs --context context.json` when learning preferences. Use a new context
+for a changed baseline, listener, level or environment. Context selection
+requires an exact match and excludes legacy/unlabelled entries. Mixed contexts
+without an explicit selection fail rather than pool preferences. Legacy-only
+logs remain usable with unverified scope. This extends the existing voicing
+learner; it does not predict how preferences transfer between contexts.
+
+Context-bound entries also require the generated variant manifest to record
+matching baseline and candidate SHA-256 hashes. Older unbound context entries
+are skipped when learning a selected context. Fresh A/B keys carry a persistent
+run ID: recording one key twice is idempotent; use a fresh key for a new session.
+The log is written atomically, and report output cannot replace it. The exact
+two-sided preference test assumes a fixed number of choices; exploratory or
+repeatedly inspected choices do not establish that statistical interpretation.
+Variant metadata records the applied gain after hardware limits; unequal
+effective changes across channels require separate variants.
+
+Joint refinement also applies recorded per-channel vehicle restrictions and
+limits newly deepened ERB deficits to 0.5 dB. A repeat playback-level spread
+above 0.75 dB requires resolving level or microphone coverage first. Candidate
+feasibility is checked before the shortlist. The original Q is preserved for
+gain-only and frequency-only moves.
 
 `voice-variants` now also accepts `--presence-db -1 1 --presence-channels ...`
 (default 2.2 kHz broad PEQ). It requires a free PEQ slot. Existing bass/treble

@@ -895,7 +895,8 @@ def _load_session(args, freqs):
     repeatability = None
     if len(positions_db) >= 2:
         sc = tunelib.spatial_consistency(freqs, positions_db, min_positions=2)
-        aligned = np.vstack(positions_db) - np.asarray(sc['level_offsets_db'])[:, None]
+        aligned = (np.vstack(positions_db) if capture == 'mmm' else
+                   np.vstack(positions_db) - np.asarray(sc['level_offsets_db'])[:, None])
         basis_db = tunelib.mmm_power_pool(positions_db) if capture == 'mmm' else sc['mean_db']
         source = ('power mean of %d MMM runs' if capture == 'mmm' else
                   'mean of %d positions') % len(positions_db)
@@ -2172,7 +2173,9 @@ def ab_make(args):
             with open(src, 'rb') as fh_in, open(dst, 'xb') as fh_out:
                 shutil.copyfileobj(fh_in, fh_out)
         key['labels'][lab] = {'source': src, 'is': 'A' if src == a else 'B',
-                              'trim_db': applied, 'sha256': _sha256_file(dst)}
+                              'trim_db': applied, 'sha256': _sha256_file(dst), 'source_sha256': _sha256_file(src)}
+    import uuid
+    key['run_id'] = str(uuid.uuid4())
     with open(key_path, 'x', encoding='utf-8') as fh:
         json.dump(key, fh, indent=2)
     return {
@@ -2208,7 +2211,7 @@ def ab_result(args):
     counts = {lab: choices.count(lab) for lab in AB_LABELS}
     n = counts['X'] + counts['Y']
     top = max(AB_LABELS, key=lambda lab: counts[lab])
-    p = _binomial_tail(counts[top], n) if n else 1.0
+    p = min(1.0, 2*_binomial_tail(counts[top], n)) if n else 1.0
     winner = key['labels'][top]['is'] if n and counts['X'] != counts['Y'] else None
     if winner and p < 0.1:
         verdict = '%s preferred (%d of %d, chance would do this %.0f%% of the time)' % (
@@ -2222,13 +2225,38 @@ def ab_result(args):
                          for lab in AB_LABELS},
              'loudness_matched_db': key.get('trim_db'), 'note': args.note}
     log_path = os.path.join(os.path.dirname(os.path.abspath(args.key)), 'ab_log.json')
+    if getattr(args, 'context', None):
+        import mmm
+        entry['context'] = mmm.load_preference_context(args.context)
+        entry['context_verified'] = mmm.verify_context_sources(entry['context'], entry['sources'])
+        entry['stimulus_knobs'] = {k: ({x: 0.0 for x in mmm.KNOBS} if _sha256_file(v) == entry['context']['baseline_sha256'] else mmm.knobs_for(v)) for k, v in entry['sources'].items()}
+    if getattr(args, 'out', None) and (os.path.normcase(os.path.abspath(args.out)) == os.path.normcase(log_path) or (os.path.exists(args.out) and os.path.exists(log_path) and os.path.samefile(args.out, log_path))):
+        raise ValueError('--out cannot overwrite the A/B log')
+    import hashlib
+    entry['run_id'] = key.get('run_id') or hashlib.sha256(json.dumps(key, sort_keys=True).encode()).hexdigest()
+    for label in key['labels'].values():
+        if label.get('source_sha256') and _sha256_file(label['source']) != label['source_sha256']:
+            raise ValueError('A/B source changed since the test key was created')
+    entry['source_sha256'] = {k: _sha256_file(v) for k, v in entry['sources'].items() if os.path.isfile(v)}
     log = []
     if os.path.exists(log_path):
         with open(log_path, encoding='utf-8') as fh:
             log = json.load(fh)
-    log.append(entry)
-    with open(log_path, 'w', encoding='utf-8') as fh:
-        json.dump(log, fh, indent=2)
+    if not isinstance(log, list):
+        raise ValueError('A/B log must be a list')
+    previous = next((e for e in log if e.get('run_id') == entry['run_id']), None)
+    if previous and previous['choices'] != choices:
+        raise ValueError('listening run already recorded with different choices')
+    if previous is None:
+        log.append(entry)
+        import tempfile
+        fd, temporary = tempfile.mkstemp(dir=os.path.dirname(log_path), suffix='.json')
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+                json.dump(log, fh, indent=2)
+            os.replace(temporary, log_path)
+        finally:
+            if os.path.exists(temporary): os.unlink(temporary)
     entry['log'] = log_path
     if n < 6:
         entry['caution'] = 'fewer than 6 decided choices -- treat any preference as provisional'
@@ -2321,7 +2349,7 @@ def verify(args):
     bands, old = _verify_bands(args)
     result = tunelib.predicted_vs_measured(freqs, b_db, a_db, bands, old_bands=old,
                                            repeatability=prof, noise_db=args.noise_db,
-                                           fs=float(args.dsp_rate))
+                                           fs=float(args.dsp_rate), support=live)
     for row in result['bands']:
         row['advice'] = VERIFY_ADVICE.get(row['verdict'])
     target_path = ASSETS_DEFAULT_TARGET if args.target == 'default' else args.target
@@ -2337,7 +2365,7 @@ def verify(args):
     shared_anchor = tunelib.validated_anchor_offset(
         freqs, b_db, target, confidence=live.astype(float))
     decision = judging.scorecard(freqs, b_db - target - shared_anchor,
-                                 a_db - target - shared_anchor, live,
+                                 a_db - result['level_offset_db'] - target - shared_anchor, live,
                                  max(.5, 2 * (prof or {}).get('noise_db', args.noise_db)))
     counts = {v: sum(1 for r in result['bands'] if r['verdict'] == v)
               for v in tunelib.VERIFY_VERDICTS}
@@ -2414,6 +2442,8 @@ def voice_variants(args):
                 spec = (float(hz), float(q), step)
             else:
                 raise ValueError('channel %d %s slot holds a %s filter' % (c, kind, slot['type']))
+            if curve_spec is not None and abs(curve_spec[2]-spec[2]) > .001:
+                raise ValueError('variant channels receive different effective changes; use separate variants')
             curve_spec = curve_spec or spec
             edits.append(edit)
         F, Q, G = curve_spec
@@ -2423,7 +2453,7 @@ def voice_variants(args):
         loud = tunelib.loudness_change_db(freqs, program, program + shelf)
         name = '%s%+.2fdB' % (kind, step)
         path = os.path.join(out_dir, name + '.afpx')
-        row = {'variant': name, 'file': path, 'edits': edits, 'knobs': {kind: step},
+        row = {'variant': name, 'file': path, 'edits': edits, 'knobs': {kind: G},
                'loudness_status': 'provisional: use voice-match on actual candidate system captures',
                'predicted_loudness_change_db': round(loud, 2),
                'ab_make': ('pipeline.py ab-make --a %s --b %s --loudness-db %.2f --out-dir '
@@ -2448,6 +2478,7 @@ def voice_variants(args):
             with open(manifest, encoding='utf-8') as fh:
                 known = json.load(fh)
         known['variants'].extend({'file': r['file'], 'base': os.path.abspath(args.afpx),
+                                 'base_sha256': _sha256_file(args.afpx), 'file_sha256': _sha256_file(r['file']),
                                   'knobs': r['knobs']} for r in rows)
         with open(manifest, 'w', encoding='utf-8') as fh:
             json.dump(known, fh, indent=2)
@@ -2915,7 +2946,24 @@ def main():
     sp.add_argument('--target', default='default')
     sp.add_argument('--band', nargs=2, type=float, default=(300, 6000))
     sp.add_argument('--max-bands', type=int, default=3)
+    sp.add_argument('--dsp-rate', type=float, help='confirmed internal DSP rate; otherwise 96 kHz model is declared')
     sp.add_argument('--out')
+
+    sr = sub.add_parser('stereo-refine', help='jointly refine existing left/right PEQ banks from repeated MMM')
+    sr.add_argument('--afpx', required=True)
+    sr.add_argument('--left-channel', type=int, required=True)
+    sr.add_argument('--right-channel', type=int, required=True)
+    sr.add_argument('--left', nargs='+', required=True)
+    sr.add_argument('--right', nargs='+', required=True)
+    sr.add_argument('--dsp-rate', type=float, required=True)
+    sr.add_argument('--target', default='default')
+    sr.add_argument('--band', nargs=2, type=float, default=(700, 5000))
+    sr.add_argument('--max-edits', type=int, default=4)
+    sr.add_argument('--left-limits')
+    sr.add_argument('--right-limits')
+    sr.add_argument('--left-junction-spec')
+    sr.add_argument('--right-junction-spec')
+    sr.add_argument('--out')
 
     bt = sub.add_parser('bass-trials', help='predict sub gain/delay/polarity trials, validated against the actual sum')
     bt.add_argument('--sub', required=True)
@@ -3110,6 +3158,7 @@ def main():
     abr.add_argument('--key', required=True)
     abr.add_argument('--choices', nargs='+', required=True, help='X, Y or same per pair')
     abr.add_argument('--note')
+    abr.add_argument('--context', help='JSON listener, baseline hash, level and environment context')
     abr.add_argument('--out')
 
     sa = sub.add_parser('source-audit',
@@ -3288,6 +3337,7 @@ def main():
     pf = sub.add_parser('prefs', help='your voicing preferences from logged blind A/Bs')
     pf.add_argument('--log', nargs='+', required=True, help='ab_log.json file(s)')
     pf.add_argument('--base', help='the base tune the variants were made from (knobs 0)')
+    pf.add_argument('--context', help='learn only from the matching JSON listening context')
     pf.add_argument('--knobs', nargs='+', metavar='PATH=bass:X,treble:Y',
                     help='knob values for tunes the manifest/name does not describe')
     pf.add_argument('--out')
@@ -3445,7 +3495,7 @@ def _dispatch(args):
         print(json.dumps(apply_plan(args.plan), indent=2))
     elif args.cmd in ('analyze', 'propose', 'source-audit', 'imaging', 'junction', 'probe',
                       'refine', 'ab-make', 'ab-result', 'mmm-compare', 'lr-match',
-                      'verify', 'voice-variants', 'emma-volume', 'noise-check', 'bass-trials', 'voice-match', 'stereo-propose',
+                      'verify', 'voice-variants', 'emma-volume', 'noise-check', 'bass-trials', 'voice-match', 'stereo-propose', 'stereo-refine',
                       'capture-plan', 'next', 'finish', 'capture-audit', 'coherence', 'mmm-align', 'stability', 'xo-check',
                       'listening-level', 'road-noise', 'prefs', 'frames', 'test-signal',
                       'signal-analyze', 'trust-check'):
@@ -3456,6 +3506,7 @@ def _dispatch(args):
         import planner
         import finish as finish_mod
         import trust as trust_mod
+        import stereo_refine
         report = {'analyze': analyze, 'propose': propose, 'source-audit': source_audit,
                   'imaging': imaging, 'junction': junction, 'probe': probe,
                   'refine': refine, 'ab-make': ab_make,
@@ -3464,6 +3515,7 @@ def _dispatch(args):
                   'voice-variants': voice_variants, 'emma-volume': emma_volume,
                   'noise-check': noise_check, 'bass-trials': audible.bass_trials,
                   'voice-match': audible.measured_voice_match, 'stereo-propose': audible.stereo_propose,
+                  'stereo-refine': stereo_refine.command,
                   'capture-plan': planner.capture_plan_cmd, 'next': planner.next_cmd,
                   'finish': finish_mod.finish_cmd,
                   'capture-audit': capture_audit.cli, 'coherence': mmm.coherence_cmd,

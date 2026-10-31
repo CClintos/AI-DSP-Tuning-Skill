@@ -192,10 +192,22 @@ def crossover_review(spec, base, load=None, warm=None):
         if quality and quality.get('version') != 1:
             raise ValueError('crossover quality_report must be version 1')
         reasons = []
+        if not verdicts or any(v not in ('candidate', 'neutral') for v in verdicts):
+            reasons.append('nonempty eligible probe evidence required')
         if any(v in ('reject', 'tradeoff') for v in verdicts): reasons.append('probe rejects or trades off at a position')
         if quality_state == 'hold_for_review': reasons.append('measured output quality holds candidate')
-        if quality is None or all(quality.get('evidence', {}).get(k, {}).get('status') == 'unknown'
-                                  for k in ('compression', 'distortion')):
+        def eligible_output(report):
+            evidence = (report or {}).get('evidence', {})
+            rows = list(evidence.get('distortion', {}).get('bands', []))
+            for step in evidence.get('compression', {}).get('steps', []):
+                rows.extend(step.get('bands', []))
+            intervals = sorted(r['band_hz'] for r in rows if r.get('status') in ('tracks', 'measured') and 'band_hz' in r)
+            end = band[0]
+            for lo, hi in intervals:
+                if lo <= end*1.01:
+                    end = max(end, hi)
+            return end >= band[1]/1.01
+        if not eligible_output(quality):
             reasons.append('clean-output evidence missing')
         for report, label in ((load, 'multitone'), (warm, 'warm-output')):
             if report is not None:

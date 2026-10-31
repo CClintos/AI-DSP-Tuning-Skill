@@ -2,6 +2,29 @@
 
 Newest first. Version numbers match `metadata.version` in `helix-rew-tuner/SKILL.md`.
 
+## 1.26.0
+
+- Audit corrections: common-support verification, nuisance-level-consistent
+  tonal judging, contiguous regional evidence, power-preserving MMM fit inputs,
+  source-recording identity checks and regional crossover evidence eligibility.
+- Joint refinement applies vehicle restrictions and local deficit guards,
+  preserves Q during other parameter moves, and prunes physically infeasible
+  candidates before shortlisting. Repeat-level spread above 0.75 dB is held.
+- Listening logs reject report collisions, write atomically and deduplicate
+  stable session IDs. Either-direction preference uses a two-sided exact test.
+  Context-bound choices require hashed variant/baseline provenance; knob values
+  record applied changes and next experiments stay close to the tested range.
+
+- `stereo-refine` jointly evaluates remove/relax/refit moves on two existing
+  PEQ banks against keeping the current tune. Selection and reporting share
+  fixed-anchor judging, repeated-pass regression guards, L/R mismatch checks,
+  clean-output ceilings and optional timed neighbour checks. Proposals only;
+  measured audible improvement remains to be established in the car.
+- `ab-result --context` records listener, baseline SHA-256, SPL and environment;
+  `prefs --context` isolates those choices. Unselected mixed contexts fail.
+- `stereo-propose` now power-pools MMM repeats, rejects known same-recording
+  exports, and accepts the confirmed DSP rate for its filter model.
+
 ## 1.25.0
 
 - **MMM evidence authority.** `frames` tags every export from a source recording

@@ -754,20 +754,78 @@ def knobs_for(path, manifest_cache=None, manual=None, base=None):
     return None
 
 
-def _trials(logs, manual, base):
+def load_preference_context(path):
+    with open(path, encoding='utf-8-sig') as fh:
+        context = json.load(fh)
+    if not isinstance(context, dict) or set(context) != {'listener', 'baseline_sha256', 'level_db', 'environment'}:
+        raise ValueError('preference context needs listener, baseline_sha256, level_db, environment')
+    if not isinstance(context['listener'], str) or not context['listener'].strip():
+        raise ValueError('context listener must be nonempty')
+    if not isinstance(context['baseline_sha256'], str) or not re.fullmatch('[0-9a-f]{64}', context['baseline_sha256']):
+        raise ValueError('context baseline_sha256 must be the baseline tune SHA-256')
+    level = context['level_db']
+    if isinstance(level, bool) or not isinstance(level, (int, float)) or not np.isfinite(level):
+        raise ValueError('context level_db must be a finite listening SPL')
+    if context['environment'] not in ('parked', 'driving'):
+        raise ValueError('context environment must be parked or driving')
+    return context
+
+
+def verify_context_sources(context, sources):
+    import hashlib
+    def digest(path):
+        with open(path, 'rb') as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    for source in sources.values():
+        if not os.path.isfile(source):
+            raise ValueError('context source is missing')
+        if digest(source) == context['baseline_sha256']:
+            continue
+        manifest = os.path.join(os.path.dirname(source), 'voice_variants.json')
+        if not os.path.isfile(manifest):
+            raise ValueError('context variant needs a source-bound voice manifest')
+        with open(manifest, encoding='utf-8') as fh:
+            variants = json.load(fh).get('variants', [])
+        row = next((r for r in variants if os.path.normcase(os.path.abspath(r['file'])) == os.path.normcase(os.path.abspath(source))), None)
+        if not row or row.get('base_sha256') != context['baseline_sha256'] or row.get('file_sha256') != digest(source):
+            raise ValueError('variant or baseline hash does not match listening context')
+    return True
+
+
+def _trials(logs, manual, base, context=None, verified_only=False):
     trials, skipped = [], []
     cache = {}
+    contexts = set()
+    seen = set()
     for log_path in logs:
         with open(log_path, encoding='utf-8') as fh:
             entries = json.load(fh)
         for e in entries:
+            identity = e.get('run_id') or json.dumps(e, sort_keys=True)
+            if identity in seen:
+                skipped.append('duplicate listening run')
+                continue
+            seen.add(identity)
+            entry_context = e.get('context')
+            if context is not None and entry_context != context:
+                skipped.append('different or unknown listening context')
+                continue
+            contexts.add(json.dumps(entry_context, sort_keys=True))
+            if context is None and len(contexts) > 1:
+                raise ValueError('A/B logs mix listening contexts; select one with --context')
+            if verified_only and context is not None and not e.get('context_verified'):
+                skipped.append('unverified listening context provenance')
+                continue
             src = e.get('sources') or {}
             reveal = e.get('reveal') or {}
             counts = e.get('counts') or {}
             if not ('A' in src and 'B' in src):
                 skipped.append('entry without sources')
                 continue
-            ka, kb = (knobs_for(src[x], cache, manual, base) for x in ('A', 'B'))
+            if verified_only and context is not None:
+                ka, kb = (e.get('stimulus_knobs', {}).get(x) for x in ('A', 'B'))
+            else:
+                ka, kb = (knobs_for(src[x], cache, manual, base) for x in ('A', 'B'))
             if ka is None or kb is None:
                 skipped.append('%s vs %s: knob values unknown' % (os.path.basename(src['A']),
                                                                    os.path.basename(src['B'])))
@@ -842,7 +900,8 @@ def prefs_cmd(args):
                 raise ValueError('--knobs knob must be one of %s (got %r)' % (', '.join(KNOBS), k))
             vec[k.strip().lower()] = float(v)
         manual[path] = vec
-    trials, skipped = _trials(args.log, manual, args.base)
+    context = load_preference_context(args.context) if getattr(args, 'context', None) else None
+    trials, skipped = _trials(args.log, manual, args.base, context, verified_only=True)
     if not trials:
         raise ValueError('no logged A/B has known knob values (%s). Run voice-variants, ab-make and '
                          'ab-result first, or map files with --knobs PATH=bass:1,treble:0'
@@ -855,8 +914,12 @@ def prefs_cmd(args):
     centre = fit[widest]['median_db']
     half = (fit[widest]['interval_80_db'][1] - fit[widest]['interval_80_db'][0]) / 2.0
     step = max(0.5, round(min(half, 3.0) * 4) / 4)
-    pair = [round((centre - step) * 4) / 4, round((centre + step) * 4) / 4]
+    tested = fit[widest]['tested_db']
+    lo, hi = min(tested), max(tested)
+    centre = float(np.clip(centre, lo, hi))
+    pair = [round(max(lo-.5, centre-step)*4)/4, round(min(hi+.5, centre+step)*4)/4]
     return {'meta': {'logs': args.log, 'trials': len(trials), 'decided_choices': decided,
+                     'context': context, 'context_scope': 'selected' if context else 'single context or legacy unverified',
                      'skipped': skipped},
             'preferences': fit,
             'next_test': {'knob': widest, 'variants_db': pair,
