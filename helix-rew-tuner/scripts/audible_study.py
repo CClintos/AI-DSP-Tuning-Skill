@@ -5,6 +5,7 @@ import os
 import numpy as np
 
 import audible
+import judging
 import measure
 import tunelib
 
@@ -184,6 +185,8 @@ def crossover_review(spec, base, load=None, warm=None):
                 raise ValueError('crossover variant missing from probe position')
             verdicts.append(row['recommendation'])
         after = tunelib.audibility_score(F, measured-target-anchor, band=band, mask=sel)
+        decision = judging.scorecard(F, baseline-target-anchor,
+                                     measured-target-anchor, bs & support)
         quality = _json(base, item['quality_report']) if item.get('quality_report') else None
         quality_state = quality.get('overall') if quality else 'unknown'
         if quality and quality.get('version') != 1:
@@ -200,7 +203,10 @@ def crossover_review(spec, base, load=None, warm=None):
                 if match is None or match['status'] in ('unknown', 'regressed', 'time_dependent_change'):
                     reasons.append(label + ' evidence missing or regressed')
         if before-after <= .25: reasons.append('measured tonal gain below decision margin')
+        if decision['verdict'] != 'improved':
+            reasons.append('shared perceptual judging did not improve')
         rows.append({'name': item['name'], 'variant': named, 'measured_tonal_gain_db': round(before-after, 3),
+                     'candidate_judging': decision,
                      'probe_positions': len(groups), 'probe_verdicts': verdicts,
                      'quality_status': quality_state, 'rejection_reasons': reasons})
     rows.sort(key=lambda r: -r['measured_tonal_gain_db'])

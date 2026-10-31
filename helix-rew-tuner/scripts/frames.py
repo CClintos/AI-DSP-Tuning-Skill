@@ -1,10 +1,10 @@
-# frames.py -- one MMM run that measures its own repeatability.
+# frames.py -- one MMM run with internal consistency diagnostics.
 #
 # REW's RTA shows the power mean of every FFT block in a capture and throws
 # the blocks away. Kept, the blocks of ONE moving-mic run also give:
 #   - the spread across the path (how much each frequency moves);
-#   - split-half repeatability: the first half of the path against the
-#     second, a measured resolution in place of the assumed 0.25-0.3 dB;
+#   - within-pass consistency: the first half of the path against the
+#     second; independent repeatability requires a fresh full capture;
 #   - a robust mean that drops handling bumps and passing cars;
 #   - REW's own peak-hold trace (max over blocks) for the stability map;
 #   - coverage: blocks used, seconds, fraction kept.
@@ -18,11 +18,8 @@
 #      averaging set to None, so each poll is one block) -- GET requests only.
 #
 # Outputs are REW-style text exports every command reads: mean, robust mean,
-# peak, and the two halves. Pass the halves as `--positions half1 half2
-# --capture mmm` and the repeatability-gated features (verify thresholds,
-# mmm-compare resolution, narrower Q where stable) switch on from one run.
-# Each half covers half the path, so its repeatability overstates the full
-# capture's by about sqrt(2): conservative, never optimistic.
+# peak, and the two halves for diagnostics. Every export carries the SHA-256
+# capture_id of its source. Pipeline refuses same-source halves as repeats.
 #
 # Absolute level: without --spl-offset-db the output is dBFS (re a full-scale
 # sine). The UMIK cal file's response correction is applied when given; its
@@ -32,6 +29,7 @@
 #   pipeline.py frames --wav pass.wav --cal 7160281_90deg.txt --out-dir D [--fft 65536]
 #   pipeline.py frames --api-frames frames.json --out-dir D
 import json
+import hashlib
 import math
 import os
 import struct
@@ -267,6 +265,12 @@ def run(args):
     out_dir = os.path.abspath(args.out_dir)
     os.makedirs(out_dir, exist_ok=True)
     stem = args.name or os.path.splitext(os.path.basename(args.wav or args.api_frames))[0]
+    source_file = args.wav or args.api_frames
+    digest = hashlib.sha256()
+    with open(source_file, 'rb') as source_fh:
+        for chunk in iter(lambda: source_fh.read(1024 * 1024), b''):
+            digest.update(chunk)
+    capture_id = digest.hexdigest()
     files = {}
     head = ['Measurement data from frames.py (%s, %d blocks)' % (meta['source'], stats['blocks']),
             'Format: %d-point 1/%d octave RTA using Hann window, no smoothing and %d averages'
@@ -275,7 +279,9 @@ def run(args):
     for key, label in (('mean_db', 'mean'), ('robust_db', 'robust'), ('peak_db', 'peak'),
                        ('half1_db', 'half1'), ('half2_db', 'half2')):
         path = os.path.join(out_dir, '%s_%s.txt' % (stem, label))
-        _write(path, freqs, stats[key], head + ['Measurement: %s %s' % (stem, label)])
+        role = 'within_capture_half' if label in ('half1', 'half2') else 'full_capture'
+        _write(path, freqs, stats[key], head + ['capture_id: %s' % capture_id,
+              'evidence_role: %s' % role, 'Measurement: %s %s' % (stem, label)])
         files[label] = path
     live = (freqs >= 20.0) & (freqs <= min(20000.0, freqs[-1]))
     rep = tunelib.capture_repeatability(freqs, [stats['half1_db'], stats['half2_db']], support=live)
@@ -300,11 +306,11 @@ def run(args):
     if robust_vs_mean > 0.5:
         notes.append('the robust mean differs from the plain mean by up to %.1f dB: use the robust '
                      'file' % robust_vs_mean)
-    return {'meta': dict(meta, blocks=stats['blocks'], kept=stats['kept']),
-            'files': files, 'split_half_repeatability': public,
+    return {'meta': dict(meta, blocks=stats['blocks'], kept=stats['kept'], capture_id=capture_id),
+            'files': files, 'within_capture_consistency': public,
             'path_spread': bands,
             'use': ['--measurement %s --capture mmm  (one run, robust mean)' % files['robust'],
-                    '--positions %s %s --capture mmm  (repeatability from this one run; '
-                    'conservative by about sqrt(2))' % (files['half1'], files['half2']),
+                    'half1/half2 are diagnostics from the SAME run; use separate full passes '
+                    'for independent repeatability',
                     '--peak-trace %s  (bass stability map, with the mean file)' % files['peak']],
             'notes': notes}

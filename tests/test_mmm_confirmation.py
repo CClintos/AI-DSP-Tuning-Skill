@@ -86,6 +86,22 @@ class ConfirmationTests(unittest.TestCase):
             self.assertIn('no phase', report['claim'])
             self.assertEqual(report['repeat_files']['candidates']['trial'], files['b2'])
 
+    def test_cli_rejects_split_halves_as_repeat(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            files = {}
+            for name, curve, capture_id in [('a1', BASE, 'same-source'),
+                                             ('a2', BASE+WOBBLE, 'same-source'),
+                                             ('b1', TRIAL, 'other-source')]:
+                p = Path(tmp) / (name + '.txt')
+                p.write_text('* capture_id: %s\n' % capture_id +
+                             '\n'.join('%g %.6f' % (f, s) for f, s in zip(F, curve)))
+                files[name] = str(p)
+            proc = subprocess.run([sys.executable, str(SCRIPTS/'pipeline.py'), 'mmm-compare',
+                '--captures', 'now='+files['a1'], 'trial='+files['b1'], '--repeat', files['a2'],
+                '--band', '40', '160'], capture_output=True, text=True)
+            self.assertEqual(proc.returncode, 2)
+            self.assertIn('SAME MMM recording', proc.stderr)
+
 
 if __name__ == '__main__':
     unittest.main()

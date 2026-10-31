@@ -752,6 +752,28 @@ def _parse_voice(pairs):
     return knobs
 
 
+def _capture_id(path):
+    """Read provenance written by frames; absent metadata never proves independence."""
+    if not os.path.isfile(path):
+        return None  # e.g. session.mdat::measurement; the loader validates the source
+    with open(path, encoding='utf-8-sig', errors='replace') as fh:
+        for _ in range(30):
+            line = fh.readline()
+            if not line or not line.lstrip().startswith(('*', '#')):
+                break
+            if 'capture_id:' in line.lower():
+                return line.split(':', 1)[1].strip()
+    return None
+
+
+def _independent_capture_paths(paths):
+    ids = [_capture_id(path) for path in paths]
+    known = [x for x in ids if x]
+    if len(known) != len(set(known)):
+        raise ValueError('two exports come from the SAME MMM recording; use separate full passes '
+                         'for repeatability or one robust/mean export for a single run')
+
+
 def _load_session(args, freqs):
     """Load measurement/positions/target the same way for analyze and propose.
 
@@ -770,6 +792,12 @@ def _load_session(args, freqs):
     profile = _load_capture_profile(args, notes)
     support = np.ones_like(freqs, dtype=bool)
     raw_positions, positions_db, kept_index = {}, [], []
+    if (getattr(args, 'capture', None) == 'mmm' and args.positions):
+        _independent_capture_paths(args.positions)
+        if len(args.positions) > 1 and any(_capture_id(p) is None for p in args.positions):
+            notes.append('MMM run independence is unverified: exports without capture_id may '
+                         'share one recording; fresh independent passes are required for '
+                         'a measured repeatability claim')
     for i, p in enumerate(args.positions or []):
         f, s, _ph, _coh = measure.load_text_export(p)
         raw_positions[p if p not in raw_positions else '%s (#%d)' % (p, i + 1)] = (f, s)
@@ -868,8 +896,8 @@ def _load_session(args, freqs):
     if len(positions_db) >= 2:
         sc = tunelib.spatial_consistency(freqs, positions_db, min_positions=2)
         aligned = np.vstack(positions_db) - np.asarray(sc['level_offsets_db'])[:, None]
-        basis_db = sc['mean_db']
-        source = ('mean of %d MMM runs' if capture == 'mmm' else
+        basis_db = tunelib.mmm_power_pool(positions_db) if capture == 'mmm' else sc['mean_db']
+        source = ('power mean of %d MMM runs' if capture == 'mmm' else
                   'mean of %d positions') % len(positions_db)
         if capture == 'mmm':
             repeatability = tunelib.capture_repeatability(freqs, positions_db, support=support)
@@ -2255,6 +2283,11 @@ def verify(args):
         raise ValueError('--dsp-rate is required: the CONFIRMED internal rate')
     notes = []
     profile = _load_capture_profile(args, notes)
+    _independent_capture_paths(args.before + args.after)
+    if getattr(args, 'capture', 'positions') == 'mmm' and any(
+            _capture_id(path) is None for path in args.before + args.after):
+        notes.append('MMM capture provenance is unknown for an export without capture_id; '
+                     'confirm separate full passes before claiming repeatability')
 
     def load(paths):
         runs, live = [], np.ones_like(freqs, dtype=bool)
@@ -2268,12 +2301,14 @@ def verify(args):
     after, la = load(args.after)
     live = lb & la
 
-    def mean_of(runs):
+    def mean_of(runs, paths):
         if len(runs) >= 2:
+            if getattr(args, 'capture', 'positions') == 'mmm' or all(_capture_id(path) for path in paths):
+                return tunelib.mmm_power_pool(runs)
             return tunelib.spatial_consistency(freqs, runs, min_positions=2)['mean_db']
         return runs[0]
 
-    b_db, a_db = mean_of(before), mean_of(after)
+    b_db, a_db = mean_of(before, args.before), mean_of(after, args.after)
     prof = None
     if len(before) >= 2:
         prof = tunelib.capture_repeatability(freqs, before, support=live)
@@ -2299,6 +2334,11 @@ def verify(args):
         return tunelib.audibility_score(freqs, x - target - anchor, band=band, mask=live)
 
     te_b, te_a = target_error(b_db), target_error(a_db)
+    shared_anchor = tunelib.validated_anchor_offset(
+        freqs, b_db, target, confidence=live.astype(float))
+    decision = judging.scorecard(freqs, b_db - target - shared_anchor,
+                                 a_db - target - shared_anchor, live,
+                                 max(.5, 2 * (prof or {}).get('noise_db', args.noise_db)))
     counts = {v: sum(1 for r in result['bands'] if r['verdict'] == v)
               for v in tunelib.VERIFY_VERDICTS}
     return {'meta': {'before': args.before, 'after': args.after, 'report': args.report,
@@ -2308,6 +2348,7 @@ def verify(args):
             'trace_changed': result['trace_changed'],
             'target_error_db': {'before': round(te_b, 3), 'after': round(te_a, 3),
                                 'change': round(te_a - te_b, 3)},
+            'candidate_judging': decision,
             'counts': counts, 'bands': result['bands'],
             'notes': notes + result['notes'],
             'next_step': ('keep confirmed bands; act on reverted ones; settle inconclusive '
@@ -2492,15 +2533,25 @@ def mmm_compare(args):
         repeat = measure.resample_log(f, s, freqs)
         live &= measure.support_mask(f, freqs)
     baseline = args.baseline or next(iter(files))
+    if baseline not in files:
+        raise ValueError('--baseline must name a label in --captures')
+    if args.repeat:
+        _independent_capture_paths([files[baseline], args.repeat])
     repeat_files = _labelled(getattr(args, 'candidate_repeat', None) or [], '--candidate-repeat')
     candidate_repeats = {}
     for label, path in repeat_files.items():
         if label == baseline or label not in files:
             raise ValueError('--candidate-repeat must name a non-baseline label in --captures')
+        _independent_capture_paths([files[label], path])
         f, s, _ph, _c = measure.load_text_export(path)
         candidate_repeats[label] = measure.resample_log(f, s, freqs)
         live &= measure.support_mask(f, freqs)
     notes = []
+    if args.repeat and (not _capture_id(files[baseline]) or not _capture_id(args.repeat)):
+        notes.append('baseline repeat provenance is unknown; confirm that both are separate full MMM passes')
+    for label, path in repeat_files.items():
+        if not _capture_id(files[label]) or not _capture_id(path):
+            notes.append('%s repeat provenance is unknown; confirm separate full MMM passes' % label)
     if args.ambient:
         f, s, _ph, _c = measure.load_text_export(args.ambient)
         all_runs = list(captures.values()) + list(candidate_repeats.values())
@@ -2854,6 +2905,10 @@ def main():
     ast.add_argument('--spec', required=True, help='version-1 audible study manifest; paths relative to this file')
     ast.add_argument('--out')
 
+    cc = sub.add_parser('corpus-check', help='replay hashed real-car before/after sessions')
+    cc.add_argument('--spec', required=True, help='version-1 local corpus index')
+    cc.add_argument('--out')
+
     sp = sub.add_parser('stereo-propose', help='shared voicing and limited side-specific cuts, judged together')
     sp.add_argument('--left', nargs='+', required=True)
     sp.add_argument('--right', nargs='+', required=True)
@@ -2986,6 +3041,8 @@ def main():
     vf.add_argument('--bands', nargs='+', metavar='F,Q,G', help='bands actually written')
     vf.add_argument('--old-bands', nargs='+', metavar='F,Q,G', help='bands they replaced')
     vf.add_argument('--dsp-rate', type=float, required=True)
+    vf.add_argument('--capture', choices=('positions', 'mmm'), default='positions',
+                    help='treat repeated full MMM passes as equal-power runs; default preserves fixed-position analysis')
     vf.add_argument('--target', default='default')
     vf.add_argument('--noise-db', type=float, default=0.3,
                     help='resolution when before/after were each captured once')
@@ -3325,6 +3382,21 @@ def _check_report_out(args):
 def _dispatch(args):
     if args.cmd == 'selftest':
         _selftest()
+    elif args.cmd == 'corpus-check':
+        import audible_study
+        import corpus
+        _check_report_out(args)
+        with open(args.spec, encoding='utf-8-sig') as fh:
+            spec = json.load(fh)
+        audible_study.protect_output(spec, os.path.dirname(os.path.abspath(args.spec)), args.out)
+        report = corpus.replay(spec, os.path.dirname(os.path.abspath(args.spec)))
+        text = json.dumps(report, indent=2, allow_nan=False)
+        if args.out:
+            with open(args.out, 'w', encoding='utf-8') as fh:
+                fh.write(text)
+            print('wrote %s' % args.out)
+        else:
+            print(text)
     elif args.cmd == 'audible-study':
         import audible_study
         _check_report_out(args)

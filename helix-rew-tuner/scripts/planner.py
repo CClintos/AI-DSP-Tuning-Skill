@@ -95,8 +95,11 @@ def plan(goals, chans=None, sample_rate=48000, fft=65536, seconds=25.0, mic_mode
         'peak': 'Peak hold at its maximum and Peak decay 0 dB/s, so "Save both" keeps the whole '
                 'capture\'s peak',
         'engine': 'engine off, doors and windows closed, fan off',
-        'movement': 'move the mic slowly and evenly through the head space of the judged seat '
-                    '(ear to ear, forehead to headrest) for the whole capture; hold the cable still',
+        'movement': 'use the same small path around the judged seat head area each pass: '
+                    'left ear, centre, right ear and normal fore-aft extent; spend similar time '
+                    'in each part, move slowly, and hold the cable still',
+        'repeat_provenance': 'a fresh full pass is an independent repeat; two halves exported '
+                             'from one recording only describe within-pass consistency',
     }
     levels = {
         'full_system': 'near your normal listening level (about 75-85 dB C): it beats the movement '

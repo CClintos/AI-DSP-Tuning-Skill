@@ -68,7 +68,7 @@ before correcting, and prefer doing less.**
   - [What the DSP actually applied](#what-the-dsp-actually-applied-raw-xo-eq)
   - [Voicing for the listening level and the road](#voicing-for-the-listening-level-and-the-road)
   - [Learning the listener's voicing](#learning-the-listeners-voicing-from-blind-abs)
-  - [Frame-level MMM](#frame-level-mmm-one-run-that-measures-its-own-repeatability)
+  - [Frame-level MMM](#frame-level-mmm-one-run-that-checks-its-internal-consistency)
   - [The skill's own test signals](#the-skills-own-test-signals-experimental)
   - [Validating these tools on a real car](#validating-these-tools-on-a-real-car-one-evening)
 - [Finishing touches after the curve](#finishing-touches-after-the-curve)
@@ -2254,10 +2254,10 @@ keep one only if it wins blind. Values outside the tested range
 are extrapolations; fewer than about 20 decided choices give wide intervals.
 The preferred values feed `--voice` as the taste layer on the target.
 
-### Frame-level MMM: one run that measures its own repeatability
+### Frame-level MMM: one run that checks its internal consistency
 
 REW shows the mean of a capture's FFT blocks and discards them. Kept, the
-blocks of one run give the spread across the path, split-half repeatability
+blocks of one run give the spread across the path, split-half consistency
 (first half of the path against the second), a robust mean without handling
 bumps, the peak trace and the capture length. Two read-only sources:
 
@@ -2268,11 +2268,11 @@ bumps, the peak trace and the capture length. Two read-only sources:
   averaging set to None polls the captured data by GET (each new sample count
   is one block; no subscription is registered), then `frames --api-frames`.
 
-It writes mean, robust, peak and half-path text exports. `--positions HALF1
-HALF2 --capture mmm` then turns on the repeatability-gated paths from one
-capture: verify thresholds, `mmm-compare` resolution, Q above the single-run
-cap where the response is stable. Each half covers half the path, so the
-figure is conservative by about sqrt(2). Without `--spl-offset-db` levels are
+It writes mean, robust, peak and half-path text exports. Each carries the
+source capture ID. The two halves diagnose uneven coverage within a pass;
+they cannot establish fresh-run repeatability or justify a narrower filter.
+Use the robust export as one capture and record a new complete pass for
+repeatability-gated paths. Without `--spl-offset-db` levels are
 dBFS; the mic cal file's response correction is applied, its sensitivity not.
 
 ### The skill's own test signals (experimental)

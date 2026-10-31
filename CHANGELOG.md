@@ -2,6 +2,24 @@
 
 Newest first. Version numbers match `metadata.version` in `helix-rew-tuner/SKILL.md`.
 
+## 1.25.0
+
+- **MMM evidence authority.** `frames` tags every export from a source recording
+  with its SHA-256 capture ID and labels the half-path result as within-pass
+  consistency. Repeatability-gated MMM comparisons reject two files from the
+  same known recording; multi-pass MMM analysis does too.
+- **Repeated-pass pooling.** Independent MMM passes are averaged in linear
+  power while fixed-position spatial analysis retains its existing treatment.
+- **Consistent measured candidate judgment.** `verify` and measured crossover
+  review now include the same fixed-anchor scorecard as the candidate
+  judging path, alongside their existing regional and timing guards.
+- **Real-car validation route.** `corpus-check` replays hashed local before and
+  after sessions, enforces independent recordings and held-out
+  vehicle/listener groups, and reports objective and blind outcomes. No
+  real-car corpus or revised universal weights are bundled.
+- `capture-plan` specifies a repeatable small ear-centred MMM movement and
+  makes the distinction between a full repeat pass and split halves explicit.
+
 ## 1.24.0
 
 - **Listening sheet.** `assets/emma_listening_sheet.html` is the 280-point EMMA

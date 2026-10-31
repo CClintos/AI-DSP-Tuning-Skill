@@ -4632,6 +4632,19 @@ def _mmm_rms(freqs, values, sel):
     return float(np.sqrt(np.average(np.asarray(values)[sel] ** 2, weights=w ** 2)))
 
 
+def mmm_power_pool(runs_db):
+    """Equal completed-pass power mean; inputs share calibration and source level.
+
+    A pass is already a power average across its own FFT blocks. This combines
+    independent passes, without re-anchoring or hiding a real level change.
+    """
+    runs = np.asarray(runs_db, dtype=float)
+    if runs.ndim != 2 or runs.shape[0] < 2 or not np.isfinite(runs).all():
+        raise ValueError('MMM pooling needs two or more finite runs on one axis')
+    peak = np.max(runs, axis=0)
+    return peak + 10.0 * np.log10(np.mean(10.0 ** ((runs - peak) / 10.0), axis=0))
+
+
 def capture_repeatability(freqs, runs_db, band=(20.0, 16000.0), support=None):
     """Same-tune uncertainty after one broadband level alignment per run.
 

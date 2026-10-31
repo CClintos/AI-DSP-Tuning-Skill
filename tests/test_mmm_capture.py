@@ -103,7 +103,7 @@ class MmmSemanticsTests(Cli):
         self.assertEqual(cap["runs"], 2)
         self.assertGreater(cap["verification_noise_db"], 0.05)
         self.assertLess(cap["verification_noise_db"], 0.5)
-        self.assertEqual(a["meta"]["deviation_source"], "mean of 2 MMM runs")
+        self.assertEqual(a["meta"]["deviation_source"], "power mean of 2 MMM runs")
         self.assertFalse(any("spatial_consistency" in n for n in a["notes"]))
 
     def test_a_phase_column_on_an_mmm_capture_is_ignored(self):

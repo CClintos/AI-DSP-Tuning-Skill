@@ -723,7 +723,7 @@ class FramesAndSignals(_Tmp):
         f, s, _p, _c = measure.load_text_export(r["files"]["mean"])
         at = s[np.argmin(np.abs(f - 1000))]
         self.assertAlmostEqual(at, -20.0, delta=0.6)
-        self.assertIsNotNone(r["split_half_repeatability"]["noise_db"])
+        self.assertIsNotNone(r["within_capture_consistency"]["noise_db"])
         for k in ("half1", "half2", "peak", "robust"):
             self.assertTrue(Path(r["files"][k]).exists())
 

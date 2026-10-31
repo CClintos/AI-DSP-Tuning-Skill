@@ -10,7 +10,7 @@ description: >-
   after a tune change; or prepare for EMMA sound-quality judging. Not for
   home or studio room EQ, and not for writing other brands' DSP files.
 metadata:
-  version: "1.24.0"
+  version: "1.25.0"
 ---
 
 # Helix / REW car-audio tuner

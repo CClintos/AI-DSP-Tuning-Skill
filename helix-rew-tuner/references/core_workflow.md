@@ -62,6 +62,7 @@ settings and limits. Both only read.
 | `voice-match` | Level-match actual measured candidate system responses before blind preference tests. | `references/audible_tuning.md` |
 | `audible-study` | Compare measured crossover finalists, multitone workload, warm output, bass across the driver's head area, stage/volume listening, and repeatable physical noise symptoms. | `references/audible_tuning.md` |
 | `quality-check` | Evidence-aware candidate judging from a version-1 manifest: repeated tone captures, per-band compression, noise-qualified distortion, L/R regression and full-chain spectral headroom. Missing checks remain unknown. | `references/measurement_judging.md` |
+| `corpus-check` | Replay a private, hashed real-car before/after corpus with independent capture checks and vehicle/listener held-out groups. Use its outputs to test whether the current score agrees with blind matched-level preference. | `references/measurement_authority.md` |
 | `source-audit` | Is the signal entering the DSP level-independent? `--at ref.txt=0 down6.txt=-6 ...`; it names the source as the cause only with `--electrical`. | §Audit the source |
 | `imaging` | Image position against frequency from solo L/R (`--solo-l --solo-r`). `--near-side left` or `right` adds the centring options; `--bands emma` uses the EMMA instrument ranges. | §Image position is frequency-dependent |
 | `junction` | One crossover's phase score, sum loss and four-estimator delay consensus: `--lower --upper --crossover HZ [--direct-sound]`. | §Reading a junction |
@@ -69,7 +70,7 @@ settings and limits. Both only read.
 | `ab-make` / `ab-result` | Blind, loudness-matched A/B of two tunes. | §Judge by ear only at matched loudness |
 | `mmm-compare` | Rank MMM captures of different settings over one band (default `balanced`). For a close final touch-up, add `--repeat A2.txt --candidate-repeat trial=B2.txt`: both candidate runs must beat both baseline runs, using the same anchor and the worse repeat disagreement. | §MMM-first tuning |
 | `lr-match` | Left/right tonal match from half-system captures (`--target <curve>`). Corrects only target-supported excess and never copies a dip onto the good side. | §MMM-first tuning |
-| `verify` | Did a written change land? Before vs after captures, `--dsp-rate`. | §MMM-first tuning |
+| `verify` | Did a written change land? Before vs after captures, `--dsp-rate`; use `--capture mmm` for repeated full moving-mic passes. | §MMM-first tuning |
 | `voice-variants` | Single-filter voicing variants of a finished tune, for a blind A/B: bass, treble, presence, height (near 8 kHz) and distance (near 4 kHz). | §MMM-first tuning |
 | `emma-volume` / `noise-check` | EMMA's 6 dB-louder balance check / system noise (off vs on, playing silence). | §Preparing for EMMA |
 | `finish` | After the sum is on target: residual broad peaks (cut these, not dips), each EMMA instrument band imaging in one place (centre and focus), overlapping passbands between drivers at different heights (`--low`/`--high`), sub leakage and harmonics, bass decay (`--ir`). `--heard` reads a listening sheet (`assets/emma_listening_sheet.html`) against all of it. Writes nothing; each finding names its fix. | §Finishing touches after the curve |
@@ -80,7 +81,7 @@ settings and limits. Both only read.
 | `xo-check` | The crossover and PEQ the DSP applied, from RAW/XO/EQ captures, against the `.afpx` (or stated `--hp/--lp/--peq`). | §What the DSP actually applied |
 | `listening-level` / `road-noise` | Voicing options for your listening level (ISO 226) and for road noise (a passenger's capture). Blind A/B options, never corrections. | §Voicing for the listening level and the road |
 | `prefs` | Your preferred voicing, with uncertainty, and the next A/B pair, from `ab_log.json`. | §Learning the listener's voicing |
-| `frames` | One MMM run's own repeatability, robust mean and peak trace, from a WAV recording or `rew_api.py rta-frames`. | §Frame-level MMM |
+| `frames` | One MMM run's within-pass consistency, robust mean and peak trace, from a WAV recording or `rew_api.py rta-frames`. Separate full passes establish repeatability. | §Frame-level MMM |
 | `trust-check` | After a validation evening (the `validate` goal of `capture-plan`): is `mmm-align`, the stability map, `frames` or the test signal trusted, advisory or to remove on this car, each checked against an independent measurement of the same thing. | §Validating these tools on a real car |
 | `selftest` | Synthetic self-test, including this document's section references. | — |
 
